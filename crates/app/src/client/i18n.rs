@@ -59,7 +59,7 @@ pub fn t(key: &str) -> &str {
 
         "working.elapsed" => "Je werkt al",
         "working.stop_hint" => "Tik als je naar huis gaat.",
-        "working.break_note" => "Pauze van {} wordt automatisch afgetrokken.",
+        "working.break_rule" => "Na {} wordt {} pauze afgetrokken.",
 
         "zone.title" => "Je bent niet op school",
         "zone.no_location_title" => "We weten niet waar je bent",
@@ -105,6 +105,23 @@ pub fn format_duration(total_minutes: u32) -> String {
     }
 }
 
+/// The site's break rule for the working screen, e.g. `Na 6 u wordt 30 min pauze afgetrokken.`.
+/// `None` when the rule deducts nothing.
+pub fn break_rule_note(break_minutes: u32, after_minutes: u32) -> Option<String> {
+    if break_minutes == 0 {
+        return None;
+    }
+    let after = if after_minutes >= 60 && after_minutes.is_multiple_of(60) {
+        format!("{} u", after_minutes / 60)
+    } else {
+        format_duration(after_minutes)
+    };
+    Some(fill(
+        &fill(t("working.break_rule"), &after),
+        &format_duration(break_minutes),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,10 +143,20 @@ mod tests {
 
     #[test]
     fn fill_replaces_placeholder() {
+        assert_eq!(fill("Pauze van {}.", "30 min"), "Pauze van 30 min.");
+    }
+
+    #[test]
+    fn break_rule_note_formats_rule() {
         assert_eq!(
-            fill(t("working.break_note"), "30 min"),
-            "Pauze van 30 min wordt automatisch afgetrokken."
+            break_rule_note(30, 360).as_deref(),
+            Some("Na 6 u wordt 30 min pauze afgetrokken.")
         );
+        assert_eq!(
+            break_rule_note(45, 390).as_deref(),
+            Some("Na 6 u 30 wordt 45 min pauze afgetrokken.")
+        );
+        assert_eq!(break_rule_note(0, 360), None);
     }
 
     #[test]

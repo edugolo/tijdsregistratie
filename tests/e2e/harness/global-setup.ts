@@ -7,7 +7,7 @@ import * as path from 'node:path';
 import { Client } from 'pg';
 
 const REPO = path.resolve(__dirname, '../../..');
-const CARGO_TARGET_DIR = process.env.CARGO_TARGET_DIR ?? '/srv/cache/cargo-build/tijdsregistratie';
+const CARGO_TARGET_DIR = process.env.CARGO_TARGET_DIR ?? path.join(REPO, 'target');
 const SERVER_BIN = path.join(CARGO_TARGET_DIR, 'dx/app/debug/web/server');
 
 /** Minimal KEY=VALUE reader for the repository's .env (values are never printed). */

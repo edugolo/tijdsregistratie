@@ -39,6 +39,9 @@ pub struct TodayDto {
     pub last_stop: Option<DateTime<Utc>>,
     pub worked_minutes: u32,
     pub break_minutes: u32,
+    /// The site's break rule: minutes deducted once the day passes `break_after_minutes`.
+    pub break_rule_minutes: u32,
+    pub break_after_minutes: u32,
     /// A start without a stop yet.
     pub open: bool,
     pub site_name: Option<String>,

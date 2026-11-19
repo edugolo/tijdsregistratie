@@ -262,6 +262,8 @@ pub async fn today_for(
         last_stop: summary.last_stop,
         worked_minutes: summary.net_minutes,
         break_minutes: summary.break_minutes,
+        break_rule_minutes: rule.minutes,
+        break_after_minutes: rule.applies_after_minutes,
         open: summary.open,
         site_name: name_of(&ctx.sites, site_id),
         stale_open_since,

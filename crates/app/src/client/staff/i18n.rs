@@ -8,7 +8,6 @@ pub fn t(key: &str) -> &str {
         "staff.nav.people" => "Personen",
         "staff.nav.org" => "Organisatie",
         "staff.nav.label" => "Hoofdmenu",
-        "staff.org" => "Tijdsregistratie",
         "staff.logout" => "Afmelden",
         "staff.loading" => "Even geduld.",
         "staff.err.generic" => "Er ging iets mis. Probeer het opnieuw.",

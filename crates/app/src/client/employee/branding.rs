@@ -22,8 +22,9 @@ pub fn use_org_name() -> String {
 
 fn org_name(branding: Option<&Branding>) -> String {
     branding
-        .map(|b| b.short_name.trim())
-        .filter(|name| !name.is_empty())
+        .into_iter()
+        .flat_map(|b| [b.short_name.trim(), b.display_name.trim()])
+        .find(|name| !name.is_empty())
         .unwrap_or(FALLBACK_NAME)
         .to_string()
 }
@@ -71,5 +72,10 @@ mod tests {
             ..Branding::default()
         };
         assert_eq!(org_name(Some(&b)), "Voorbeeld tijd");
+        let b = Branding {
+            display_name: "Scholengroep Voorbeeld".into(),
+            ..Branding::default()
+        };
+        assert_eq!(org_name(Some(&b)), "Scholengroep Voorbeeld");
     }
 }

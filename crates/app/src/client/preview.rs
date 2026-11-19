@@ -77,7 +77,7 @@ fn screen(id: &str) -> Element {
             }
         },
         "e5" => {
-            rsx! { Working { org_name: org(), person_name: person(), started_time: started, elapsed_minutes: 135, break_minutes: 30, notice: None, failed: false, busy: false, on_stop: noop() } }
+            rsx! { Working { org_name: org(), person_name: person(), started_time: started, elapsed_minutes: 135, break_rule_minutes: 30, break_after_minutes: 360, notice: None, failed: false, busy: false, on_stop: noop() } }
         }
         "e6" => {
             rsx! { OutOfZone { org_name: org(), person_name: person(), saved_time: started, on_ok: noop() } }

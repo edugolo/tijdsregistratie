@@ -4,7 +4,7 @@ use crate::client::components::{
     ActionKind, DaySummaryCard, Icon, MainActionButton, NoticeCard, PrimaryButton, Screen,
     SecondaryButton, StatusChip, Tone,
 };
-use crate::client::i18n::{fill, format_duration, t};
+use crate::client::i18n::{break_rule_note, format_duration, t};
 
 /// A message from the manager, shown unobtrusively on the home screen.
 #[derive(Clone, PartialEq)]
@@ -65,7 +65,8 @@ pub fn Working(
     person_name: String,
     started_time: String,
     elapsed_minutes: u32,
-    break_minutes: u32,
+    break_rule_minutes: u32,
+    break_after_minutes: u32,
     #[props(default)] notice: Option<String>,
     #[props(default)] failed: bool,
     busy: bool,
@@ -84,8 +85,8 @@ pub fn Working(
             p { class: "text-sub", {t("working.stop_hint")} }
             Feedback { notice, failed, on_retry: on_stop }
             div { class: "spacer" }
-            p { class: "text-sub text-small",
-                {fill(t("working.break_note"), &format_duration(break_minutes))}
+            if let Some(note) = break_rule_note(break_rule_minutes, break_after_minutes) {
+                p { class: "text-sub text-small", {note} }
             }
         }
     }

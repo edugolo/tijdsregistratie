@@ -82,7 +82,7 @@ fn FrameBody(ctx: StaffContext, active: StaffNav, children: Element) -> Element 
     use_context_provider(|| ctx);
     rsx! {
         StaffShell {
-            org_name: t("staff.org").to_string(),
+            org_name: crate::client::employee::use_org_name(),
             person_name: first_name,
             is_admin,
             active,

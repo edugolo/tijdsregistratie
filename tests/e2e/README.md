@@ -22,8 +22,7 @@ npx playwright test
 
 The global setup (`harness/global-setup.ts`):
 
-1. builds with `dx build --package app` (`CARGO_TARGET_DIR` defaults to
-   `/srv/cache/cargo-build/tijdsregistratie`; set `E2E_SKIP_BUILD=1` to reuse the last build),
+1. builds with `dx build --package app` (uses your `CARGO_TARGET_DIR` if set, else cargo's default `target/`; set `E2E_SKIP_BUILD=1` to reuse the last build),
 2. creates a database `tijd_e2e_<random>` and throwaway key files in a temp dir (mode 0600),
 3. starts the server on `127.0.0.1:<free port>` and reads the `Setup code:` line from its output,
 4. drops the database, removes the keys and stops the server afterwards.
