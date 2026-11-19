@@ -1,6 +1,9 @@
 //! Server-only code: auth, sessions, repository. Server function declarations live in `crate::api`.
 
+pub mod auth;
 pub mod config;
+pub mod crypto_ext;
+pub mod repo;
 pub mod session;
 pub mod state;
 
@@ -30,13 +33,25 @@ pub async fn session() -> Result<Session, ServerFnError> {
 /// Builds the axum router: Dioxus app and server functions, with state and session layers.
 pub async fn build_router(app: fn() -> dioxus::prelude::Element) -> anyhow::Result<axum::Router> {
     let config = config::AppConfig::from_env()?;
+    let keys = crypto::DataKeys::from_file(&config.data_key_file).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot load data key from DATA_KEY_FILE ({}): {e}",
+            config.data_key_file.display()
+        )
+    })?;
+    let blind = crypto::BlindIndexKey::from_file(&config.blind_index_key_file).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot load blind index key from BLIND_INDEX_KEY_FILE ({}): {e}",
+            config.blind_index_key_file.display()
+        )
+    })?;
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(10)
         .connect(&config.database_url)
         .await?;
     sqlx::migrate!("../../migrations").run(&pool).await?;
     let session_layer = session::layer(pool.clone(), config.cookie_secure).await?;
-    let state = AppState::new(pool, config)?;
+    let state = AppState::new(pool, config, keys, blind)?;
     Ok(dioxus::server::router(app)
         .layer(Extension(state))
         .layer(session_layer))

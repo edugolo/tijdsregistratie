@@ -143,6 +143,7 @@ dependencies = [
  "chrono",
  "crypto",
  "dioxus",
+ "domain",
  "js-sys",
  "serde",
  "serde_json",

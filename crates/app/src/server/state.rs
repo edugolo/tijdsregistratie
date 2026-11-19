@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crypto::{BlindIndexKey, DataKeys};
 use sqlx::PgPool;
 use webauthn_rs::{Webauthn, WebauthnBuilder, prelude::Url};
 
@@ -14,11 +15,17 @@ pub struct AppState {
     pub pool: PgPool,
     pub webauthn: Arc<Webauthn>,
     pub config: Arc<AppConfig>,
-    // TODO(T5): crypto keys
+    pub keys: Arc<DataKeys>,
+    pub blind: Arc<BlindIndexKey>,
 }
 
 impl AppState {
-    pub fn new(pool: PgPool, config: AppConfig) -> anyhow::Result<Self> {
+    pub fn new(
+        pool: PgPool,
+        config: AppConfig,
+        keys: DataKeys,
+        blind: BlindIndexKey,
+    ) -> anyhow::Result<Self> {
         let origin = Url::parse(&config.app_origin)?;
         let webauthn = WebauthnBuilder::new(&config.rp_id, &origin)?
             .rp_name(RP_NAME)
@@ -27,6 +34,8 @@ impl AppState {
             pool,
             webauthn: Arc::new(webauthn),
             config: Arc::new(config),
+            keys: Arc::new(keys),
+            blind: Arc::new(blind),
         })
     }
 }
