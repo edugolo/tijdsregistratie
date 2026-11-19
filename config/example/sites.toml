@@ -1,0 +1,20 @@
+# Example sites file for `admin seed-sites --file sites.toml`.
+# Sites are matched by exact name: existing sites are updated, new ones are created.
+# All names, addresses and coordinates below are fictional.
+
+[[site]]
+name = "Voorbeeldschool Noord"
+address = "Voorbeeldstraat 1, 9999 Voorbeeldstad"
+lat = 51.0000
+lng = 4.0000
+radius_m = 120
+break_minutes = 30         # optional, default 30
+break_after_minutes = 360  # optional, default 360
+zone_policy = "flag"       # optional: "flag" (default) or "block"
+
+[[site]]
+name = "Voorbeeldschool Zuid"
+address = "Proefplein 2, 9999 Voorbeeldstad"
+lat = 51.0100
+lng = 4.0200
+radius_m = 90
