@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tijdsregistratie flows</title>
+<style>
+  body{margin:0;padding:20px;font-family:var(--font-sans,system-ui,sans-serif);background:var(--background,#fff);color:var(--foreground,#171717)}
+  h1{font-size:20px;margin:0 0 4px}
+  h2{font-size:16px;margin:28px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--border,#e5e5e5)}
+  p.lead{margin:0 0 8px;color:var(--muted-foreground,#666);font-size:13px}
+  .legend{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;margin:8px 0 4px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:10px;height:10px;border-radius:3px;display:inline-block}
+  .a-mgr{--lane:#7c3aed}.a-emp{--lane:#0284c7}.a-srv{--lane:#64748b}
+  .flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;row-gap:12px}
+  .step{position:relative;width:170px;box-sizing:border-box;padding:10px 12px;border-radius:10px;
+        background:var(--card,#fafafa);color:var(--card-foreground,#171717);border:1px solid var(--border,#e5e5e5);
+        border-left:4px solid var(--lane);font-size:12.5px;line-height:1.35}
+  .step b{display:block;font-size:11px;color:var(--lane);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px}
+  .step .n{position:absolute;top:-8px;right:-6px;background:var(--lane);color:#fff;border-radius:999px;font-size:10px;width:18px;height:18px;display:grid;place-items:center}
+  .conn{width:26px;display:grid;place-items:center;color:var(--muted-foreground,#888)}
+  .branch{margin-top:10px;font-size:12px;padding:8px 12px;border-radius:8px;background:var(--muted,#f4f4f5);color:var(--muted-foreground,#555)}
+  .branch b{color:var(--foreground,#171717)}
+  /* screens */
+  .screens{display:flex;flex-wrap:wrap;gap:22px}
+  .scr{width:220px}
+  .cap{font-size:12px;color:var(--muted-foreground,#666);margin-top:8px;line-height:1.35}
+  .cap b{color:var(--foreground,#171717)}
+  .phone{width:220px;height:440px;border-radius:30px;background:#111;padding:8px;box-sizing:border-box;box-shadow:0 4px 18px rgba(0,0,0,.15)}
+  .ui{--g:#16a34a;--r:#dc2626;--o:#d97706;--ink:#0f172a;--sub:#64748b;--bg:#f8fafc;--brand:#1e3a8a;
+      width:100%;height:100%;border-radius:23px;background:var(--bg);color:var(--ink);overflow:hidden;display:flex;flex-direction:column;
+      font-family:system-ui,sans-serif;position:relative}
+  .ui .top{height:22px;display:flex;justify-content:center;align-items:center}
+  .ui .top i{width:60px;height:6px;border-radius:9px;background:#0002}
+  .ui .bar{display:flex;align-items:center;justify-content:space-between;padding:4px 14px 8px;font-size:11px;color:var(--sub)}
+  .ui .logo{font-weight:700;color:var(--brand);font-size:12px}
+  .ui .body{flex:1;display:flex;flex-direction:column;align-items:center;padding:6px 16px 16px;text-align:center;gap:8px}
+  .ui h3{margin:6px 0 0;font-size:17px}
+  .ui .t{font-size:12.5px;color:var(--sub);line-height:1.4;margin:0}
+  .ui .big{width:150px;height:150px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:800;font-size:24px;letter-spacing:.02em;margin:10px 0 4px;box-shadow:0 6px 16px rgba(0,0,0,.18)}
+  .ui .btn{width:100%;padding:12px;border-radius:12px;background:var(--brand);color:#fff;font-weight:600;font-size:14px;text-align:center;box-sizing:border-box}
+  .ui .btn.ghost{background:transparent;color:var(--brand);border:1.5px solid var(--brand)}
+  .ui .spacer{flex:1}
+  .ui .ico{width:64px;height:64px;border-radius:18px;display:grid;place-items:center;margin-top:14px}
+  .ui .pill{font-size:11px;padding:4px 9px;border-radius:99px;display:inline-flex;gap:5px;align-items:center}
+  .ui .card{width:100%;background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:10px;box-sizing:border-box;text-align:left;font-size:12px}
+  .ui .row{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid #f1f5f9;font-size:12px}
+  .ui .row:last-child{border-bottom:0}
+  .ui .chip{font-size:10px;padding:2px 7px;border-radius:99px}
+  .ui .mini{font-size:10.5px;padding:5px 8px;border-radius:8px;background:var(--brand);color:#fff;font-weight:600}
+  .ui ol{margin:4px 0 0;padding-left:18px;text-align:left;font-size:12.5px;line-height:1.6}
+  .desk{width:460px;height:300px;border-radius:12px;background:#e2e8f0;padding:8px;box-sizing:border-box;box-shadow:0 4px 18px rgba(0,0,0,.12)}
+  .desk .ui{border-radius:6px}
+  @media (max-width:520px){.desk{width:100%}}
+</style>
+</head>
+<body>
+
+<h1>Tijdsregistratie: flows en schermen (eerste versie)</h1>
+<p class="lead">Inloggen met een passkey, locatie toestaan, starten en stoppen. Inschrijving gebeurt één keer, persoonlijk, bij de lokale verantwoordelijke.</p>
+<div class="legend">
+  <span><i class="dot" style="background:#7c3aed"></i>Verantwoordelijke</span>
+  <span><i class="dot" style="background:#0284c7"></i>Medewerker</span>
+  <span><i class="dot" style="background:#64748b"></i>Server</span>
+</div>
+
+<!-- connector icon -->
+<svg width="0" height="0" style="position:absolute"><defs>
+  <symbol id="chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+</defs></svg>
+
+<h2>Flow 1: inschrijving (één keer per medewerker)</h2>
+<div class="flow">
+  <div class="step a-mgr"><span class="n">1</span><b>Verantwoordelijke</b>Opent "Mijn team", kiest de medewerker en tikt op "Koppel toestel".</div>
+  <div class="conn"><svg width="18" height="18"><use href="#chev"/></svg></div>
+  <div class="step a-srv"><span class="n">2</span><b>Server</b>Maakt een eenmalige code: 15 min geldig, één keer bruikbaar, enkel voor deze persoon. Bewaart wie ze uitgaf.</div>
+  <div class="conn"><svg width="18" height="18"><use href="#chev"/></svg></div>
+  <div class="step a-mgr"><span class="n">3</span><b>Verantwoordelijke</b>Toont de QR-code op het scherm en herkent de persoon die ervoor staat.</div>
+  <div class="conn"><svg width="18" height="18"><use href="#chev"/></svg></div>
+  <div class="step a-emp"><span class="n">4</span><b>Medewerker</b>Scant met de camera van de eigen gsm. De app opent in de browser.</div>
+  <div class="conn"><svg width="18" height="18"><use href="#chev"/></svg></div>
+  <div class="step a-emp"><span class="n">5</span><b>Medewerker</b>Installeert de app (Android: knop, iPhone: 3 stappen).</div>
+  <div class="conn"><svg width="18" height="18"><use href="#chev"/></svg></div>
+  <div class="step a-emp"><span class="n">6</span><b>Medewerker</b>"Maak je sleutel aan": vingerafdruk of gezicht. Passkey staat op de gsm.</div>
+  <div class="conn"><svg width="18" height="18"><use href="#chev"/></svg></div>
+  <div class="step a-srv"><span class="n">7</span><b>Server</b>Bewaart de publieke sleutel, sluit de code af, meldt "gekoppeld" bij de verantwoordelijke.</div>
+  <div class="conn"><svg width="18" height="18"><use href="#chev"/></svg></div>
+  <div class="step a-emp"><span class="n">8</span><b>Medewerker</b>Leest de uitleg over locatie en geeft toestemming.</div>
+</div>
+<div class="branch"><b>Nieuwe of verloren gsm:</b> dezelfde flow. De verantwoordelijke kan de oude sleutel intrekken. <b>Code verlopen:</b> opnieuw "Koppel toestel".</div>
+
+<h2>Flow 2: elke dag starten en stoppen</h2>
+<div class="flow">
+  <div class="step a-emp"><span class="n">1</span><b>Medewerker</b>Opent de app. Sessie is nog geldig (90 dagen), dus meteen het startscherm.</div>
+  <div class="conn"><svg width="18" height="18"><use href="#chev"/></svg></div>
+  <div class="step a-emp"><span class="n">2</span><b>Medewerker</b>Tikt op de grote knop START.</div>
+  <div class="conn"><svg width="18" height="18"><use href="#chev"/></svg></div>
+  <div class="step a-emp"><span class="n">3</span><b>Toestel</b>Leest één keer de locatie (GPS, max 10 s).</div>
+  <div class="conn"><svg width="18" height="18"><use href="#chev"/></svg></div>
+  <div class="step a-srv"><span class="n">4</span><b>Server</b>Zet de tijd (servertijd telt), berekent de afstand tot de eigen scholen: in zone / buiten zone / onzeker / geen locatie.</div>
+  <div class="conn"><svg width="18" height="18"><use href="#chev"/></svg></div>
+  <div class="step a-emp"><span class="n">5</span><b>Medewerker</b>Ziet "Gestart om 07:42". De knop wordt STOP.</div>
+  <div class="conn"><svg width="18" height="18"><use href="#chev"/></svg></div>
+  <div class="step a-emp"><span class="n">6</span><b>Medewerker</b>'s Avonds: STOP, zelfde controle, "Gestopt om 15:30" plus totaal van de dag.</div>
+</div>
+<div class="branch"><b>Sessie verlopen:</b> eerst één tik op "Aanmelden" met gezicht of vingerafdruk. <b>Buiten zone:</b> de registratie wordt toch bewaard, maar gemarkeerd voor de verantwoordelijke. <b>Geen netwerk:</b> de actie wacht op het toestel en wordt verstuurd zodra er verbinding is.</div>
+
+<h2>Schermen: verantwoordelijke</h2>
+<div class="screens">
+  <div class="scr" style="width:460px;max-width:100%">
+    <div class="desk"><div class="ui">
+      <div class="bar" style="padding-top:10px;border-bottom:1px solid #e2e8f0"><span class="logo">EDUGO tijd</span><span>BS De Linde · Els (verantwoordelijke)</span></div>
+      <div style="padding:10px 14px;text-align:left;flex:1">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><strong style="font-size:14px">Mijn team</strong><span class="chip" style="background:#eef2ff;color:#1e3a8a">6 medewerkers</span></div>
+        <div class="card" style="padding:4px 10px">
+          <div class="row"><span>Fatima El Amrani</span><span style="display:flex;gap:8px;align-items:center"><span class="chip" style="background:#fef3c7;color:#92400e">Geen toestel</span><span class="mini">Koppel toestel</span></span></div>
+          <div class="row"><span>Jan Peeters</span><span class="chip" style="background:#dcfce7;color:#166534">Gekoppeld</span></div>
+          <div class="row"><span>Marta Kowalska</span><span class="chip" style="background:#dcfce7;color:#166534">Gekoppeld</span></div>
+          <div class="row"><span>Ahmed Yilmaz</span><span style="display:flex;gap:8px;align-items:center"><span class="chip" style="background:#fef3c7;color:#92400e">Geen toestel</span><span class="mini">Koppel toestel</span></span></div>
+          <div class="row"><span>Sofie De Smet</span><span class="chip" style="background:#dcfce7;color:#166534">Gekoppeld</span></div>
+        </div>
+      </div>
+    </div></div>
+    <div class="cap"><b>M1 · Mijn team.</b> Lijst van de eigen vestiging. Per persoon zie je of er een toestel gekoppeld is.</div>
+  </div>
+
+  <div class="scr" style="width:460px;max-width:100%">
+    <div class="desk"><div class="ui">
+      <div class="bar" style="padding-top:10px;border-bottom:1px solid #e2e8f0"><span class="logo">EDUGO tijd</span><span>Toestel koppelen</span></div>
+      <div style="display:flex;gap:16px;padding:14px;align-items:center;flex:1">
+        <svg id="qr" width="150" height="150" viewBox="0 0 29 29" style="background:#fff;border-radius:8px;padding:6px;flex:none;box-shadow:0 1px 4px #0002"></svg>
+        <div style="text-align:left">
+          <div style="font-size:15px;font-weight:700">Fatima El Amrani</div>
+          <p class="t" style="margin-top:6px">Laat Fatima deze code scannen met de camera van haar eigen gsm.</p>
+          <p class="t" style="margin-top:6px">Controleer dat de juiste persoon voor je staat.</p>
+          <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+            <span class="pill" style="background:#eef2ff;color:#1e3a8a">Nog 14:32 geldig</span>
+            <span class="pill" style="background:#f1f5f9;color:#475569">Annuleren</span>
+          </div>
+        </div>
+      </div>
+    </div></div>
+    <div class="cap"><b>M2 · QR-code.</b> Eenmalig, 15 minuten geldig. Zodra de passkey aangemaakt is, springt dit scherm naar "Gekoppeld".</div>
+  </div>
+</div>
+
+<h2>Schermen: medewerker (gsm)</h2>
+<div class="screens">
+
+  <div class="scr"><div class="phone"><div class="ui">
+    <div class="top"><i></i></div><div class="bar"><span class="logo">EDUGO tijd</span><span></span></div>
+    <div class="body">
+      <div class="ico" style="background:#eef2ff;color:#1e3a8a"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg></div>
+      <h3>Welkom Fatima</h3>
+      <p class="t">Zet de app op je gsm. Zo vind je hem altijd terug.</p>
+      <div class="spacer"></div>
+      <div class="btn">Installeer de app</div>
+      <p class="t" style="font-size:11px">Op een iPhone zie je 3 korte stappen.</p>
+    </div></div></div>
+    <div class="cap"><b>E1 · Welkom.</b> Geopend via de QR-code. Android krijgt een installatieknop.</div>
+  </div>
+
+  <div class="scr"><div class="phone"><div class="ui">
+    <div class="top"><i></i></div><div class="bar"><span class="logo">EDUGO tijd</span><span></span></div>
+    <div class="body">
+      <h3>Zet de app op je iPhone</h3>
+      <ol>
+        <li>Tik onderaan op <b>Deel</b> <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 3v12"/><path d="M8 7l4-4 4 4"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg></li>
+        <li>Kies <b>Zet op beginscherm</b></li>
+        <li>Tik op <b>Voeg toe</b></li>
+      </ol>
+      <div class="card" style="text-align:center;color:#64748b;font-size:11px">Open daarna de app via het nieuwe icoon.</div>
+      <div class="spacer"></div>
+      <div class="btn ghost">Klaar</div>
+    </div></div></div>
+    <div class="cap"><b>E1b · iPhone.</b> Apple heeft geen installatieknop, dus we tonen de stappen.</div>
+  </div>
+
+  <div class="scr"><div class="phone"><div class="ui">
+    <div class="top"><i></i></div><div class="bar"><span class="logo">EDUGO tijd</span><span></span></div>
+    <div class="body">
+      <div class="ico" style="background:#eef2ff;color:#1e3a8a"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M2 12a10 10 0 0 1 18-6"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M9 6.8a6 6 0 0 1 9 5.2v2"/></svg></div>
+      <h3>Maak je sleutel aan</h3>
+      <p class="t">Je gebruikt je vingerafdruk of je gezicht. Een wachtwoord is niet nodig.</p>
+      <div class="spacer"></div>
+      <div class="btn">Sleutel aanmaken</div>
+    </div></div></div>
+    <div class="cap"><b>E2 · Passkey.</b> De gsm vraagt zelf om vingerafdruk, gezicht of pincode.</div>
+  </div>
+
+  <div class="scr"><div class="phone"><div class="ui">
+    <div class="top"><i></i></div><div class="bar"><span class="logo">EDUGO tijd</span><span></span></div>
+    <div class="body">
+      <div class="ico" style="background:#ecfdf5;color:#16a34a"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/></svg></div>
+      <h3>Waarom je locatie?</h3>
+      <p class="t">Als je start of stopt, kijken we of je op school bent.</p>
+      <p class="t"><b style="color:#0f172a">We volgen je niet.</b> Tussendoor kijken we niets.</p>
+      <div class="spacer"></div>
+      <div class="btn">Ik begrijp het</div>
+      <p class="t" style="font-size:11px">Daarna vraagt je gsm om toestemming.</p>
+    </div></div></div>
+    <div class="cap"><b>E3 · Locatie.</b> Eén keer uitleg (AVG-transparantie), daarna de vraag van de browser.</div>
+  </div>
+
+  <div class="scr"><div class="phone"><div class="ui">
+    <div class="top"><i></i></div><div class="bar"><span class="logo">EDUGO tijd</span><span>Fatima</span></div>
+    <div class="body">
+      <h3>Goeiemorgen</h3>
+      <span class="pill" style="background:#ecfdf5;color:#166534"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 10c0 5-8 12-8 12S4 15 4 10a8 8 0 0 1 16 0"/></svg>BS De Linde</span>
+      <div class="big" style="background:var(--g)">START</div>
+      <p class="t">Tik om je dag te starten.</p>
+      <div class="spacer"></div>
+      <div class="card" style="font-size:11px;color:#64748b;display:flex;gap:8px;align-items:center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#1e3a8a" stroke-width="2"><path d="M22 17a2 2 0 0 1-2 2H6.83a2 2 0 0 0-1.41.59l-2.2 2.2A.71.71 0 0 1 2 21.29V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/></svg>Bericht van Els: morgen start om 8u.</div>
+    </div></div></div>
+    <div class="cap"><b>E4 · Startscherm.</b> Eén grote knop. Berichten bovenaan of onderaan, niet in de weg.</div>
+  </div>
+
+  <div class="scr"><div class="phone"><div class="ui">
+    <div class="top"><i></i></div><div class="bar"><span class="logo">EDUGO tijd</span><span>Fatima</span></div>
+    <div class="body">
+      <span class="pill" style="background:#ecfdf5;color:#166534;margin-top:8px"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6 9 17l-5-5"/></svg>Gestart om 07:42</span>
+      <p class="t" style="margin-top:4px">Je werkt al <b style="color:#0f172a">2 u 15</b></p>
+      <div class="big" style="background:var(--r)">STOP</div>
+      <p class="t">Tik als je naar huis gaat.</p>
+      <div class="spacer"></div>
+      <p class="t" style="font-size:11px">Pauze van 30 min wordt automatisch afgetrokken.</p>
+    </div></div></div>
+    <div class="cap"><b>E5 · Bezig.</b> Duidelijke bevestiging met uur. De knop wordt STOP.</div>
+  </div>
+
+  <div class="scr"><div class="phone"><div class="ui">
+    <div class="top"><i></i></div><div class="bar"><span class="logo">EDUGO tijd</span><span>Fatima</span></div>
+    <div class="body">
+      <div class="ico" style="background:#fffbeb;color:#d97706"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></div>
+      <h3>Je bent niet op school</h3>
+      <p class="t">We hebben je start toch bewaard om 07:42.</p>
+      <p class="t">Je verantwoordelijke ziet dit en kan het nakijken.</p>
+      <div class="spacer"></div>
+      <div class="btn">OK</div>
+    </div></div></div>
+    <div class="cap"><b>E6 · Buiten zone.</b> Niet blokkeren, wel markeren. Geen technische termen.</div>
+  </div>
+
+  <div class="scr"><div class="phone"><div class="ui">
+    <div class="top"><i></i></div><div class="bar"><span class="logo">EDUGO tijd</span><span>Fatima</span></div>
+    <div class="body">
+      <div class="ico" style="background:#ecfdf5;color:#16a34a"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></div>
+      <h3>Gestopt om 15:30</h3>
+      <div class="card">
+        <div class="row"><span>Gestart</span><b>07:42</b></div>
+        <div class="row"><span>Gestopt</span><b>15:30</b></div>
+        <div class="row"><span>Pauze</span><b>30 min</b></div>
+        <div class="row"><span>Gewerkt</span><b>7 u 18</b></div>
+      </div>
+      <div class="spacer"></div>
+      <p class="t">Tot morgen!</p>
+    </div></div></div>
+    <div class="cap"><b>E7 · Gestopt.</b> Overzicht van de dag, zodat de medewerker zelf kan controleren.</div>
+  </div>
+
+  <div class="scr"><div class="phone"><div class="ui">
+    <div class="top"><i></i></div><div class="bar"><span class="logo">EDUGO tijd</span><span></span></div>
+    <div class="body">
+      <div class="ico" style="background:#eef2ff;color:#1e3a8a"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><path d="M9 9h.01"/><path d="M15 9h.01"/></svg></div>
+      <h3>Aanmelden</h3>
+      <p class="t">Gebruik je gezicht of vingerafdruk.</p>
+      <div class="spacer"></div>
+      <div class="btn">Aanmelden</div>
+      <p class="t" style="font-size:11px">Nieuwe gsm? Vraag het aan je verantwoordelijke.</p>
+    </div></div></div>
+    <div class="cap"><b>E8 · Aanmelden.</b> Enkel als de sessie verlopen is. Eén tik.</div>
+  </div>
+
+</div>
+
+<script>
+  // decorative fake QR pattern (not a real code)
+  (function(){
+    var s=document.getElementById('qr'); if(!s) return;
+    var seed=7, out='';
+    function r(){seed=(seed*16807)%2147483647;return seed/2147483647;}
+    function finder(x,y){return '<rect x="'+x+'" y="'+y+'" width="7" height="7" fill="#111"/><rect x="'+(x+1)+'" y="'+(y+1)+'" width="5" height="5" fill="#fff"/><rect x="'+(x+2)+'" y="'+(y+2)+'" width="3" height="3" fill="#111"/>';}
+    for(var y=0;y<29;y++)for(var x=0;x<29;x++){
+      var inF=(x<8&&y<8)||(x>20&&y<8)||(x<8&&y>20); if(inF) continue;
+      if(r()>0.5) out+='<rect x="'+x+'" y="'+y+'" width="1" height="1" fill="#111"/>';
+    }
+    s.innerHTML=out+finder(0,0)+finder(22,0)+finder(0,22);
+  })();
+</script>
+</body>
+</html>
