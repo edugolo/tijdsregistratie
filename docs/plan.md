@@ -40,7 +40,32 @@ Admin (whole organisation):
 2. People and roles: make someone manager of one or more sites, or admin.
 3. Same team screens as a manager, for every site.
 
-The first admin is created with the admin CLI, which prints a one-time enrollment QR code.
+First-run setup (onboarding) in the web app, see §2.1. The admin CLI `bootstrap-admin` stays as a
+fallback (lost admin passkeys, headless installs).
+
+### 2.1 First-run setup
+
+When the database has no active admin, the app is in **setup mode**: every route redirects to
+`/setup`. Nobody else can use the app until setup is finished.
+
+- **Protection:** at startup in setup mode the server generates a one-time setup code (random,
+  stored hashed, valid until setup completes or the server restarts) and writes it to the server log
+  (`Setup code: …`); `admin setup-code` prints a fresh one. The first step asks for this code, so a
+  stranger who reaches the URL first cannot claim the installation.
+- **Steps** (one question per screen, can go back):
+  1. S1 Welkom + setup code.
+  2. S2 Organisatie: name (e.g. scholengroep or school), short name for the app header, brand colour
+     (preset swatches + custom), optional logo upload (PNG/SVG, max 512 KB), time zone
+     (default Europe/Brussels).
+  3. S3 Eerste school (site): name, address, location by "Gebruik mijn huidige locatie" (stand at the
+     school) or entering coordinates, radius (default 150 m), fixed break (default 30 min after 6 h).
+     More sites later in A1.
+  4. S4 Jij: your name. You become admin (and optionally manager of the first site).
+  5. S5 Maak je sleutel aan: passkey registration on this device; the setup code is consumed in the
+     same transaction that creates the admin, so setup can only complete once.
+  6. S6 Klaar: next steps (add managers, add employees, link devices) with links to A2 / M1.
+- Afterwards, admins edit the same organisation fields in **A0 Organisatie** (settings screen).
+- No external geocoding service in v1 (privacy, no API keys); a map picker can be added later.
 
 ### Next (needed for legal compliance, after version 1)
 
@@ -151,14 +176,18 @@ Employee: E1 welcome/install, E1b iPhone steps, E2 create passkey, E3 location e
 E5 started/STOP, E6 out of zone, E7 day summary, E8 passkey login.
 Manager: M1 Mijn team (add employee, link device, status today), M2 QR code (countdown, switches to
 "Gekoppeld").
-Admin: A1 sites, A2 people and roles (assign manager to sites).
+Admin: A0 organisation settings (name, short name, colour, logo, time zone), A1 sites, A2 people
+and roles (assign manager to sites).
+Setup: S1–S6 first-run wizard (§2.1).
 UI strings in one i18n module: nl-BE first, fr-BE and en next.
 
 ## 9. Data model (version 1)
 
 Encrypted columns marked 🔒.
 
-- `organisation_settings` — single row: display name, colours, retention days, zone defaults
+- `organisation_settings` — single row: display name, short name, brand colour, logo (bytea, nullable),
+  time zone, retention days, zone defaults, setup_completed_at
+- `setup_code` — code_hash, created_at, used_at (only while in setup mode)
 - `site` — id, name, address 🔒, lat, lng, radius_m, break_minutes, zone_policy, active
   *(site location is not personal data and is needed in plaintext for the zone check)*
 - `person` — id, webauthn_user_handle, display_name 🔒, email 🔒, active, created_by, created_at
@@ -221,6 +250,7 @@ deploy/               Dockerfile, compose file, operator docs
 | T12 | PWA: manifest, icons, service worker, install flow, offline queue | T9 |
 | T13 | Browser tests | T9–T12 |
 | T14 | Container image, compose file, operator docs (domain, key backup, database backups) | T12 |
+| T15 | First-run setup: setup mode + setup code, wizard S1–S6, A0 organisation settings, branding (name, colour, logo) applied in header, manifest and theme colour | T5, T9 |
 
 Security-relevant tasks (T2, T4, T5, T8) get an independent review before merge.
 

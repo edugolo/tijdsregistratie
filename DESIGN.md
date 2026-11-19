@@ -122,6 +122,21 @@ Admin:
 |---|---|---|
 | A1 | Scholen | name, address, map pin + radius, break length, active |
 | A2 | Personen en rollen | assign manager to sites, make admin, deactivate |
+| A0 | Organisatie | name, short name, colour, logo, time zone |
+
+First-run setup (only when there is no admin yet; laptop first, works on phone):
+
+| Id | Screen | Notes |
+|---|---|---|
+| S1 | Welkom | asks the setup code from the server log; explains what follows (5 short steps) |
+| S2 | Je organisatie | name, short name, colour swatches, optional logo, time zone |
+| S3 | Je eerste school | name, address, "Gebruik mijn huidige locatie" or coordinates, radius, break |
+| S4 | Over jou | your name; checkbox "Ik ben ook verantwoordelijke van deze school" |
+| S5 | Maak je sleutel aan | passkey on this device |
+| S6 | Klaar | next steps: verantwoordelijken toevoegen, medewerkers toevoegen, toestellen koppelen |
+
+Wizard rules: progress indicator ("Stap 2 van 5"), one topic per screen, "Vorige" always available,
+sensible defaults pre-filled, nothing saved until S5 succeeds (then everything in one transaction).
 
 ## 7. Interaction details
 
