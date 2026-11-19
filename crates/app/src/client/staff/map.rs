@@ -18,6 +18,7 @@ pub fn today_from_dto(dto: TodayStatusDto) -> TodayStatus {
         TodayStatusDto::Started(t) => TodayStatus::Started(t),
         TodayStatusDto::Stopped(t) => TodayStatus::Stopped(t),
         TodayStatusDto::OutOfZone(t) => TodayStatus::OutOfZone(t),
+        TodayStatusDto::MissingStop { since } => TodayStatus::MissingStop(since),
     }
 }
 
@@ -169,6 +170,12 @@ mod tests {
         assert_eq!(
             today_from_dto(TodayStatusDto::OutOfZone("07:50".into())),
             TodayStatus::OutOfZone("07:50".into())
+        );
+        assert_eq!(
+            today_from_dto(TodayStatusDto::MissingStop {
+                since: "di 10/03 07:42".into()
+            }),
+            TodayStatus::MissingStop("di 10/03 07:42".into())
         );
     }
 

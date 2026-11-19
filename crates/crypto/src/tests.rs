@@ -317,3 +317,41 @@ fn normalize_name_works() {
     assert_eq!(normalize_name("An\u{a0}De  Vries"), "an de vries");
     assert_eq!(normalize_name(""), "");
 }
+
+#[test]
+fn key_version_byte_is_authenticated() {
+    // Two versions with the same key material: only the AAD can tell the versions apart.
+    let same = format!("{}\n{}\n", key_line(1, 0x33), key_line(2, 0x33));
+    let keys = DataKeys::parse(&same).unwrap();
+    let a = aad(Uuid::new_v4());
+    let mut blob = keys.encrypt(b"secret", &a);
+    assert_eq!(blob[0], 2);
+    blob[0] = 1;
+    assert!(matches!(keys.decrypt(&blob, &a), Err(CryptoError::Decrypt)));
+}
+
+#[cfg(unix)]
+#[test]
+fn check_permissions_flags_group_and_world_access() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("crypto-perm-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("keys");
+    std::fs::write(&path, key_line(1, 5)).unwrap();
+    for (mode, ok) in [
+        (0o600, true),
+        (0o400, true),
+        (0o640, false),
+        (0o604, false),
+        (0o644, false),
+    ] {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let r = check_permissions(&path);
+        assert_eq!(r.is_ok(), ok, "mode {mode:o}");
+        if let Err(w) = r {
+            assert!(w.to_string().contains(&format!("{mode:o}")));
+        }
+    }
+    assert!(check_permissions(dir.join("missing")).is_err());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

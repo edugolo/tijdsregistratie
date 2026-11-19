@@ -92,6 +92,12 @@ pub fn StaffPreview() -> Element {
             device_linked: true,
             today: TodayStatus::OutOfZone("07:55".into()),
         },
+        TeamMember {
+            id: id(15),
+            name: "Lotte Janssens".into(),
+            device_linked: true,
+            today: TodayStatus::MissingStop("di 10/03 07:42".into()),
+        },
     ];
     let site_rows = vec![
         SiteRow {

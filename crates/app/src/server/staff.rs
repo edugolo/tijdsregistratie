@@ -9,7 +9,7 @@ use chrono_tz::Tz;
 use crypto::{BlindIndexKey, DataKeys};
 use dioxus::prelude::ServerFnError;
 use domain::{EventKind, ZoneStatus};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgExecutor, PgPool, Postgres, Transaction};
 use store::repo::role::{self, Role, StaffScope};
 use store::repo::site::{self, Site, SiteInput, ZonePolicy};
 use store::repo::time_event::{self, EventRow};
@@ -146,6 +146,18 @@ pub fn day_bounds(now: DateTime<Utc>, tz: Tz) -> (DateTime<Utc>, DateTime<Utc>) 
     (midnight(today), midnight(tomorrow))
 }
 
+/// Refuses (generic `Invalid`) a change that would leave no active admin with an active passkey.
+/// `person_id` is the person that is about to lose the ability to sign in or administer. Call it
+/// inside a transaction that holds the admin-change lock ([`role::lock_admin_changes`]).
+async fn keep_one_working_admin(conn: &mut PgConnection, person_id: Uuid) -> Result<()> {
+    if role::is_working_admin(&mut *conn, person_id).await?
+        && role::working_admins_except(&mut *conn, person_id).await? == 0
+    {
+        return Err(StaffError::Invalid("last admin"));
+    }
+    Ok(())
+}
+
 /// Status from the latest of `events` (one person, one day).
 pub fn today_status(events: &[EventRow], tz: Tz) -> TodayStatusDto {
     let Some(latest) = events.iter().max_by_key(|e| e.server_ts) else {
@@ -161,6 +173,18 @@ pub fn today_status(events: &[EventRow], tz: Tz) -> TodayStatusDto {
         (EventKind::Start, ZoneStatus::InZone) => TodayStatusDto::Started(time),
         (EventKind::Start, _) => TodayStatusDto::OutOfZone(time),
     }
+}
+
+/// `MissingStop` if `previous` (the person's latest event before today) is a start: that day was
+/// never stopped. Only meaningful when the person has no events today.
+pub fn missing_stop(previous: Option<&EventRow>, tz: Tz) -> Option<TodayStatusDto> {
+    let e = previous.filter(|e| e.kind == EventKind::Start)?;
+    let local = e.server_ts.with_timezone(&tz);
+    let weekday = ["ma", "di", "wo", "do", "vr", "za", "zo"]
+        [chrono::Datelike::weekday(&local).num_days_from_monday() as usize];
+    Some(TodayStatusDto::MissingStop {
+        since: format!("{weekday} {}", local.format("%d/%m %H:%M")),
+    })
 }
 
 pub fn enrollment_url(origin: &str, raw: &str) -> String {
@@ -190,9 +214,10 @@ fn check_site(scope: &StaffScope, site_id: Uuid) -> Result<()> {
         .ok_or(StaffError::Forbidden)
 }
 
-/// Person scope: admins may act on anyone who exists. Managers only on plain employees of their
-/// sites (never on a manager or admin). Unknown people look the same as out-of-scope ones for
-/// managers.
+/// Person scope: admins may act on anyone who exists. Managers only on plain employees whose
+/// employee sites are ALL managed by them (never on a manager or admin, and not on people who also
+/// work at another site: those are admin-only). Unknown people look the same as out-of-scope ones
+/// for managers.
 async fn check_person(env: &StaffEnv<'_>, scope: &StaffScope, person_id: Uuid) -> Result<()> {
     if scope.is_admin {
         return person::get_person(env.pool, env.keys, person_id)
@@ -201,7 +226,7 @@ async fn check_person(env: &StaffEnv<'_>, scope: &StaffScope, person_id: Uuid) -
             .ok_or(StaffError::NotFound);
     }
     let sites = role::employee_sites(env.pool, person_id).await?;
-    if !role::scope_allows_sites(scope, &sites) {
+    if !role::scope_covers_all_sites(scope, &sites) {
         return Err(StaffError::Forbidden);
     }
     let roles = role::roles_of(env.pool, person_id).await?;
@@ -211,8 +236,27 @@ async fn check_person(env: &StaffEnv<'_>, scope: &StaffScope, person_id: Uuid) -
     Ok(())
 }
 
-async fn audit(
-    env: &StaffEnv<'_>,
+/// Starts the transaction in which a mutation and its audit row are committed together.
+async fn begin(env: &StaffEnv<'_>) -> Result<Transaction<'static, Postgres>> {
+    Ok(env
+        .pool
+        .begin()
+        .await
+        .map_err(store::repo::RepoError::from)?)
+}
+
+async fn commit(tx: Transaction<'static, Postgres>) -> Result<()> {
+    tx.commit().await.map_err(store::repo::RepoError::from)?;
+    Ok(())
+}
+
+/// Writes the audit row on `executor`; pass the mutation's transaction (`&mut *tx`).
+///
+/// Mutations whose repository function only takes a pool (it runs on its own connection) write
+/// the audit row first and commit the transaction after the mutation succeeded: a failing audit
+/// row then prevents the mutation, and a failing mutation leaves no audit row.
+async fn audit<'e>(
+    executor: impl PgExecutor<'e>,
     scope: &StaffScope,
     action: &str,
     entity: &str,
@@ -220,7 +264,7 @@ async fn audit(
     fields: &[&str],
 ) -> Result<()> {
     audit::record(
-        env.pool,
+        executor,
         Some(scope.person_id),
         action,
         entity,
@@ -315,6 +359,7 @@ pub async fn team(
     let tz = settings::get_settings(env.pool).await?.timezone;
     let (from, to) = day_bounds(now, tz);
     let events = time_event::events_between(env.pool, &ids, from, to).await?;
+    let previous = time_event::last_events_before(env.pool, &ids, from).await?;
     let mut members = Vec::with_capacity(people.len());
     for p in &people {
         let mine: Vec<EventRow> = events
@@ -323,7 +368,13 @@ pub async fn team(
             .cloned()
             .collect();
         let linked = passkey::count_active(env.pool, p.id).await? > 0;
-        members.push(member_dto(p, linked, today_status(&mine, tz)));
+        let today = if mine.is_empty() {
+            missing_stop(previous.iter().find(|e| e.person_id == p.id), tz)
+                .unwrap_or(TodayStatusDto::NotStarted)
+        } else {
+            today_status(&mine, tz)
+        };
+        members.push(member_dto(p, linked, today));
     }
     Ok(members)
 }
@@ -341,8 +392,9 @@ pub async fn add_member(
         .ok_or(StaffError::NotFound)?;
     let p =
         person::create_person(env.pool, env.keys, env.blind, &name, Some(scope.person_id)).await?;
+    let mut tx = begin(env).await?;
     role::assign(
-        env.pool,
+        &mut *tx,
         p.id,
         Role::Employee,
         Some(site_id),
@@ -350,7 +402,7 @@ pub async fn add_member(
     )
     .await?;
     audit(
-        env,
+        &mut *tx,
         scope,
         "person.created",
         "person",
@@ -358,6 +410,7 @@ pub async fn add_member(
         &["display_name", "role"],
     )
     .await?;
+    commit(tx).await?;
     Ok(member_dto(&p, false, TodayStatusDto::NotStarted))
 }
 
@@ -371,29 +424,39 @@ pub async fn set_person_active(
     if !active && person_id == scope.person_id {
         return Err(StaffError::Invalid("self"));
     }
-    if !person::set_active(env.pool, person_id, active).await? {
-        return Err(StaffError::NotFound);
+    let mut tx = begin(env).await?;
+    if !active {
+        role::lock_admin_changes(&mut tx).await?;
+        keep_one_working_admin(&mut tx, person_id).await?;
     }
     let action = if active {
         "person.activated"
     } else {
         "person.deactivated"
     };
-    audit(env, scope, action, "person", person_id, &["active"]).await
+    audit(&mut *tx, scope, action, "person", person_id, &["active"]).await?;
+    if !person::set_active(env.pool, person_id, active).await? {
+        return Err(StaffError::NotFound);
+    }
+    commit(tx).await
 }
 
 pub async fn revoke_devices(env: &StaffEnv<'_>, scope: &StaffScope, person_id: Uuid) -> Result<()> {
     check_person(env, scope, person_id).await?;
-    passkey::revoke_all(env.pool, person_id, Some(scope.person_id)).await?;
+    let mut tx = begin(env).await?;
+    role::lock_admin_changes(&mut tx).await?;
+    keep_one_working_admin(&mut tx, person_id).await?;
     audit(
-        env,
+        &mut *tx,
         scope,
         "passkey.revoked",
         "person",
         person_id,
         &["passkey"],
     )
-    .await
+    .await?;
+    passkey::revoke_all(env.pool, person_id, Some(scope.person_id)).await?;
+    commit(tx).await
 }
 
 pub async fn start_enrollment(
@@ -405,6 +468,16 @@ pub async fn start_enrollment(
     if !person::is_active(env.pool, person_id).await? {
         return Err(StaffError::Invalid("inactive"));
     }
+    let mut tx = begin(env).await?;
+    audit(
+        &mut *tx,
+        scope,
+        "enrollment.issued",
+        "person",
+        person_id,
+        &["enrollment_token"],
+    )
+    .await?;
     let token = enrollment::issue_token(
         env.pool,
         person_id,
@@ -414,15 +487,7 @@ pub async fn start_enrollment(
     .await?;
     let url = enrollment_url(env.app_origin, &token.raw);
     let qr_svg = qr_svg(&url)?;
-    audit(
-        env,
-        scope,
-        "enrollment.issued",
-        "person",
-        person_id,
-        &["enrollment_token"],
-    )
-    .await?;
+    commit(tx).await?;
     Ok(EnrollmentDto {
         qr_svg,
         url,
@@ -472,9 +537,9 @@ pub async fn save_site(
                 .ok_or(StaffError::NotFound)?;
             input.active = existing.active;
             input.zone_policy = existing.zone_policy;
-            let saved = site::update_site(env.pool, env.keys, id, &input).await?;
+            let mut tx = begin(env).await?;
             audit(
-                env,
+                &mut *tx,
                 scope,
                 "site.updated",
                 "site",
@@ -482,11 +547,14 @@ pub async fn save_site(
                 &["name", "address", "location", "radius", "break"],
             )
             .await?;
+            let saved = site::update_site(env.pool, env.keys, id, &input).await?;
+            commit(tx).await?;
             saved
         }
         None => {
+            // The id only exists after the insert, so here the audit row follows the mutation.
             let saved = site::create_site(env.pool, env.keys, &input).await?;
-            audit(env, scope, "site.created", "site", saved.id, &["name"]).await?;
+            audit(env.pool, scope, "site.created", "site", saved.id, &["name"]).await?;
             saved
         }
     };
@@ -514,13 +582,15 @@ pub async fn set_site_active(
         zone_policy: existing.zone_policy,
         active,
     };
-    site::update_site(env.pool, env.keys, site_id, &input).await?;
     let action = if active {
         "site.activated"
     } else {
         "site.deactivated"
     };
-    audit(env, scope, action, "site", site_id, &["active"]).await
+    let mut tx = begin(env).await?;
+    audit(&mut *tx, scope, action, "site", site_id, &["active"]).await?;
+    site::update_site(env.pool, env.keys, site_id, &input).await?;
+    commit(tx).await
 }
 
 async fn person_row(
@@ -572,8 +642,9 @@ pub async fn add_person(
     let name = validate_name(name)?;
     let p =
         person::create_person(env.pool, env.keys, env.blind, &name, Some(scope.person_id)).await?;
+    // The id only exists after the insert, so the audit row follows the mutation.
     audit(
-        env,
+        env.pool,
         scope,
         "person.created",
         "person",
@@ -606,8 +677,9 @@ pub async fn assign_role(
     require_admin(scope)?;
     check_role_target(env, role, site_id).await?;
     check_person(env, scope, person_id).await?;
+    let mut tx = begin(env).await?;
     let changed = role::assign(
-        env.pool,
+        &mut *tx,
         person_id,
         role_from_dto(role),
         site_id,
@@ -616,7 +688,7 @@ pub async fn assign_role(
     .await?;
     if changed {
         audit(
-            env,
+            &mut *tx,
             scope,
             "role.assigned",
             "person",
@@ -625,7 +697,7 @@ pub async fn assign_role(
         )
         .await?;
     }
-    Ok(())
+    commit(tx).await
 }
 
 pub async fn revoke_role(
@@ -640,18 +712,24 @@ pub async fn revoke_role(
     if role == RoleDto::Admin && person_id == scope.person_id {
         return Err(StaffError::Invalid("last admin"));
     }
-    if !role::revoke(env.pool, person_id, role_from_dto(role), site_id).await? {
+    let mut tx = begin(env).await?;
+    if role == RoleDto::Admin {
+        role::lock_admin_changes(&mut tx).await?;
+        keep_one_working_admin(&mut tx, person_id).await?;
+    }
+    if !role::revoke(&mut *tx, person_id, role_from_dto(role), site_id).await? {
         return Err(StaffError::NotFound);
     }
     audit(
-        env,
+        &mut *tx,
         scope,
         "role.revoked",
         "person",
         person_id,
         &["role", "site_id"],
     )
-    .await
+    .await?;
+    commit(tx).await
 }
 
 #[cfg(test)]
@@ -792,6 +870,21 @@ mod tests {
                 TodayStatusDto::OutOfZone("08:00".into())
             );
         }
+    }
+
+    #[test]
+    fn missing_stop_only_for_a_previous_start() {
+        let start = event(EventKind::Start, ts(6, 42), ZoneStatus::InZone);
+        let stop = event(EventKind::Stop, ts(6, 42), ZoneStatus::InZone);
+        // 10 March 2026 is a Tuesday; 06:42 UTC is 07:42 in Brussels.
+        assert_eq!(
+            missing_stop(Some(&start), BRU),
+            Some(TodayStatusDto::MissingStop {
+                since: "di 10/03 07:42".into()
+            })
+        );
+        assert_eq!(missing_stop(Some(&stop), BRU), None);
+        assert_eq!(missing_stop(None, BRU), None);
     }
 
     #[test]
@@ -1250,5 +1343,256 @@ mod tests {
             .await
             .unwrap();
         assert!(!role::is_admin(&pool, s.emp_a).await.unwrap());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn team_shows_a_forgotten_stop_from_an_earlier_day(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let yesterday = ts(6, 42);
+        for (p, kind, at) in [
+            (s.emp_a, EventKind::Start, yesterday),
+            (s.mgr_a_id, EventKind::Start, yesterday),
+            (s.mgr_a_id, EventKind::Stop, yesterday + Duration::hours(8)),
+        ] {
+            time_event::append(
+                &pool,
+                &k.0,
+                time_event::NewEvent {
+                    person_id: p,
+                    kind,
+                    server_ts: at,
+                    client_ts: None,
+                    site_id: None,
+                    location: None,
+                    zone_status: ZoneStatus::InZone,
+                    source: "personal",
+                },
+            )
+            .await
+            .unwrap();
+        }
+        role::assign(&pool, s.mgr_a_id, Role::Employee, Some(s.site_a), None)
+            .await
+            .unwrap();
+        let today = yesterday + Duration::days(1);
+        let members = team(&e, &s.mgr_a, s.site_a, today).await.unwrap();
+        let status = |id| members.iter().find(|m| m.id == id).unwrap().today.clone();
+        assert_eq!(
+            status(s.emp_a),
+            TodayStatusDto::MissingStop {
+                since: "di 10/03 07:42".into()
+            }
+        );
+        assert_eq!(status(s.mgr_a_id), TodayStatusDto::NotStarted);
+        // Same day it is simply a started day.
+        let same = team(&e, &s.mgr_a, s.site_a, yesterday + Duration::hours(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            same.iter().find(|m| m.id == s.emp_a).unwrap().today,
+            TodayStatusDto::Started("07:42".into())
+        );
+    }
+
+    // --- cross-site identity actions ---
+
+    /// An employee of both school A and school B.
+    async fn two_site_employee(pool: &PgPool, k: &Keys, s: &Seed) -> Uuid {
+        let p = mk_person(pool, k, "Tom Tweeschool").await;
+        for site in [s.site_a, s.site_b] {
+            role::assign(pool, p, Role::Employee, Some(site), None)
+                .await
+                .unwrap();
+        }
+        p
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn manager_cannot_run_identity_actions_on_people_of_other_sites_too(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let both = two_site_employee(&pool, &k, &s).await;
+        let forbidden = Err(StaffError::Forbidden);
+        assert_eq!(
+            set_person_active(&e, &s.mgr_a, both, false).await,
+            forbidden
+        );
+        assert_eq!(revoke_devices(&e, &s.mgr_a, both).await, forbidden);
+        assert_eq!(
+            start_enrollment(&e, &s.mgr_a, both).await.map(|_| ()),
+            forbidden
+        );
+        assert_eq!(
+            enrollment_status(&e, &s.mgr_a, both, 0, Utc::now()).await,
+            forbidden.map(|()| EnrollStateDto::Waiting)
+        );
+        assert!(person::is_active(&pool, both).await.unwrap());
+        assert!(audit_actions(&pool).await.is_empty());
+        // Listing in the team of the own site is unchanged.
+        let team = team(&e, &s.mgr_a, s.site_a, ts(9, 0)).await.unwrap();
+        assert!(team.iter().any(|m| m.id == both));
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn admin_and_multi_site_manager_may_act_on_cross_site_people(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let both = two_site_employee(&pool, &k, &s).await;
+        set_person_active(&e, &s.admin, both, false).await.unwrap();
+        revoke_devices(&e, &s.admin, both).await.unwrap();
+        // A manager of both sites covers all of the person's sites.
+        let mut mgr_ab = s.mgr_a.clone();
+        mgr_ab.site_ids.push(s.site_b);
+        set_person_active(&e, &mgr_ab, both, true).await.unwrap();
+        start_enrollment(&e, &mgr_ab, both).await.unwrap();
+    }
+
+    // --- admin lockout ---
+
+    struct Admins {
+        /// Admin with an active passkey.
+        working: StaffScope,
+        /// Admin without any passkey.
+        keyless: StaffScope,
+    }
+
+    async fn two_admins(pool: &PgPool, k: &Keys) -> Admins {
+        let mk = |name: &'static str| async move {
+            let id = mk_person(pool, k, name).await;
+            role::assign(pool, id, Role::Admin, None, None)
+                .await
+                .unwrap();
+            role::scope_from_roles(id, &role::roles_of(pool, id).await.unwrap()).unwrap()
+        };
+        let working = mk("Wim Werkend").await;
+        let keyless = mk("Kim Zondersleutel").await;
+        passkey::insert(
+            pool,
+            working.person_id,
+            working.person_id.as_bytes(),
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        Admins { working, keyless }
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn last_working_admin_cannot_be_locked_out(pool: PgPool) {
+        let k = keys();
+        let e = env(&pool, &k);
+        let a = two_admins(&pool, &k).await;
+        let target = a.working.person_id;
+        // `keyless` is an admin but cannot sign in, so `working` is the only usable admin.
+        assert!(matches!(
+            revoke_role(&e, &a.keyless, target, RoleDto::Admin, None).await,
+            Err(StaffError::Invalid(_))
+        ));
+        assert!(matches!(
+            set_person_active(&e, &a.keyless, target, false).await,
+            Err(StaffError::Invalid(_))
+        ));
+        assert!(matches!(
+            revoke_devices(&e, &a.keyless, target).await,
+            Err(StaffError::Invalid(_))
+        ));
+        // Self-revoke of the only admin's devices is refused as well.
+        assert!(matches!(
+            revoke_devices(&e, &a.working, target).await,
+            Err(StaffError::Invalid(_))
+        ));
+        assert!(role::is_admin(&pool, target).await.unwrap());
+        assert!(person::is_active(&pool, target).await.unwrap());
+        assert_eq!(passkey::count_active(&pool, target).await.unwrap(), 1);
+        assert!(audit_actions(&pool).await.is_empty());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn admin_actions_are_allowed_while_another_working_admin_remains(pool: PgPool) {
+        let k = keys();
+        let e = env(&pool, &k);
+        let a = two_admins(&pool, &k).await;
+        passkey::insert(
+            &pool,
+            a.keyless.person_id,
+            a.keyless.person_id.as_bytes(),
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        // Both can sign in now; one may lose devices, then the other must stay.
+        revoke_devices(&e, &a.working, a.working.person_id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            revoke_devices(&e, &a.keyless, a.keyless.person_id).await,
+            Err(StaffError::Invalid(_))
+        ));
+        assert!(matches!(
+            revoke_role(&e, &a.keyless, a.working.person_id, RoleDto::Admin, None).await,
+            Ok(())
+        ));
+    }
+
+    // --- atomic audit ---
+
+    /// Makes inserting an audit row with this action fail (replaces an earlier choice).
+    async fn fail_audit_of(pool: &PgPool, action: &str) {
+        for ddl in [
+            "CREATE TABLE IF NOT EXISTS fail_on (action text NOT NULL)",
+            "CREATE OR REPLACE FUNCTION fail_audit() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN IF EXISTS (SELECT 1 FROM fail_on WHERE action = NEW.action) THEN \
+             RAISE EXCEPTION 'audit down'; END IF; RETURN NEW; END; $$",
+            "DROP TRIGGER IF EXISTS fail_audit ON audit_log",
+            "CREATE TRIGGER fail_audit BEFORE INSERT ON audit_log \
+             FOR EACH ROW EXECUTE FUNCTION fail_audit()",
+            "DELETE FROM fail_on",
+        ] {
+            sqlx::query(ddl).execute(pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO fail_on (action) VALUES ($1)")
+            .bind(action)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn mutation_is_not_kept_when_its_audit_row_fails(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let other_admin = mk_person(&pool, &k, "Olga Andere").await;
+        role::assign(&pool, other_admin, Role::Admin, None, None)
+            .await
+            .unwrap();
+        passkey::insert(&pool, s.emp_a, b"emp-a", serde_json::json!({}))
+            .await
+            .unwrap();
+
+        fail_audit_of(&pool, "person.deactivated").await;
+        assert_eq!(
+            set_person_active(&e, &s.admin, s.emp_a, false).await,
+            Err(StaffError::Internal)
+        );
+        assert!(person::is_active(&pool, s.emp_a).await.unwrap());
+
+        fail_audit_of(&pool, "passkey.revoked").await;
+        assert_eq!(
+            revoke_devices(&e, &s.admin, s.emp_a).await,
+            Err(StaffError::Internal)
+        );
+        assert_eq!(passkey::count_active(&pool, s.emp_a).await.unwrap(), 1);
+
+        fail_audit_of(&pool, "role.revoked").await;
+        assert_eq!(
+            revoke_role(&e, &s.admin, other_admin, RoleDto::Admin, None).await,
+            Err(StaffError::Internal)
+        );
+        assert!(role::is_admin(&pool, other_admin).await.unwrap());
     }
 }

@@ -1,7 +1,9 @@
 //! Field encryption for personal data: XChaCha20-Poly1305, `Encrypted<T>`, key loading and rotation.
 //!
 //! Blob layout: `key_version (1 byte) || nonce (24 bytes) || ciphertext+tag`. The associated data
-//! binds a ciphertext to its table, column and row id (see [`Aad`]).
+//! binds a ciphertext to its table, column and row id (see [`Aad`]); the AEAD associated data is
+//! `key_version || table || 0x00 || column || 0x00 || row_id`, so the version byte is
+//! authenticated as well.
 //!
 //! Error values and `Debug` output never contain key material or plaintext.
 
@@ -107,16 +109,19 @@ fn parse_key_lines(text: &str) -> Result<BTreeMap<u8, Key>> {
             .and_then(|n| n.parse().ok())
             .filter(|&n| n >= 1)
             .ok_or_else(|| bad("version must be v1..v255"))?;
-        let decoded = Zeroizing::new(
-            STANDARD
-                .decode(encoded.trim())
-                .map_err(|_| bad("invalid base64"))?,
-        );
-        let mut key = Key::default();
-        if decoded.len() != KEY_LEN {
+        // Decode straight into zeroizing fixed buffers: no heap copies of the key left behind.
+        let mut decoded = Zeroizing::new([0u8; 2 * KEY_LEN]);
+        let len = STANDARD
+            .decode_slice(encoded.trim(), decoded.as_mut_slice())
+            .map_err(|e| match e {
+                base64::DecodeSliceError::OutputSliceTooSmall => bad("key must be 32 bytes"),
+                _ => bad("invalid base64"),
+            })?;
+        if len != KEY_LEN {
             return Err(bad("key must be 32 bytes"));
         }
-        key.copy_from_slice(&decoded);
+        let mut key = Key::default();
+        key.copy_from_slice(&decoded[..KEY_LEN]);
         if keys.insert(version, key).is_some() {
             return Err(CryptoError::DuplicateKeyVersion(version));
         }
@@ -125,6 +130,34 @@ fn parse_key_lines(text: &str) -> Result<BTreeMap<u8, Key>> {
         return Err(CryptoError::NoKeys);
     }
     Ok(keys)
+}
+
+/// Why a key file is not considered private enough.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum PermissionWarning {
+    /// Group or world can access the file; `mode` holds the permission bits.
+    #[error("key file is accessible by group or others (mode {mode:o}); use chmod 600")]
+    TooPermissive { mode: u32 },
+    /// The file metadata could not be read.
+    #[error("cannot inspect key file permissions")]
+    Unreadable,
+}
+
+/// Warns when the key file at `path` is readable or writable by group or others. Callers (the
+/// app and the admin CLI) log the warning; loading the key is not refused.
+#[cfg(unix)]
+pub fn check_permissions(path: impl AsRef<Path>) -> std::result::Result<(), PermissionWarning> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path)
+        .map_err(|_| PermissionWarning::Unreadable)?
+        .permissions()
+        .mode()
+        & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(PermissionWarning::TooPermissive { mode });
+    }
+    Ok(())
 }
 
 /// Generate a fresh key line (`v<version>:<base64>`) from OS randomness.
@@ -138,6 +171,14 @@ pub fn generate_key_line(version: u8) -> String {
         .try_fill_bytes(key.as_mut_slice())
         .expect("operating system randomness unavailable");
     format!("v{version}:{}", STANDARD.encode(key.as_slice()))
+}
+
+/// AEAD associated data: the key version byte followed by the [`Aad`] bytes, so the version in
+/// the blob header is authenticated too.
+fn versioned_aad(version: u8, aad: &Aad) -> Vec<u8> {
+    let mut out = vec![version];
+    out.extend_from_slice(&aad.to_bytes());
+    out
 }
 
 /// Versioned data keys. The highest version encrypts; all versions decrypt.
@@ -170,7 +211,8 @@ impl DataKeys {
             .keys
             .get(&version)
             .ok_or(CryptoError::UnknownKeyVersion(version))?;
-        Ok(XChaCha20Poly1305::new(&(**key).into()))
+        // From a slice, so no unzeroized copy of the key is made here; the cipher zeroizes itself.
+        Ok(XChaCha20Poly1305::new_from_slice(key.as_slice()).expect("key is 32 bytes"))
     }
 
     /// Encrypt with the current key and a random nonce.
@@ -179,7 +221,7 @@ impl DataKeys {
         let cipher = self.cipher(version).expect("current key exists");
         let mut nonce = [0u8; NONCE_LEN];
         rand::fill(&mut nonce);
-        let aad = aad.to_bytes();
+        let aad = versioned_aad(version, aad);
         let sealed = cipher
             .encrypt(
                 &XNonce::from(nonce),
@@ -204,7 +246,7 @@ impl DataKeys {
         let nonce: [u8; NONCE_LEN] = blob[1..HEADER_LEN]
             .try_into()
             .map_err(|_| CryptoError::TooShort)?;
-        let aad = aad.to_bytes();
+        let aad = versioned_aad(blob[0], aad);
         cipher
             .decrypt(
                 &XNonce::from(nonce),

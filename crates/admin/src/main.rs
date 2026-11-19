@@ -4,6 +4,7 @@
 
 mod bootstrap;
 mod rotate;
+mod setup_code;
 mod sites;
 
 use std::path::PathBuf;
@@ -14,7 +15,7 @@ use clap::{Parser, Subcommand};
 use crypto::{BlindIndexKey, DataKeys};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
-use store::repo::{person, settings, time_event};
+use store::repo::{person, settings, setup, time_event};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -61,6 +62,8 @@ enum Command {
     RotateKey,
     /// List admins (ids and names)
     ListAdmins,
+    /// Print a fresh setup code for the first-run wizard (invalidates older codes)
+    SetupCode,
 }
 
 fn env(name: &str) -> Result<String> {
@@ -152,6 +155,11 @@ async fn run(command: Command) -> Result<()> {
                 "Not rotated: time_event locations (append-only). Keep older key versions in \
                  the key file until all locations written with them have been purged."
             );
+        }
+        Command::SetupCode => {
+            let pool = connect().await?;
+            println!("Setup code: {}", setup_code::issue(&pool).await?);
+            println!("Valid for {} hours, single use.", setup::CODE_TTL_HOURS);
         }
         Command::ListAdmins => {
             let keys = data_keys()?;

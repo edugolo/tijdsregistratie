@@ -163,6 +163,7 @@ dependencies = [
  "store",
  "thiserror 2.0.21",
  "tokio",
+ "tower",
  "tower-sessions",
  "tower-sessions-sqlx-store",
  "tracing",
@@ -581,6 +582,7 @@ dependencies = [
  "cipher",
  "cpufeatures 0.3.1",
  "rand_core 0.10.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -593,6 +595,7 @@ dependencies = [
  "chacha20",
  "cipher",
  "poly1305",
+ "zeroize",
 ]
 
 [[package]]

@@ -2,7 +2,7 @@
 
 use std::str::FromStr;
 
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgExecutor, PgPool};
 use uuid::Uuid;
 
 use super::{RepoError, Result};
@@ -45,8 +45,8 @@ pub struct RoleAssignment {
 
 /// Returns false if the person already had this role (the database check constraints reject an
 /// admin with a site and a site role without one).
-pub async fn assign(
-    pool: &PgPool,
+pub async fn assign<'e>(
+    executor: impl PgExecutor<'e>,
     person_id: Uuid,
     role: Role,
     site_id: Option<Uuid>,
@@ -60,14 +60,14 @@ pub async fn assign(
     .bind(role.as_str())
     .bind(site_id)
     .bind(by)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(done.rows_affected() > 0)
 }
 
 /// Returns false if the person did not have this role.
-pub async fn revoke(
-    pool: &PgPool,
+pub async fn revoke<'e>(
+    executor: impl PgExecutor<'e>,
     person_id: Uuid,
     role: Role,
     site_id: Option<Uuid>,
@@ -79,7 +79,7 @@ pub async fn revoke(
     .bind(person_id)
     .bind(role.as_str())
     .bind(site_id)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(done.rows_affected() > 0)
 }
@@ -160,4 +160,78 @@ pub fn scope_allows_sites(scope: &StaffScope, person_employee_sites: &[Uuid]) ->
         || person_employee_sites
             .iter()
             .any(|s| scope.site_ids.contains(s))
+}
+
+/// Pure part of the identity-action check for managers: the person must work at at least one site
+/// and ALL of their employee sites must be managed by the scope. People who also work at another
+/// site are admin-only. Admins always pass.
+pub fn scope_covers_all_sites(scope: &StaffScope, person_employee_sites: &[Uuid]) -> bool {
+    scope.is_admin
+        || (!person_employee_sites.is_empty()
+            && person_employee_sites
+                .iter()
+                .all(|s| scope.site_ids.contains(s)))
+}
+
+/// Constant key of the advisory lock that serialises every change that can remove the ability
+/// of the last admin to sign in.
+const ADMIN_CHANGE_LOCK: i64 = 0x7469_6a64_6d69_6e01;
+
+/// Takes the admin-change lock for the rest of the transaction.
+pub async fn lock_admin_changes(conn: &mut PgConnection) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(ADMIN_CHANGE_LOCK)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// Whether `person_id` is an active admin with an active passkey, i.e. someone who can sign in
+/// and administer.
+pub async fn is_working_admin<'e>(executor: impl PgExecutor<'e>, person_id: Uuid) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM person p WHERE p.id = $1 AND p.active \
+           AND EXISTS (SELECT 1 FROM role_assignment r WHERE r.person_id = p.id AND r.role = 'admin') \
+           AND EXISTS (SELECT 1 FROM passkey k WHERE k.person_id = p.id AND k.revoked_at IS NULL))",
+    )
+    .bind(person_id)
+    .fetch_one(executor)
+    .await?)
+}
+
+/// Number of active admins with an active passkey, leaving out `except`.
+pub async fn working_admins_except<'e>(executor: impl PgExecutor<'e>, except: Uuid) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM person p WHERE p.id <> $1 AND p.active \
+           AND EXISTS (SELECT 1 FROM role_assignment r WHERE r.person_id = p.id AND r.role = 'admin') \
+           AND EXISTS (SELECT 1 FROM passkey k WHERE k.person_id = p.id AND k.revoked_at IS NULL)",
+    )
+    .bind(except)
+    .fetch_one(executor)
+    .await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manager_covers_only_people_wholly_within_their_sites() {
+        let (s1, s2) = (Uuid::new_v4(), Uuid::new_v4());
+        let mgr = StaffScope {
+            person_id: Uuid::new_v4(),
+            is_admin: false,
+            site_ids: vec![s1],
+        };
+        let admin = StaffScope {
+            is_admin: true,
+            site_ids: vec![],
+            ..mgr.clone()
+        };
+        assert!(scope_covers_all_sites(&mgr, &[s1]));
+        assert!(!scope_covers_all_sites(&mgr, &[s1, s2]));
+        assert!(!scope_covers_all_sites(&mgr, &[s2]));
+        assert!(!scope_covers_all_sites(&mgr, &[]));
+        assert!(scope_covers_all_sites(&admin, &[s1, s2]));
+    }
 }

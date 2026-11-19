@@ -37,6 +37,7 @@ web-sys = { workspace = true, optional = true, features = [
     "Geolocation", "PositionOptions", "Position", "Coordinates", "PositionError",
     "CredentialsContainer", "Credential", "PublicKeyCredential",
     "CredentialCreationOptions", "CredentialRequestOptions",
+    "ServiceWorkerContainer",
 ] }
 js-sys = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
@@ -65,3 +66,4 @@ server = [
 
 [dev-dependencies]
 webauthn-authenticator-rs = { version = "0.6.2", default-features = false, features = ["softpasskey"] }
+tower = { version = "0.5.3", features = ["util"] }

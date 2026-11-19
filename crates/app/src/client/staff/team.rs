@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use super::i18n::{members_count, status_at, t};
+use super::i18n::{members_count, missing_stop_label, status_at, t};
 use super::icons::{Icon, IconKind};
 
 #[derive(Clone, PartialEq, Debug)]
@@ -19,6 +19,8 @@ pub enum TodayStatus {
     Started(String),
     Stopped(String),
     OutOfZone(String),
+    /// A start from an earlier day that was never stopped; preformatted "di 10/03 07:42".
+    MissingStop(String),
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -52,6 +54,9 @@ fn today_chip(status: &TodayStatus) -> (&'static str, IconKind, String) {
             IconKind::Alert,
             status_at("chip.out_of_zone", time),
         ),
+        TodayStatus::MissingStop(since) => {
+            ("st-chip-warn", IconKind::Alert, missing_stop_label(since))
+        }
     }
 }
 

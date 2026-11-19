@@ -8,7 +8,7 @@ use dioxus::prelude::ServerFnError;
 use domain::{
     BreakRule, Event, EventKind, Fix, GeoPoint, ZoneStatus, classify, next_action, summarize_day,
 };
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 use store::repo::RepoError;
 use store::repo::site::{self, Site, ZonePolicy};
 use store::repo::time_event::{self, EventRow, NewEvent};
@@ -21,6 +21,8 @@ use crate::api::clock::{ClockResult, FixDto, TodayDto};
 const MAX_CLIENT_SKEW: Duration = Duration::hours(24);
 
 const MSG_BLOCKED: &str = "Je bent niet op school. Starten kan alleen op school.";
+const MSG_NO_LOCATION: &str = "We weten niet waar je bent. Starten kan alleen op school.";
+const MSG_UNCERTAIN: &str = "Je locatie is niet nauwkeurig genoeg. Probeer opnieuw buiten.";
 const MSG_ALREADY_STARTED: &str = "Je dag loopt al.";
 const MSG_NOT_STARTED: &str = "Je dag is nog niet gestart.";
 
@@ -100,17 +102,34 @@ fn name_of(sites: &[Site], id: Option<Uuid>) -> Option<String> {
         .map(|s| s.name.clone())
 }
 
-async fn events_today(
-    pool: &PgPool,
+async fn events_today<'e>(
+    executor: impl PgExecutor<'e>,
     person_id: Uuid,
     tz: Tz,
     now: DateTime<Utc>,
 ) -> Result<Vec<EventRow>, ClockError> {
     let (from, to) = today_bounds(tz, now);
-    Ok(time_event::events_between(pool, &[person_id], from, to).await?)
+    Ok(time_event::events_between(executor, &[person_id], from, to).await?)
+}
+
+/// Why a start with this zone status is refused under the `block` policy, `None` if it is allowed.
+/// Only a confirmed in-zone location may start; "unknown" and "not accurate enough" are refused
+/// too, otherwise switching off location would bypass the policy.
+fn block_refusal(status: ZoneStatus) -> Option<&'static str> {
+    match status {
+        ZoneStatus::InZone => None,
+        ZoneStatus::OutOfZone => Some(MSG_BLOCKED),
+        ZoneStatus::NoLocation => Some(MSG_NO_LOCATION),
+        ZoneStatus::Uncertain => Some(MSG_UNCERTAIN),
+    }
 }
 
 /// Handles a start/stop tap of `person_id` at server time `now`.
+///
+/// Zone policy: if ANY of the person's sites has the `block` policy, a start is only accepted when
+/// the status is in-zone (the safest choice for people who work at several sites). Stopping is
+/// never blocked, so nobody is stuck in an open day. The read of the last event and the insert run
+/// in one transaction under a per-person advisory lock, so concurrent taps cannot both be accepted.
 pub async fn clock_for(
     pool: &PgPool,
     keys: &DataKeys,
@@ -121,7 +140,9 @@ pub async fn clock_for(
     now: DateTime<Utc>,
 ) -> Result<ClockResult, ClockError> {
     let ctx = context(pool, keys, person_id).await?;
-    let events = events_today(pool, person_id, ctx.tz, now).await?;
+    let mut tx = pool.begin().await.map_err(RepoError::from)?;
+    time_event::lock_person(&mut tx, person_id).await?;
+    let events = events_today(&mut *tx, person_id, ctx.tz, now).await?;
     let last = events.last();
     let expected = next_action(last.map(|e| e.kind));
 
@@ -160,11 +181,10 @@ pub async fn clock_for(
     let result = classify(fix.as_ref(), &zones, &ctx.zone);
     let nearest = ctx.sites.iter().find(|s| Some(s.id) == result.site_id);
 
-    // A refused start must not leave a trace; stopping is never blocked, so nobody is stuck in an
-    // open day.
+    // A refused start must not leave a trace (the transaction is dropped without commit).
     if kind == EventKind::Start
-        && result.status == ZoneStatus::OutOfZone
-        && nearest.is_some_and(|s| s.zone_policy == ZonePolicy::Block)
+        && ctx.sites.iter().any(|s| s.zone_policy == ZonePolicy::Block)
+        && let Some(message) = block_refusal(result.status)
     {
         return Ok(ClockResult {
             kind: last.map_or(EventKind::Stop, |e| e.kind),
@@ -172,13 +192,13 @@ pub async fn clock_for(
             zone_status: result.status,
             site_name: nearest.map(|s| s.name.clone()),
             accepted: false,
-            message: Some(MSG_BLOCKED.to_string()),
+            message: Some(message.to_string()),
         });
     }
 
     let client_ts = client_ts.filter(|t| (*t - now).abs() <= MAX_CLIENT_SKEW);
     let row = time_event::append(
-        pool,
+        &mut *tx,
         keys,
         NewEvent {
             person_id,
@@ -192,6 +212,7 @@ pub async fn clock_for(
         },
     )
     .await?;
+    tx.commit().await.map_err(RepoError::from)?;
     Ok(ClockResult {
         kind: row.kind,
         at: row.server_ts,
@@ -226,6 +247,15 @@ pub async fn today_for(
     let summary = summarize_day(&day, &rule, now, false);
     let last = events.last();
     let site_id = last.and_then(|e| e.site_id).or(Some(first_site.id));
+    // Nothing today but the last event overall is a start: an earlier day was never stopped.
+    let stale_open_since = if events.is_empty() {
+        time_event::last_event(pool, person_id)
+            .await?
+            .filter(|e| e.kind == EventKind::Start)
+            .map(|e| e.server_ts.timestamp_millis())
+    } else {
+        None
+    };
     Ok(TodayDto {
         next: next_action(last.map(|e| e.kind)),
         started_at: summary.first_start,
@@ -234,6 +264,7 @@ pub async fn today_for(
         break_minutes: summary.break_minutes,
         open: summary.open,
         site_name: name_of(&ctx.sites, site_id),
+        stale_open_since,
     })
 }
 
@@ -435,6 +466,21 @@ mod tests {
         assert_eq!(r.site_name.as_deref(), Some("School Noord"));
     }
 
+    async fn event_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM time_event")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    fn inaccurate() -> Option<FixDto> {
+        Some(FixDto {
+            lat: 51.0,
+            lng: 4.0,
+            accuracy_m: 5000.0,
+        })
+    }
+
     #[sqlx::test(migrations = "../../migrations")]
     async fn block_policy_refuses_out_of_zone_start(pool: PgPool) {
         let k = keys();
@@ -446,15 +492,156 @@ mod tests {
             r.message.as_deref(),
             Some("Je bent niet op school. Starten kan alleen op school.")
         );
-        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM time_event")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(n, 0);
-        // Without location the start is not blocked, only flagged.
+        assert_eq!(event_count(&pool).await, 0);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn block_policy_refuses_start_without_location(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Block).await;
+        let r = tap(&pool, &k, p, EventKind::Start, None, T0()).await;
+        assert!(!r.accepted);
+        assert_eq!(r.zone_status, ZoneStatus::NoLocation);
+        assert_eq!(
+            r.message.as_deref(),
+            Some("We weten niet waar je bent. Starten kan alleen op school.")
+        );
+        assert_eq!(event_count(&pool).await, 0);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn block_policy_refuses_uncertain_start(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Block).await;
+        let r = tap(&pool, &k, p, EventKind::Start, inaccurate(), T0()).await;
+        assert!(!r.accepted);
+        assert_eq!(r.zone_status, ZoneStatus::Uncertain);
+        assert_eq!(
+            r.message.as_deref(),
+            Some("Je locatie is niet nauwkeurig genoeg. Probeer opnieuw buiten.")
+        );
+        assert_eq!(event_count(&pool).await, 0);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn block_policy_accepts_in_zone_start_and_never_blocks_stop(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Block).await;
+        assert!(
+            tap(&pool, &k, p, EventKind::Start, here(), T0())
+                .await
+                .accepted
+        );
+        let r = tap(
+            &pool,
+            &k,
+            p,
+            EventKind::Stop,
+            None,
+            T0() + Duration::hours(1),
+        )
+        .await;
+        assert!(r.accepted);
+        assert_eq!(r.zone_status, ZoneStatus::NoLocation);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn flag_policy_never_refuses(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Flag).await;
         let r = tap(&pool, &k, p, EventKind::Start, None, T0()).await;
         assert!(r.accepted);
         assert_eq!(r.zone_status, ZoneStatus::NoLocation);
+        let r = tap(
+            &pool,
+            &k,
+            p,
+            EventKind::Stop,
+            inaccurate(),
+            T0() + Duration::hours(1),
+        )
+        .await;
+        assert!(r.accepted);
+        let r = tap(
+            &pool,
+            &k,
+            p,
+            EventKind::Start,
+            inaccurate(),
+            T0() + Duration::hours(2),
+        )
+        .await;
+        assert!(r.accepted);
+        assert_eq!(r.zone_status, ZoneStatus::Uncertain);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn any_blocking_site_makes_the_person_blocked(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Flag).await;
+        // A second site of the same person, far from the first, with the block policy.
+        let mut other = input(ZonePolicy::Block);
+        other.name = "School Zuid".to_string();
+        other.lat = Some(52.0);
+        let s2 = site::create_site(&pool, &k, &other).await.unwrap();
+        role::assign(&pool, p, Role::Employee, Some(s2.id), None)
+            .await
+            .unwrap();
+        // Standing at the (flag) first site without a location is still refused.
+        let r = tap(&pool, &k, p, EventKind::Start, None, T0()).await;
+        assert!(!r.accepted);
+        assert_eq!(event_count(&pool).await, 0);
+        let r = tap(&pool, &k, p, EventKind::Start, here(), T0()).await;
+        assert!(r.accepted);
+        assert_eq!(r.zone_status, ZoneStatus::InZone);
+    }
+
+    /// Six simultaneous taps of the same kind; returns how many were accepted.
+    async fn fire_six(
+        pool: &PgPool,
+        k: &DataKeys,
+        p: Uuid,
+        kind: EventKind,
+        at: DateTime<Utc>,
+    ) -> usize {
+        let one = |i: i64| async move {
+            clock_for(
+                pool,
+                k,
+                p,
+                kind,
+                here(),
+                None,
+                at + Duration::milliseconds(i),
+            )
+            .await
+            .unwrap()
+        };
+        let results = tokio::join!(one(0), one(1), one(2), one(3), one(4), one(5));
+        [
+            results.0, results.1, results.2, results.3, results.4, results.5,
+        ]
+        .iter()
+        .filter(|r| r.accepted)
+        .count()
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn concurrent_starts_store_exactly_one_event(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Flag).await;
+        assert_eq!(fire_six(&pool, &k, p, EventKind::Start, T0()).await, 1);
+        assert_eq!(event_count(&pool).await, 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn concurrent_stops_store_exactly_one_event(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Flag).await;
+        tap(&pool, &k, p, EventKind::Start, here(), T0()).await;
+        let at = T0() + Duration::hours(1);
+        assert_eq!(fire_six(&pool, &k, p, EventKind::Stop, at).await, 1);
+        assert_eq!(event_count(&pool).await, 2);
     }
 
     #[sqlx::test(migrations = "../../migrations")]
@@ -514,6 +701,59 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(ts, vec![Some(near), None]);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn stale_open_day_is_reported_but_next_action_stays_start(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Flag).await;
+        assert_eq!(
+            today_for(&pool, &k, p, T0())
+                .await
+                .unwrap()
+                .stale_open_since,
+            None
+        );
+        tap(&pool, &k, p, EventKind::Start, here(), T0()).await;
+        // Same day: a normal open day, not stale.
+        let same = today_for(&pool, &k, p, T0() + Duration::hours(2))
+            .await
+            .unwrap();
+        assert!(same.open);
+        assert_eq!(same.stale_open_since, None);
+        // Next day, never stopped.
+        let next_day = T0() + Duration::days(1);
+        let t = today_for(&pool, &k, p, next_day).await.unwrap();
+        assert_eq!(t.stale_open_since, Some(T0().timestamp_millis()));
+        assert_eq!(t.next, EventKind::Start);
+        assert!(!t.open);
+        // Starting again today clears the flag from today's view.
+        tap(&pool, &k, p, EventKind::Start, here(), next_day).await;
+        let t = today_for(&pool, &k, p, next_day + Duration::hours(1))
+            .await
+            .unwrap();
+        assert_eq!(t.stale_open_since, None);
+        assert!(t.open);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn stopped_previous_day_is_not_stale(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Flag).await;
+        tap(&pool, &k, p, EventKind::Start, here(), T0()).await;
+        tap(
+            &pool,
+            &k,
+            p,
+            EventKind::Stop,
+            here(),
+            T0() + Duration::hours(4),
+        )
+        .await;
+        let t = today_for(&pool, &k, p, T0() + Duration::days(1))
+            .await
+            .unwrap();
+        assert_eq!(t.stale_open_since, None);
     }
 
     #[sqlx::test(migrations = "../../migrations")]

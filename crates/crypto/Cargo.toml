@@ -8,7 +8,7 @@ publish.workspace = true
 
 
 [dependencies]
-chacha20poly1305.workspace = true
+chacha20poly1305 = { workspace = true, features = ["zeroize"] }
 hmac.workspace = true
 sha2.workspace = true
 rand.workspace = true

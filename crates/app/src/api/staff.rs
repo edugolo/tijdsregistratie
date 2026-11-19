@@ -29,6 +29,11 @@ pub enum TodayStatusDto {
     Started(String),
     Stopped(String),
     OutOfZone(String),
+    /// The last event overall is a start on an earlier day that was never stopped; `since` is
+    /// preformatted in the organisation time zone, like `di 18/11 07:42`.
+    MissingStop {
+        since: String,
+    },
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]

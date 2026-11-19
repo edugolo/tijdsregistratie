@@ -1,0 +1,63 @@
+/* First-run wizard and organisation settings. Tokens fall back to the DESIGN.md defaults. */
+.su-page {
+  min-height: 100vh; display: flex; justify-content: center; align-items: flex-start;
+  padding: 16px; background: var(--bg, #f8fafc); color: var(--ink, #0f172a);
+  font-family: var(--font, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+}
+.su-page *, .su-form * { box-sizing: border-box; }
+.su-card {
+  width: 100%; max-width: 560px; display: flex; flex-direction: column; gap: 16px;
+  background: var(--surface, #fff); border: 1px solid var(--line, #e2e8f0);
+  border-radius: var(--radius, 12px); padding: 24px;
+}
+.su-card h1 { margin: 0; font-size: 24px; }
+.su-card p { margin: 0; }
+.su-progress { color: var(--sub, #64748b); font-size: 14px; font-weight: 600; }
+.su-bar { height: 6px; border-radius: 3px; background: var(--line, #e2e8f0); overflow: hidden; }
+.su-bar-fill { height: 100%; background: var(--brand, #1e3a8a); transition: width .2s; }
+.su-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
+
+.su-form { display: flex; flex-direction: column; gap: 16px; max-width: 560px; }
+.su-field { display: flex; flex-direction: column; gap: 4px; }
+.su-label { font-size: 14px; font-weight: 600; }
+.su-hint { font-size: 13px; color: var(--sub, #64748b); }
+.su-input {
+  min-height: 48px; padding: 0 12px; width: 100%; font: inherit;
+  border: 1.5px solid var(--line, #cbd5e1); border-radius: 12px;
+  background: var(--surface, #fff); color: var(--ink, #0f172a);
+}
+.su-input:focus-visible, .su-swatch:focus-visible, .su-check input:focus-visible {
+  outline: 3px solid var(--brand, #1e3a8a); outline-offset: 2px;
+}
+.su-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.su-swatches { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.su-swatch {
+  width: 44px; height: 44px; border-radius: 50%; border: 2px solid transparent; color: #fff;
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.su-swatch[aria-checked="true"] { border-color: var(--ink, #0f172a); box-shadow: 0 0 0 2px var(--surface, #fff) inset; }
+.su-custom { display: inline-flex; align-items: center; gap: 8px; }
+.su-custom input { width: 44px; height: 44px; padding: 0; border: 0; background: none; cursor: pointer; }
+.su-check { display: flex; align-items: center; gap: 12px; min-height: 48px; }
+.su-check input { width: 24px; height: 24px; flex: none; }
+.su-locate { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.su-locate .btn { width: auto; }
+.su-key { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; padding: 8px 0; }
+.su-key .icon { color: var(--brand, #1e3a8a); }
+.su-next { display: flex; flex-direction: column; gap: 12px; }
+.su-next .btn { text-decoration: none; }
+.su-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.su-actions .btn { flex: 1 1 140px; width: auto; }
+.su-error {
+  display: flex; align-items: flex-start; gap: 6px; font-size: 14px; font-weight: 600;
+  color: var(--warn-fg, #92400e); background: var(--warn-bg, #fef3c7);
+  padding: 10px 12px; border-radius: 12px;
+}
+.su-error .icon { flex: none; margin-top: 2px; }
+.su-saved { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--ok-fg, #166534); }
+
+@media (max-width: 480px) {
+  .su-page { padding: 0; }
+  .su-card { border-radius: 0; border-left: 0; border-right: 0; padding: 16px; }
+}
+@media (prefers-reduced-motion: reduce) { .su-bar-fill { transition: none; } }

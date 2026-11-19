@@ -9,10 +9,10 @@ pub fn PwaHead() -> Element {
     use_effect(|| {
         #[cfg(feature = "web")]
         {
-            document::eval(
-                "if ('serviceWorker' in navigator) { \
-                 navigator.serviceWorker.register('/sw.js').catch(() => {}); }",
-            );
+            // Registered via web-sys rather than `document::eval`, which the CSP (no unsafe-eval) blocks.
+            if let Some(window) = web_sys::window() {
+                let _ = window.navigator().service_worker().register("/sw.js");
+            }
         }
     });
 

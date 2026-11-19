@@ -33,6 +33,7 @@ pub fn t(key: &str) -> &str {
         "chip.started" => "Gestart",
         "chip.stopped" => "Gestopt",
         "chip.out_of_zone" => "Niet op school",
+        "chip.missing_stop" => "Niet gestopt sinds",
         "chip.active" => "Actief",
         "chip.inactive" => "Niet actief",
 
@@ -100,6 +101,11 @@ pub fn members_count(n: usize) -> String {
 /// "Gestart om 07:42" style label for a status chip.
 pub fn status_at(key: &str, time: &str) -> String {
     format!("{} om {time}", t(key))
+}
+
+/// "Niet gestopt sinds di 10/03 07:42".
+pub fn missing_stop_label(since: &str) -> String {
+    format!("{} {since}", t("chip.missing_stop"))
 }
 
 /// "Nog 14:32 geldig".

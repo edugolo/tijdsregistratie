@@ -30,7 +30,8 @@ impl std::fmt::Debug for IssuedToken {
     }
 }
 
-fn hash(raw: &str) -> Vec<u8> {
+/// SHA-256 of a raw token: the only form in which tokens are stored (and kept in ceremony state).
+pub fn token_hash(raw: &str) -> Vec<u8> {
     Sha256::digest(raw.as_bytes()).to_vec()
 }
 
@@ -61,7 +62,7 @@ pub async fn issue_token(
         "INSERT INTO enrollment_token (token_hash, person_id, issued_by, expires_at, created_at) \
          VALUES ($1, $2, $3, $4, $5)",
     )
-    .bind(hash(&raw))
+    .bind(token_hash(&raw))
     .bind(person_id)
     .bind(issued_by)
     .bind(expires_at)
@@ -79,24 +80,67 @@ pub async fn issue_token(
 
 /// Returns the person the token belongs to if it is unused and not expired, without consuming it.
 pub async fn peek_valid(pool: &PgPool, raw: &str) -> Result<Option<Uuid>> {
+    peek_valid_by_hash(pool, &token_hash(raw)).await
+}
+
+/// Like [`peek_valid`], for a token that is only known by its hash.
+pub async fn peek_valid_by_hash(pool: &PgPool, hash: &[u8]) -> Result<Option<Uuid>> {
     Ok(sqlx::query_scalar(
         "SELECT person_id FROM enrollment_token \
          WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()",
     )
-    .bind(hash(raw))
+    .bind(hash)
     .fetch_optional(pool)
     .await?)
 }
 
 /// Atomically marks the token used and returns its person, or `None` if it is unknown, used or expired.
 pub async fn consume(pool: &PgPool, raw: &str) -> Result<Option<Uuid>> {
+    consume_by_hash(pool, &token_hash(raw)).await
+}
+
+/// Like [`consume`], for a token that is only known by its hash. Takes a pool or a transaction.
+pub async fn consume_by_hash<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    hash: &[u8],
+) -> Result<Option<Uuid>> {
     Ok(sqlx::query_scalar(
         "UPDATE enrollment_token SET used_at = now() \
          WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now() RETURNING person_id",
     )
-    .bind(hash(raw))
-    .fetch_optional(pool)
+    .bind(hash)
+    .fetch_optional(db)
     .await?)
+}
+
+/// Finishes an enrollment in one transaction: consume the token (it must belong to `person_id`),
+/// store the passkey and write the audit row. Returns the new passkey id, or `None` (and changes
+/// nothing) if the token is unknown, used, expired or belongs to someone else. Any error rolls
+/// back, leaving the token unused.
+pub async fn complete(
+    pool: &PgPool,
+    hash: &[u8],
+    person_id: Uuid,
+    credential_id: &[u8],
+    credential_json: serde_json::Value,
+) -> Result<Option<Uuid>> {
+    let mut tx = pool.begin().await?;
+    if consume_by_hash(&mut *tx, hash).await? != Some(person_id) {
+        return Ok(None);
+    }
+    let passkey_id =
+        super::passkey::insert(&mut *tx, person_id, credential_id, credential_json).await?;
+    // Same row as `audit::record` writes, inside this transaction.
+    sqlx::query(
+        "INSERT INTO audit_log (actor_id, action, entity, entity_id, changed_fields) \
+         VALUES ($1, 'passkey.registered', 'passkey', $2, '{}')",
+    )
+    .bind(person_id)
+    .bind(passkey_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some(passkey_id))
 }
 
 #[cfg(test)]
@@ -174,6 +218,84 @@ mod tests {
         assert_eq!(consume(&pool, &old.raw).await.unwrap(), None);
         assert_eq!(peek_valid(&pool, &new.raw).await.unwrap(), Some(a));
         assert_eq!(peek_valid(&pool, &other.raw).await.unwrap(), Some(b));
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn consume_by_hash_matches_raw_token(pool: PgPool) {
+        let p = person(&pool).await;
+        let t = issue_token(&pool, p, None, Duration::minutes(15))
+            .await
+            .unwrap();
+        let h = token_hash(&t.raw);
+        assert_eq!(peek_valid_by_hash(&pool, &h).await.unwrap(), Some(p));
+        assert_eq!(consume_by_hash(&pool, &h).await.unwrap(), Some(p));
+        assert_eq!(consume_by_hash(&pool, &h).await.unwrap(), None);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn complete_consumes_token_and_stores_passkey_atomically(pool: PgPool) {
+        let p = person(&pool).await;
+        let t = issue_token(&pool, p, None, Duration::minutes(15))
+            .await
+            .unwrap();
+        let h = token_hash(&t.raw);
+        let id = complete(&pool, &h, p, b"cred-1", serde_json::json!({}))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(peek_valid(&pool, &t.raw).await.unwrap(), None);
+        let stored = super::super::passkey::find_by_credential_id(&pool, b"cred-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.id, id);
+        let audit: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_log WHERE action = 'passkey.registered' AND entity_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(audit, 1);
+        // Second use: nothing happens.
+        assert!(
+            complete(&pool, &h, p, b"cred-2", serde_json::json!({}))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn complete_failure_leaves_token_unused(pool: PgPool) {
+        let (a, b) = (person(&pool).await, person(&pool).await);
+        super::super::passkey::insert(&pool, b, b"dup", serde_json::json!({}))
+            .await
+            .unwrap();
+        let t = issue_token(&pool, a, None, Duration::minutes(15))
+            .await
+            .unwrap();
+        let h = token_hash(&t.raw);
+        // Passkey insert fails (credential id taken): the token must not be burnt.
+        assert!(
+            complete(&pool, &h, a, b"dup", serde_json::json!({}))
+                .await
+                .is_err()
+        );
+        assert_eq!(peek_valid(&pool, &t.raw).await.unwrap(), Some(a));
+        // Token of another person than the ceremony's: rejected, token untouched.
+        assert!(
+            complete(&pool, &h, b, b"fresh", serde_json::json!({}))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(peek_valid(&pool, &t.raw).await.unwrap(), Some(a));
+        let audit: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(audit, 0);
     }
 
     #[sqlx::test(migrations = "../../migrations")]

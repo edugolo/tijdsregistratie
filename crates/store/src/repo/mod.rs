@@ -6,6 +6,7 @@ pub mod passkey;
 pub mod person;
 pub mod role;
 pub mod settings;
+pub mod setup;
 pub mod site;
 #[cfg(test)]
 mod tests;

@@ -42,6 +42,10 @@ pub struct TodayDto {
     /// A start without a stop yet.
     pub open: bool,
     pub site_name: Option<String>,
+    /// Unix milliseconds of a start on an earlier day that was never stopped (the last event
+    /// overall is that start and there is nothing today). The next action stays a start; a
+    /// manager corrects the forgotten stop later.
+    pub stale_open_since: Option<i64>,
 }
 
 /// Records a start or stop for the signed-in person. The server time is authoritative.

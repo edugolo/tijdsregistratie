@@ -89,7 +89,8 @@ fn sess(e: tower_sessions::session::Error) -> AuthError {
 struct RegistrationCeremony {
     state: PasskeyRegistration,
     person_id: Uuid,
-    token: String,
+    /// SHA-256 of the enrollment token; the raw token never enters the session.
+    token_hash: Vec<u8>,
 }
 
 fn first_name(display_name: &str) -> String {
@@ -131,7 +132,7 @@ async fn me_of(state: &AppState, p: &Person) -> Result<(Me, SessionKind)> {
     Ok((me, kind))
 }
 
-async fn sign_in(state: &AppState, session: &Session, p: &Person) -> Result<Me> {
+async fn sign_in(state: &AppState, session: &Session, p: &Person, passkey_id: Uuid) -> Result<Me> {
     let (me, kind) = me_of(state, p).await?;
     session::set_user(
         session,
@@ -139,6 +140,7 @@ async fn sign_in(state: &AppState, session: &Session, p: &Person) -> Result<Me> 
             person_id: p.id,
             kind,
             authenticated_at: chrono::Utc::now(),
+            passkey_id,
         },
     )
     .await
@@ -203,7 +205,7 @@ pub async fn begin_registration(
         &RegistrationCeremony {
             state: reg,
             person_id,
-            token: token.to_string(),
+            token_hash: enrollment::token_hash(token),
         },
     )
     .await
@@ -238,7 +240,7 @@ pub async fn finish_registration(
             tracing::warn!(person_id = %ceremony.person_id, error = %e, "passkey registration rejected");
             AuthError::Login
         })?;
-    // A credential id belongs to exactly one person; check before burning the token.
+    // A credential id belongs to exactly one person; check before touching the token.
     if passkey::find_by_credential_id(&state.pool, new_key.cred_id().as_ref())
         .await
         .map_err(db)?
@@ -247,32 +249,27 @@ pub async fn finish_registration(
         tracing::warn!(person_id = %ceremony.person_id, "credential id already registered");
         return Err(AuthError::Login);
     }
-    let consumed = enrollment::consume(&state.pool, &ceremony.token)
-        .await
-        .map_err(db)?;
-    if consumed != Some(ceremony.person_id) {
-        tracing::warn!(person_id = %ceremony.person_id, "enrollment token no longer valid at finish");
-        return Err(AuthError::Token);
-    }
     let p = active_person(state, ceremony.person_id)
         .await
         .map_err(|_| AuthError::Token)?;
     let json =
         serde_json::to_value(&new_key).map_err(|e| internal("serialize passkey failed")(&e))?;
-    let passkey_id = passkey::insert(&state.pool, p.id, new_key.cred_id().as_ref(), json)
-        .await
-        .map_err(db)?;
-    audit::record(
+    // Token, passkey and audit row are written in one transaction: a failure leaves the token
+    // unused so the person can retry.
+    let passkey_id = enrollment::complete(
         &state.pool,
-        Some(p.id),
-        "passkey.registered",
-        "passkey",
-        Some(passkey_id),
-        &[],
+        &ceremony.token_hash,
+        p.id,
+        new_key.cred_id().as_ref(),
+        json,
     )
     .await
-    .map_err(db)?;
-    sign_in(state, session, &p).await
+    .map_err(db)?
+    .ok_or_else(|| {
+        tracing::warn!(person_id = %ceremony.person_id, "enrollment token no longer valid at finish");
+        AuthError::Token
+    })?;
+    sign_in(state, session, &p, passkey_id).await
 }
 
 pub async fn begin_login(state: &AppState, session: &Session) -> Result<RequestChallengeResponse> {
@@ -301,7 +298,10 @@ pub async fn finish_login(
         .webauthn
         .identify_discoverable_authentication(credential)
         .map_err(|_| AuthError::Login)?;
-    let stored = passkey::find_by_credential_id(&state.pool, credential_id)
+    // The passkey row stays locked from here to the commit: concurrent logins with one passkey
+    // are serialized, so the signature counter check cannot be raced.
+    let mut tx = state.pool.begin().await.map_err(|e| db(e.into()))?;
+    let stored = passkey::find_by_credential_id_for_update(&mut tx, credential_id)
         .await
         .map_err(db)?
         .ok_or(AuthError::Login)?;
@@ -325,22 +325,27 @@ pub async fn finish_login(
         })?;
     key.update_credential(&result);
     let json = serde_json::to_value(&key).map_err(|e| internal("serialize passkey failed")(&e))?;
-    passkey::update_after_login(&state.pool, stored.id, json)
+    passkey::update_after_login(&mut *tx, stored.id, json)
         .await
         .map_err(db)?;
+    tx.commit().await.map_err(|e| db(e.into()))?;
     audit::record(&state.pool, Some(p.id), "login", "person", Some(p.id), &[])
         .await
         .map_err(db)?;
-    sign_in(state, session, &p).await
+    sign_in(state, session, &p, stored.id).await
 }
 
 pub async fn logout(session: &Session) -> Result<()> {
     session::clear(session).await.map_err(sess)
 }
 
-/// The active signed-in person, or `None`. A deactivated person counts as signed out.
+/// The active signed-in person, or `None`. A deactivated person, a revoked passkey or ended
+/// sessions count as signed out.
 pub async fn me(state: &AppState, session: &Session) -> Result<Option<Me>> {
-    let Some(user) = session::get_user(session).await.map_err(sess)? else {
+    let Some(user) = session::current(&state.pool, session)
+        .await
+        .map_err(|e| internal("session check failed")(&e))?
+    else {
         return Ok(None);
     };
     match active_person(state, user.person_id).await {
@@ -584,6 +589,220 @@ mod tests {
             AuthError::Login
         );
         assert!(me_none(&state, &s).await);
+    }
+
+    async fn signed_in(state: &AppState, name: &str) -> (Person, Session, Vec<u8>, SoftPasskey) {
+        let (p, token) = person_with_token(state, name).await;
+        let mut auth = SoftPasskey::new(true);
+        let session = new_session();
+        let (me, id) = register(state, &session, &mut auth, &token).await;
+        me.unwrap();
+        (p, session, id.unwrap(), auth)
+    }
+
+    async fn signed_in_user(state: &AppState, session: &Session) -> bool {
+        session::current(&state.pool, session)
+            .await
+            .unwrap()
+            .is_some()
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn revoking_devices_ends_open_sessions(pool: PgPool) {
+        let state = state(pool);
+        let (p, session, id, mut auth) = signed_in(&state, "Jan Peeters").await;
+        // A second device, signed in through a login.
+        let other = new_session();
+        login(&state, &other, &mut auth, &id, &p.user_handle)
+            .await
+            .unwrap();
+        assert!(signed_in_user(&state, &session).await);
+        assert!(signed_in_user(&state, &other).await);
+
+        passkey::revoke_all(&state.pool, p.id, None).await.unwrap();
+        assert!(!signed_in_user(&state, &session).await);
+        assert!(!signed_in_user(&state, &other).await);
+        // The dead session is cleared, not just ignored.
+        assert!(session::get_user(&session).await.unwrap().is_none());
+        assert!(me_none(&state, &other).await);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn deactivating_ends_open_sessions_for_good(pool: PgPool) {
+        let state = state(pool);
+        let (p, session, _, _) = signed_in(&state, "Jan Peeters").await;
+        assert!(signed_in_user(&state, &session).await);
+        person::set_active(&state.pool, p.id, false).await.unwrap();
+        assert!(!signed_in_user(&state, &session).await);
+        assert!(session::get_user(&session).await.unwrap().is_none());
+
+        // Reactivation does not revive a session that was ended; here the same session state is
+        // put back to prove the database, not the cleared session, rejects it.
+        let (p2, session2, _, _) = signed_in(&state, "Els Janssens").await;
+        let user = session::get_user(&session2).await.unwrap().unwrap();
+        person::set_active(&state.pool, p2.id, false).await.unwrap();
+        person::set_active(&state.pool, p2.id, true).await.unwrap();
+        assert!(!signed_in_user(&state, &session2).await);
+        let revived = new_session();
+        session::set_user(&revived, user).await.unwrap();
+        assert!(!signed_in_user(&state, &revived).await);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn session_dies_with_its_own_passkey_even_without_a_bump(pool: PgPool) {
+        let state = state(pool);
+        let (p, session, _, _) = signed_in(&state, "Jan Peeters").await;
+        assert!(signed_in_user(&state, &session).await);
+        sqlx::query("UPDATE passkey SET revoked_at = now() WHERE person_id = $1")
+            .bind(p.id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        assert!(!signed_in_user(&state, &session).await);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn session_remembers_the_passkey_it_signed_in_with(pool: PgPool) {
+        let state = state(pool);
+        let (p, session, id, mut auth) = signed_in(&state, "Jan Peeters").await;
+        let stored = passkey::find_by_credential_id(&state.pool, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        let user = session::get_user(&session).await.unwrap().unwrap();
+        assert_eq!(user.passkey_id, stored.id);
+        let other = new_session();
+        login(&state, &other, &mut auth, &id, &p.user_handle)
+            .await
+            .unwrap();
+        assert_eq!(
+            session::get_user(&other).await.unwrap().unwrap().passkey_id,
+            stored.id
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn staff_sessions_end_after_twelve_hours(pool: PgPool) {
+        let state = state(pool);
+        let (p, session, _, _) = signed_in(&state, "Els Manager").await;
+        let user = session::get_user(&session).await.unwrap().unwrap();
+        for (kind, age_hours, alive) in [
+            (SessionKind::Staff, 11, true),
+            (SessionKind::Staff, 13, false),
+            // Employees are not cut off at 12 hours.
+            (SessionKind::Employee, 13, true),
+        ] {
+            let s = new_session();
+            session::set_user(
+                &s,
+                SessionUser {
+                    kind,
+                    authenticated_at: chrono::Utc::now() - Duration::hours(age_hours),
+                    ..user.clone()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                signed_in_user(&state, &s).await,
+                alive,
+                "{kind:?} {age_hours}h"
+            );
+        }
+        assert_eq!(user.person_id, p.id);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn stale_ceremonies_are_rejected(pool: PgPool) {
+        let state = state(pool);
+        let stale = chrono::Utc::now() - Duration::minutes(6);
+
+        // Registration: the same ceremony, started six minutes ago, no longer finishes.
+        let (p, token) = person_with_token(&state, "Jan Peeters").await;
+        let session = new_session();
+        let challenge = begin_registration(&state, &session, &token).await.unwrap();
+        let cred = SoftPasskey::new(true)
+            .do_registration(origin(), challenge)
+            .unwrap();
+        let ceremony: RegistrationCeremony = session::take_ceremony(&session, REGISTRATION_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        session::put_ceremony_at(&session, REGISTRATION_KEY, &ceremony, stale)
+            .await
+            .unwrap();
+        assert_eq!(
+            finish_registration(&state, &session, &cred)
+                .await
+                .unwrap_err(),
+            AuthError::Token
+        );
+        assert_eq!(passkey::count_active(&state.pool, p.id).await.unwrap(), 0);
+        assert!(
+            enrollment_info(&state, &token).await.valid,
+            "token not burnt"
+        );
+
+        // Login likewise.
+        let mut auth = SoftPasskey::new(true);
+        let (me, id) = register(&state, &new_session(), &mut auth, &token).await;
+        me.unwrap();
+        let id = id.unwrap();
+        let s = new_session();
+        let mut ch = begin_login(&state, &s).await.unwrap();
+        ch.public_key.allow_credentials = vec![AllowCredentials {
+            type_: "public-key".to_string(),
+            id: id.clone(),
+            transports: None,
+        }];
+        let mut cred = auth.do_authentication(origin(), ch).unwrap();
+        cred.response.user_handle = Some(p.user_handle.clone());
+        let ceremony: DiscoverableAuthentication = session::take_ceremony(&s, LOGIN_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        session::put_ceremony_at(&s, LOGIN_KEY, &ceremony, stale)
+            .await
+            .unwrap();
+        assert_eq!(
+            finish_login(&state, &s, &cred).await.unwrap_err(),
+            AuthError::Login
+        );
+        assert!(me_none(&state, &s).await);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn raw_enrollment_token_is_not_kept_in_the_session(pool: PgPool) {
+        let state = state(pool);
+        let (_, token) = person_with_token(&state, "Jan Peeters").await;
+        let session = new_session();
+        begin_registration(&state, &session, &token).await.unwrap();
+        let stored: serde_json::Value = session.get(REGISTRATION_KEY).await.unwrap().unwrap();
+        assert!(!stored.to_string().contains(&token));
+        let ceremony: RegistrationCeremony = session::take_ceremony(&session, REGISTRATION_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ceremony.token_hash, enrollment::token_hash(&token));
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn login_is_serialized_per_passkey_and_counter_is_stored(pool: PgPool) {
+        let state = state(pool);
+        let (p, _, id, mut auth) = signed_in(&state, "Jan Peeters").await;
+        for _ in 0..3 {
+            login(&state, &new_session(), &mut auth, &id, &p.user_handle)
+                .await
+                .unwrap();
+        }
+        let stored = passkey::find_by_credential_id(&state.pool, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        let key: Passkey = serde_json::from_value(stored.credential).unwrap();
+        assert!(stored.last_used_at.is_some());
+        let stored_id: &[u8] = key.cred_id().as_ref();
+        assert_eq!(stored_id, id.as_slice());
     }
 
     #[sqlx::test(migrations = "../../migrations")]

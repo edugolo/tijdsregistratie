@@ -12,6 +12,6 @@ use dioxus::prelude::*;
 #[get("/api/health")]
 pub async fn health() -> Result<String> {
     let state = crate::server::app_state().await?;
-    sqlx::query("SELECT 1").execute(&state.pool).await?;
+    crate::server::check_database(&state.pool).await?;
     Ok(crate::server::health_status().to_string())
 }

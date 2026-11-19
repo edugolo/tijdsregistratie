@@ -9,6 +9,9 @@ use super::{RepoError, Result};
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrgSettings {
     pub display_name: String,
+    /// Short name for the app header and the installed app.
+    pub short_name: String,
+    pub has_logo: bool,
     pub brand_color: Option<String>,
     pub retention_days: i32,
     pub zone: ZoneConfig,
@@ -21,15 +24,26 @@ pub async fn get_settings(pool: &PgPool) -> Result<OrgSettings> {
     sqlx::query("INSERT INTO organisation_settings (id) VALUES (1) ON CONFLICT DO NOTHING")
         .execute(pool)
         .await?;
-    let (display_name, brand_color, retention_days, max_accuracy_m, tolerance_m, timezone): (
+    let (
+        display_name,
+        short_name,
+        has_logo,
+        brand_color,
+        retention_days,
+        max_accuracy_m,
+        tolerance_m,
+        timezone,
+    ): (
         String,
+        String,
+        bool,
         Option<String>,
         i32,
         f32,
         f32,
         String,
     ) = sqlx::query_as(
-        "SELECT display_name, brand_color, location_retention_days, max_accuracy_m, tolerance_m, timezone \
+        "SELECT display_name, short_name, logo IS NOT NULL, brand_color, location_retention_days, max_accuracy_m, tolerance_m, timezone \
          FROM organisation_settings WHERE id = 1",
     )
     .fetch_one(pool)
@@ -39,6 +53,8 @@ pub async fn get_settings(pool: &PgPool) -> Result<OrgSettings> {
         .map_err(|_| RepoError::InvalidValue("timezone"))?;
     Ok(OrgSettings {
         display_name,
+        short_name,
+        has_logo,
         brand_color,
         retention_days,
         zone: ZoneConfig {
@@ -47,4 +63,30 @@ pub async fn get_settings(pool: &PgPool) -> Result<OrgSettings> {
         },
         timezone,
     })
+}
+
+/// The organisation fields an admin can edit (setup wizard and A0).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrgProfile {
+    pub display_name: String,
+    pub short_name: String,
+    pub brand_color: String,
+    pub timezone: Tz,
+}
+
+/// Saves the organisation profile, inserting the settings row first if it is missing.
+pub async fn update_profile(pool: &PgPool, profile: &OrgProfile) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO organisation_settings (id, display_name, short_name, brand_color, timezone) \
+         VALUES (1, $1, $2, $3, $4) \
+         ON CONFLICT (id) DO UPDATE SET display_name = $1, short_name = $2, brand_color = $3, \
+         timezone = $4, updated_at = now()",
+    )
+    .bind(&profile.display_name)
+    .bind(&profile.short_name)
+    .bind(&profile.brand_color)
+    .bind(profile.timezone.name())
+    .execute(pool)
+    .await?;
+    Ok(())
 }

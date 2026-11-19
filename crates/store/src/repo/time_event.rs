@@ -5,7 +5,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use crypto::DataKeys;
 use domain::{EventKind, Fix, GeoPoint, ZoneStatus};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgExecutor, PgPool};
 use uuid::Uuid;
 
 use super::{RepoError, Result};
@@ -92,7 +92,11 @@ fn decode_fix(s: &str) -> Option<Fix> {
 }
 
 /// Stores an event; the id is generated here so the location can be bound to it.
-pub async fn append(pool: &PgPool, keys: &DataKeys, event: NewEvent) -> Result<EventRow> {
+pub async fn append<'e>(
+    executor: impl PgExecutor<'e>,
+    keys: &DataKeys,
+    event: NewEvent,
+) -> Result<EventRow> {
     let id = Uuid::new_v4();
     let location_enc = event
         .location
@@ -113,23 +117,59 @@ pub async fn append(pool: &PgPool, keys: &DataKeys, event: NewEvent) -> Result<E
     .bind(location_enc)
     .bind(event.zone_status.as_str())
     .bind(event.source)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
     row.into_event()
 }
 
+/// Serialises clocking per person for the rest of the transaction: take this lock before reading
+/// the last event, hold it until the event is inserted and committed. Other transactions asking for
+/// the same person block here; other people are unaffected.
+pub async fn lock_person(conn: &mut PgConnection, person_id: Uuid) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        .bind(person_id)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// The most recent event of a person.
-pub async fn last_event(pool: &PgPool, person_id: Uuid) -> Result<Option<EventRow>> {
+pub async fn last_event<'e>(
+    executor: impl PgExecutor<'e>,
+    person_id: Uuid,
+) -> Result<Option<EventRow>> {
     sqlx::query_as::<_, Row>(concat!(
         "SELECT ",
         columns!(),
         " FROM time_event WHERE person_id = $1 ORDER BY server_ts DESC, created_at DESC LIMIT 1"
     ))
     .bind(person_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?
     .map(Row::into_event)
     .transpose()
+}
+
+/// For each of the given people the latest event with `server_ts < before` (people without one are
+/// absent), ordered by person. Used to spot days that were started but never stopped.
+pub async fn last_events_before<'e>(
+    executor: impl PgExecutor<'e>,
+    person_ids: &[Uuid],
+    before: DateTime<Utc>,
+) -> Result<Vec<EventRow>> {
+    sqlx::query_as::<_, Row>(concat!(
+        "SELECT DISTINCT ON (person_id) ",
+        columns!(),
+        " FROM time_event WHERE person_id = ANY($1) AND server_ts < $2 \
+         ORDER BY person_id, server_ts DESC, created_at DESC"
+    ))
+    .bind(person_ids)
+    .bind(before)
+    .fetch_all(executor)
+    .await?
+    .into_iter()
+    .map(Row::into_event)
+    .collect()
 }
 
 /// The decrypted location of an event, `None` if there is none or it has been purged.
@@ -149,8 +189,8 @@ pub async fn event_location(pool: &PgPool, keys: &DataKeys, id: Uuid) -> Result<
 }
 
 /// Events of the given people with `from <= server_ts < to`, ordered by person then time.
-pub async fn events_between(
-    pool: &PgPool,
+pub async fn events_between<'e>(
+    executor: impl PgExecutor<'e>,
     person_ids: &[Uuid],
     from: DateTime<Utc>,
     to: DateTime<Utc>,
@@ -164,7 +204,7 @@ pub async fn events_between(
     .bind(person_ids)
     .bind(from)
     .bind(to)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?
     .into_iter()
     .map(Row::into_event)
@@ -322,6 +362,64 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn last_events_before_returns_one_event_per_person(pool: PgPool) {
+        let k = keys();
+        let a = person_id(&pool, &k).await;
+        let b = person_id(&pool, &k).await;
+        let t = Utc::now();
+        append(&pool, &k, new_event(a, EventKind::Start, t))
+            .await
+            .unwrap();
+        let a_stop = append(
+            &pool,
+            &k,
+            new_event(a, EventKind::Stop, t + Duration::hours(1)),
+        )
+        .await
+        .unwrap();
+        let b_start = append(
+            &pool,
+            &k,
+            new_event(b, EventKind::Start, t + Duration::minutes(5)),
+        )
+        .await
+        .unwrap();
+        // Later than the cut-off: ignored.
+        append(
+            &pool,
+            &k,
+            new_event(b, EventKind::Stop, t + Duration::hours(5)),
+        )
+        .await
+        .unwrap();
+        let mut got = last_events_before(&pool, &[a, b], t + Duration::hours(2))
+            .await
+            .unwrap();
+        got.sort_by_key(|e| e.server_ts);
+        assert_eq!(got, vec![b_start, a_stop]);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn truncate_is_refused(pool: PgPool) {
+        let k = keys();
+        let p = person_id(&pool, &k).await;
+        append(&pool, &k, new_event(p, EventKind::Start, Utc::now()))
+            .await
+            .unwrap();
+        assert!(
+            sqlx::query("TRUNCATE time_event")
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM time_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[sqlx::test(migrations = "../../migrations")]

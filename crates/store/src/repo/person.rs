@@ -126,14 +126,40 @@ pub async fn get_person_by_user_handle(
     .transpose()
 }
 
-/// Returns false if the person does not exist.
+/// Returns false if the person does not exist. Deactivating also ends all open sessions of the
+/// person (they stay ended when the person is activated again).
 pub async fn set_active(pool: &PgPool, id: Uuid, active: bool) -> Result<bool> {
-    let done = sqlx::query("UPDATE person SET active = $2 WHERE id = $1")
-        .bind(id)
-        .bind(active)
-        .execute(pool)
-        .await?;
+    let done = sqlx::query(
+        "UPDATE person SET active = $2, \
+         sessions_valid_after = CASE WHEN $2 THEN sessions_valid_after ELSE now() END \
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(active)
+    .execute(pool)
+    .await?;
     Ok(done.rows_affected() > 0)
+}
+
+/// Whether a session of `person_id` that signed in at `authenticated_at` with `passkey_id` may
+/// still be used: the person is active, no revocation or deactivation happened since, and the
+/// passkey belongs to the person and is not revoked.
+pub async fn session_is_valid(
+    pool: &PgPool,
+    person_id: Uuid,
+    passkey_id: Uuid,
+    authenticated_at: DateTime<Utc>,
+) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM person p JOIN passkey k ON k.person_id = p.id \
+         WHERE p.id = $1 AND k.id = $2 AND p.active AND k.revoked_at IS NULL \
+         AND p.sessions_valid_after <= $3)",
+    )
+    .bind(person_id)
+    .bind(passkey_id)
+    .bind(authenticated_at)
+    .fetch_one(pool)
+    .await?)
 }
 
 /// Whether the person exists and is active (no decryption needed).
