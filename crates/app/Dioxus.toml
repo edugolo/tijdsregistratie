@@ -1,0 +1,7 @@
+[application]
+
+[web.app]
+title = "Tijdsregistratie"
+
+[web.watcher]
+watch_path = ["src", "../../public"]

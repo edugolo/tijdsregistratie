@@ -1,0 +1,10 @@
+[package]
+name = "admin"
+description = "Operator CLI for the time registration app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap = { workspace = true }
