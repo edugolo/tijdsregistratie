@@ -6,13 +6,128 @@ pub fn t(key: &str) -> &str {
         "app.title" => "Tijdsregistratie",
         "health.label" => "Status van de server",
         "health.loading" => "Even laden...",
+
+        "action.start" => "START",
+        "action.stop" => "STOP",
+        "action.start_label" => "Start je dag",
+        "action.stop_label" => "Stop je dag",
+        "action.busy_label" => "Even wachten",
+        "action.ok" => "OK",
+
+        "chip.paired" => "Gekoppeld",
+        "chip.no_device" => "Geen toestel",
+        "chip.not_started" => "Nog niet gestart",
+        "chip.started_at" => "Gestart om",
+        "chip.out_of_zone" => "Niet op school",
+
+        "welcome.title" => "Welkom",
+        "welcome.body" => "Zet de app op je gsm. Zo vind je hem altijd terug.",
+        "welcome.install" => "Installeer de app",
+        "welcome.show_steps" => "Toon de stappen",
+        "welcome.hint" => "Op een iPhone zie je 3 korte stappen.",
+
+        "ios.title" => "Zet de app op je iPhone",
+        "ios.step1_before" => "Tik onderaan op",
+        "ios.step1_bold" => "Deel",
+        "ios.step2_before" => "Kies",
+        "ios.step2_bold" => "Zet op beginscherm",
+        "ios.step3_before" => "Tik op",
+        "ios.step3_bold" => "Voeg toe",
+        "ios.after" => "Open daarna de app via het nieuwe icoon.",
+        "ios.done" => "Klaar",
+
+        "key.title" => "Maak je sleutel aan",
+        "key.body" => "Je gebruikt je vingerafdruk of je gezicht. Een wachtwoord is niet nodig.",
+        "key.create" => "Sleutel aanmaken",
+
+        "location.title" => "Waarom je locatie?",
+        "location.body" => "Als je start of stopt, kijken we of je op school bent.",
+        "location.promise" => "We volgen je niet.",
+        "location.promise_rest" => "Tussendoor kijken we niets.",
+        "location.ok" => "Ik begrijp het",
+        "location.hint" => "Daarna vraagt je gsm om toestemming.",
+
+        "home.greeting" => "Goeiemorgen",
+        "home.start_hint" => "Tik om je dag te starten.",
+        "home.message_from" => "Bericht van",
+
+        "working.elapsed" => "Je werkt al",
+        "working.stop_hint" => "Tik als je naar huis gaat.",
+        "working.break_note" => "Pauze van {} wordt automatisch afgetrokken.",
+
+        "zone.title" => "Je bent niet op school",
+        "zone.saved_at" => "We hebben je start toch bewaard om",
+        "zone.manager" => "Je verantwoordelijke ziet dit en kan het nakijken.",
+
+        "stopped.title" => "Gestopt om",
+        "stopped.started" => "Gestart",
+        "stopped.stopped" => "Gestopt",
+        "stopped.break" => "Pauze",
+        "stopped.worked" => "Gewerkt",
+        "stopped.bye" => "Tot morgen!",
+
+        "login.title" => "Aanmelden",
+        "login.body" => "Gebruik je gezicht of vingerafdruk.",
+        "login.button" => "Aanmelden",
+        "login.new_phone" => "Nieuwe gsm? Vraag het aan je verantwoordelijke.",
+
+        "error.retry" => "Probeer opnieuw",
         _ => key,
+    }
+}
+
+/// Fills the `{}` placeholder of a string with a value.
+pub fn fill(template: &str, value: &str) -> String {
+    template.replacen("{}", value, 1)
+}
+
+/// Formats a clock time as `07:42`.
+pub fn format_time(hour: u32, minute: u32) -> String {
+    format!("{hour:02}:{minute:02}")
+}
+
+/// Formats a duration as `7 u 18`; under one hour as `30 min`.
+pub fn format_duration(total_minutes: u32) -> String {
+    let (hours, minutes) = (total_minutes / 60, total_minutes % 60);
+    if hours == 0 {
+        format!("{minutes} min")
+    } else {
+        format!("{hours} u {minutes:02}")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn time_is_zero_padded() {
+        assert_eq!(format_time(7, 42), "07:42");
+        assert_eq!(format_time(15, 5), "15:05");
+        assert_eq!(format_time(0, 0), "00:00");
+    }
+
+    #[test]
+    fn duration_uses_hours_and_minutes() {
+        assert_eq!(format_duration(438), "7 u 18");
+        assert_eq!(format_duration(135), "2 u 15");
+        assert_eq!(format_duration(485), "8 u 05");
+        assert_eq!(format_duration(60), "1 u 00");
+    }
+
+    #[test]
+    fn fill_replaces_placeholder() {
+        assert_eq!(
+            fill(t("working.break_note"), "30 min"),
+            "Pauze van 30 min wordt automatisch afgetrokken."
+        );
+    }
+
+    #[test]
+    fn short_duration_is_in_minutes() {
+        assert_eq!(format_duration(30), "30 min");
+        assert_eq!(format_duration(0), "0 min");
+    }
 
     #[test]
     fn known_key_is_translated() {
