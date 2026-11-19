@@ -3,8 +3,10 @@
 
 use dioxus::prelude::*;
 
-/// Liveness probe used by the hello-world page.
+/// Liveness probe: checks that the database answers.
 #[get("/api/health")]
 pub async fn health() -> Result<String> {
+    let state = crate::server::app_state().await?;
+    sqlx::query("SELECT 1").execute(&state.pool).await?;
     Ok(crate::server::health_status().to_string())
 }

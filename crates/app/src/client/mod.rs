@@ -1,5 +1,7 @@
 //! Client UI: routes and screens (placeholder).
 
+#[cfg(feature = "web")]
+pub mod glue;
 pub mod i18n;
 
 use dioxus::prelude::*;

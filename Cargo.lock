@@ -138,9 +138,12 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "app"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
+ "chrono",
  "crypto",
  "dioxus",
+ "js-sys",
  "serde",
  "serde_json",
  "sqlx",
@@ -151,7 +154,11 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "webauthn-rs",
+ "webauthn-rs-proto",
 ]
 
 [[package]]
@@ -538,8 +545,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
+ "cipher",
  "cpufeatures 0.3.1",
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "chacha20poly1305"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb"
+dependencies = [
+ "aead",
+ "chacha20",
+ "cipher",
+ "poly1305",
 ]
 
 [[package]]
@@ -882,6 +902,18 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 [[package]]
 name = "crypto"
 version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "chacha20poly1305",
+ "hmac",
+ "rand 0.10.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror 2.0.21",
+ "uuid",
+ "zeroize",
+]
 
 [[package]]
 name = "crypto-bigint"
@@ -1803,6 +1835,13 @@ dependencies = [
 [[package]]
 name = "domain"
 version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "uuid",
+]
 
 [[package]]
 name = "dotenvy"
@@ -3429,6 +3468,16 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "poly1305"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c"
+dependencies = [
+ "cpufeatures 0.3.1",
+ "universal-hash",
+]
 
 [[package]]
 name = "polyval"
@@ -5389,6 +5438,8 @@ checksum = "a0181c14ddd6c7b8b0b0132a5f1ea2f32be0d893cd3ea97b6e3b28886b8a3d1c"
 dependencies = [
  "cfg-if",
  "rustversion",
+ "serde",
+ "serde_json",
  "wasm-bindgen-macro",
  "wasm-bindgen-shared",
 ]
@@ -5528,10 +5579,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5555714098cd069e3c8b31e58ac14250b9ae185e949c21416bccb55ce8ac8a5c"
 dependencies = [
  "base64 0.21.7",
+ "js-sys",
  "serde",
+ "serde-wasm-bindgen",
  "serde_json",
  "serde_with",
  "url",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

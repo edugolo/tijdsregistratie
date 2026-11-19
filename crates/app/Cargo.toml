@@ -23,10 +23,24 @@ tower-sessions-sqlx-store = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 crypto = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+
+# Browser-only dependencies (glue)
+web-sys = { workspace = true, optional = true, features = [
+    "Window", "Navigator", "Event", "EventTarget", "MediaQueryList",
+    "Geolocation", "PositionOptions", "Position", "Coordinates", "PositionError",
+    "CredentialsContainer", "Credential", "PublicKeyCredential",
+    "CredentialCreationOptions", "CredentialRequestOptions",
+] }
+js-sys = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+webauthn-rs-proto = { workspace = true, optional = true }
 
 [features]
 default = ["web"]
-web = ["dioxus/web"]
+web = ["dioxus/web", "dep:web-sys", "dep:js-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:webauthn-rs-proto"]
 server = [
     "dioxus/server",
     "dep:axum",
@@ -38,4 +52,6 @@ server = [
     "dep:tracing",
     "dep:tracing-subscriber",
     "dep:crypto",
+    "dep:anyhow",
+    "dep:chrono",
 ]
