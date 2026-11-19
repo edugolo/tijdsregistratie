@@ -4,8 +4,8 @@
 pub fn t(key: &str) -> &str {
     match key {
         "app.title" => "Tijdsregistratie",
-        "health.label" => "Status van de server",
-        "health.loading" => "Even laden...",
+        "common.loading" => "Even laden...",
+        "nav.staff" => "Beheer",
 
         "action.start" => "START",
         "action.stop" => "STOP",
@@ -24,6 +24,7 @@ pub fn t(key: &str) -> &str {
         "welcome.body" => "Zet de app op je gsm. Zo vind je hem altijd terug.",
         "welcome.install" => "Installeer de app",
         "welcome.show_steps" => "Toon de stappen",
+        "welcome.continue" => "Verder",
         "welcome.hint" => "Op een iPhone zie je 3 korte stappen.",
 
         "ios.title" => "Zet de app op je iPhone",
@@ -39,6 +40,11 @@ pub fn t(key: &str) -> &str {
         "key.title" => "Maak je sleutel aan",
         "key.body" => "Je gebruikt je vingerafdruk of je gezicht. Een wachtwoord is niet nodig.",
         "key.create" => "Sleutel aanmaken",
+        "key.cancelled" => "Het is niet gelukt. Tik op de knop om opnieuw te proberen.",
+        "key.failed" => "Er ging iets mis. Probeer opnieuw.",
+        "key.unsupported" => "Dit toestel kan dit niet. Vraag hulp aan je verantwoordelijke.",
+        "code.invalid_title" => "Deze code werkt niet meer.",
+        "code.invalid_body" => "Vraag een nieuwe aan je verantwoordelijke.",
 
         "location.title" => "Waarom je locatie?",
         "location.body" => "Als je start of stopt, kijken we of je op school bent.",
@@ -56,7 +62,9 @@ pub fn t(key: &str) -> &str {
         "working.break_note" => "Pauze van {} wordt automatisch afgetrokken.",
 
         "zone.title" => "Je bent niet op school",
+        "zone.no_location_title" => "We weten niet waar je bent",
         "zone.saved_at" => "We hebben je start toch bewaard om",
+        "zone.saved_stop" => "We hebben je stop toch bewaard om",
         "zone.manager" => "Je verantwoordelijke ziet dit en kan het nakijken.",
 
         "stopped.title" => "Gestopt om",
@@ -72,6 +80,7 @@ pub fn t(key: &str) -> &str {
         "login.new_phone" => "Nieuwe gsm? Vraag het aan je verantwoordelijke.",
 
         "error.retry" => "Probeer opnieuw",
+        "error.network" => "Het is niet gelukt. Controleer je internet.",
         _ => key,
     }
 }

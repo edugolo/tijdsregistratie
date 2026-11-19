@@ -7,5 +7,5 @@ mod icon;
 
 pub use buttons::{ActionKind, MainActionButton, PrimaryButton, SecondaryButton};
 pub use cards::{DaySummaryCard, NoticeCard, StatusChip, Tone};
-pub use header::Screen;
+pub use header::{Screen, StaffLinkVisible};
 pub use icon::Icon;

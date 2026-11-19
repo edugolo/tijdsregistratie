@@ -57,23 +57,27 @@ fn screen(id: &str) -> Element {
     let started = format_time(7, 42);
     match id {
         "e1" => {
-            rsx! { Welcome { org_name: org(), person_name: person(), can_prompt_install: true, on_install: noop(), on_show_steps: noop() } }
+            rsx! { Welcome { org_name: org(), person_name: person(), can_prompt_install: true, ios_steps: true, on_install: noop(), on_show_steps: noop(), on_continue: noop() } }
         }
         "e1b" => rsx! { IosInstall { org_name: org(), on_done: noop() } },
-        "e2" => rsx! { CreateKey { org_name: org(), busy: false, on_create_key: noop() } },
+        "e2" => {
+            rsx! { CreateKey { org_name: org(), busy: false, error: None, on_create_key: noop() } }
+        }
         "e3" => rsx! { LocationExplain { org_name: org(), on_continue: noop() } },
         "e4" | "e4busy" => rsx! {
             Home {
                 org_name: org(),
                 person_name: person(),
-                site_name: SITE.to_string(),
+                site_name: Some(SITE.to_string()),
+                notice: None,
+                failed: false,
                 message: Some(Message { from: "Els".to_string(), text: "morgen start om 8u.".to_string() }),
                 busy: id == "e4busy",
                 on_start: noop(),
             }
         },
         "e5" => {
-            rsx! { Working { org_name: org(), person_name: person(), started_time: started, elapsed_minutes: 135, break_minutes: 30, busy: false, on_stop: noop() } }
+            rsx! { Working { org_name: org(), person_name: person(), started_time: started, elapsed_minutes: 135, break_minutes: 30, notice: None, failed: false, busy: false, on_stop: noop() } }
         }
         "e6" => {
             rsx! { OutOfZone { org_name: org(), person_name: person(), saved_time: started, on_ok: noop() } }
@@ -81,7 +85,7 @@ fn screen(id: &str) -> Element {
         "e7" => {
             rsx! { Stopped { org_name: org(), person_name: person(), started, stopped: format_time(15, 30), break_minutes: 30, worked_minutes: 438 } }
         }
-        "e8" => rsx! { Login { org_name: org(), busy: false, on_login: noop() } },
+        "e8" => rsx! { Login { org_name: org(), busy: false, error: None, on_login: noop() } },
         _ => rsx! { p { "Unknown screen" } },
     }
 }

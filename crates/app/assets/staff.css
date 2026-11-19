@@ -36,7 +36,7 @@
   padding: 12px 16px; background: var(--surface, #fff); border-bottom: 1px solid var(--line, #e2e8f0);
 }
 .st-logo { font-weight: 700; color: var(--brand, #1e3a8a); }
-.st-person { color: var(--sub, #64748b); font-size: 14px; text-align: right; }
+.st-person { margin-left: auto; color: var(--sub, #64748b); font-size: 14px; text-align: right; }
 .st-nav {
   display: flex; gap: 4px; padding: 0 16px; overflow-x: auto;
   background: var(--surface, #fff); border-bottom: 1px solid var(--line, #e2e8f0);

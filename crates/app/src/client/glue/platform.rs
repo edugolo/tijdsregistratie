@@ -25,6 +25,35 @@ pub fn platform_from_user_agent(ua: &str, max_touch_points: u32) -> Platform {
     }
 }
 
+/// True for Safari on iOS/iPadOS: other iOS browsers have no "Zet op beginscherm" in the same place.
+pub fn is_ios_safari_ua(ua: &str) -> bool {
+    ua.contains("Safari")
+        && !["CriOS", "FxiOS", "EdgiOS", "OPiOS"]
+            .iter()
+            .any(|other| ua.contains(other))
+}
+
+/// True when this is Safari on an iPhone or iPad.
+pub fn is_ios_safari() -> bool {
+    let Some(nav) = web_sys::window().map(|w| w.navigator()) else {
+        return false;
+    };
+    let ua = nav.user_agent().unwrap_or_default();
+    platform_from_user_agent(&ua, nav.max_touch_points().max(0) as u32) == Platform::Ios
+        && is_ios_safari_ua(&ua)
+}
+
+/// Resolves after `ms` milliseconds.
+pub async fn sleep_ms(ms: i32) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+    });
+    let _ = JsFuture::from(promise).await;
+}
+
 pub fn platform() -> Platform {
     let Some(nav) = web_sys::window().map(|w| w.navigator()) else {
         return Platform::Other;
@@ -125,6 +154,14 @@ pub async fn prompt_install() -> Result<bool, InstallError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_ios_safari() {
+        let safari = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1";
+        let chrome = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 CriOS/120.0 Mobile/15E148 Safari/604.1";
+        assert!(is_ios_safari_ua(safari));
+        assert!(!is_ios_safari_ua(chrome));
+    }
 
     #[test]
     fn detects_platform() {

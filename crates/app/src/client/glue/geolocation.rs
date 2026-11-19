@@ -1,6 +1,6 @@
 //! `navigator.geolocation.getCurrentPosition` as an async function.
 
-use js_sys::{Promise, Reflect};
+use js_sys::{Function, Promise, Reflect};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
@@ -60,6 +60,26 @@ pub async fn current_position(timeout_ms: u32) -> Result<Fix, GeoError> {
             .dyn_ref::<web_sys::PositionError>()
             .map_or(GeoError::Unavailable, |e| geo_error_from_code(e.code()))),
     }
+}
+
+/// True when the geolocation permission is already granted (Permissions API; false when unknown).
+pub async fn permission_granted() -> bool {
+    async fn state() -> Option<String> {
+        let nav = web_sys::window()?.navigator();
+        let perms = Reflect::get(nav.as_ref(), &"permissions".into())
+            .ok()
+            .filter(|v| !v.is_undefined())?;
+        let query: Function = Reflect::get(&perms, &"query".into())
+            .ok()?
+            .dyn_into()
+            .ok()?;
+        let arg = js_sys::Object::new();
+        Reflect::set(&arg, &"name".into(), &"geolocation".into()).ok()?;
+        let promise: Promise = query.call1(&perms, &arg).ok()?.dyn_into().ok()?;
+        let status = JsFuture::from(promise).await.ok()?;
+        Reflect::get(&status, &"state".into()).ok()?.as_string()
+    }
+    state().await.as_deref() == Some("granted")
 }
 
 fn fix_from_position(pos: &JsValue) -> Option<Fix> {

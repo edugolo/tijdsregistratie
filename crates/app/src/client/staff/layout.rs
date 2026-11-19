@@ -11,6 +11,7 @@ pub enum StaffNav {
     Team,
     Sites,
     People,
+    Organisation,
 }
 
 impl StaffNav {
@@ -19,14 +20,20 @@ impl StaffNav {
             Self::Team => "staff.nav.team",
             Self::Sites => "staff.nav.sites",
             Self::People => "staff.nav.people",
+            Self::Organisation => "staff.nav.org",
         }
     }
 }
 
-/// Navigation entries for a role: "Mijn team" for everyone, the other two for admins only.
+/// Navigation entries for a role: "Mijn team" for everyone, the others for admins only.
 pub fn nav_items(is_admin: bool) -> Vec<StaffNav> {
     if is_admin {
-        vec![StaffNav::Team, StaffNav::Sites, StaffNav::People]
+        vec![
+            StaffNav::Team,
+            StaffNav::Sites,
+            StaffNav::People,
+            StaffNav::Organisation,
+        ]
     } else {
         vec![StaffNav::Team]
     }
@@ -39,6 +46,7 @@ pub fn StaffShell(
     is_admin: bool,
     active: StaffNav,
     on_navigate: EventHandler<StaffNav>,
+    on_logout: EventHandler<()>,
     children: Element,
 ) -> Element {
     let items = nav_items(is_admin);
@@ -48,6 +56,12 @@ pub fn StaffShell(
             header { class: "st-header",
                 span { class: "st-logo", "{org_name}" }
                 span { class: "st-person", "{person_name}" }
+                button {
+                    class: "st-btn st-btn-ghost",
+                    r#type: "button",
+                    onclick: move |_| on_logout.call(()),
+                    {t("staff.logout")}
+                }
             }
             if items.len() > 1 {
                 nav { class: "st-nav", aria_label: t("staff.nav.label"),
@@ -78,10 +92,15 @@ mod tests {
     }
 
     #[test]
-    fn admin_sees_all_three() {
+    fn admin_sees_all_four() {
         assert_eq!(
             nav_items(true),
-            vec![StaffNav::Team, StaffNav::Sites, StaffNav::People]
+            vec![
+                StaffNav::Team,
+                StaffNav::Sites,
+                StaffNav::People,
+                StaffNav::Organisation
+            ]
         );
     }
 }

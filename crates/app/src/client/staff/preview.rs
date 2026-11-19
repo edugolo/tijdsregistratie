@@ -156,6 +156,7 @@ pub fn StaffPreview() -> Element {
             is_admin: true,
             active: active(),
             on_navigate: move |nav| active.set(nav),
+            on_logout: |_| {},
             h2 { class: "st-preview-label", "M1" }
             TeamPage {
                 sites: sites.clone(),
