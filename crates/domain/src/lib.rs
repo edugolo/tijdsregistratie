@@ -2,15 +2,18 @@
 //!
 //! This crate performs no IO, no database access and never reads the clock; callers pass time in.
 
-/// Name of the crate, used as a trivial smoke-test target until real logic lands.
-pub const CRATE_NAME: &str = "domain";
+pub mod day;
+pub mod geo;
+pub mod zone;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub use day::{Anomaly, BreakRule, DaySummary, Event, EventKind, next_action, summarize_day};
+pub use geo::{GeoPoint, haversine_m};
+pub use zone::{Fix, SiteZone, ZoneConfig, ZoneResult, ZoneStatus, classify};
 
-    #[test]
-    fn crate_name_is_domain() {
-        assert_eq!(CRATE_NAME, "domain");
-    }
+/// Error returned when a stored string does not map to a domain enum.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown {kind} value: {value:?}")]
+pub struct ParseEnumError {
+    pub kind: &'static str,
+    pub value: String,
 }
