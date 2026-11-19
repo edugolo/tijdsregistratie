@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod clock;
+pub mod setup;
 pub mod staff;
 
 use dioxus::prelude::*;

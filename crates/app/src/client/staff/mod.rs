@@ -7,6 +7,7 @@ pub mod enroll;
 pub mod i18n;
 mod icons;
 pub mod layout;
+pub mod pages;
 pub mod people;
 pub mod preview;
 pub mod sites;

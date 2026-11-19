@@ -6,6 +6,7 @@ pub mod glue;
 pub mod i18n;
 mod preview;
 mod screens;
+pub mod setup;
 pub mod staff;
 
 use dioxus::prelude::*;
