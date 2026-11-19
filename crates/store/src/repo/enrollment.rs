@@ -130,14 +130,14 @@ pub async fn complete(
     }
     let passkey_id =
         super::passkey::insert(&mut *tx, person_id, credential_id, credential_json).await?;
-    // Same row as `audit::record` writes, inside this transaction.
-    sqlx::query(
-        "INSERT INTO audit_log (actor_id, action, entity, entity_id, changed_fields) \
-         VALUES ($1, 'passkey.registered', 'passkey', $2, '{}')",
+    super::audit::record(
+        &mut *tx,
+        Some(person_id),
+        "passkey.registered",
+        "passkey",
+        Some(passkey_id),
+        &[],
     )
-    .bind(person_id)
-    .bind(passkey_id)
-    .execute(&mut *tx)
     .await?;
     tx.commit().await?;
     Ok(Some(passkey_id))

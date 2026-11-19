@@ -8,7 +8,7 @@ mod logic;
 mod login;
 
 pub use branding::{brand_style, provide_branding, use_org_name};
-pub use enroll::{EnrollPage, EnrollToken};
+pub use enroll::{EnrollPage, LegacyCode, LegacyEnrollPage};
 pub use env::init_install_prompt;
 pub use home::HomePage;
 pub use login::LoginPage;

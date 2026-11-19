@@ -49,6 +49,33 @@ pub async fn session() -> Result<Session, ServerFnError> {
     FullstackContext::extract::<Session, _>().await
 }
 
+/// Runs the app: binds `IP`/`PORT` (default 127.0.0.1:8080) and serves the router with the peer
+/// address attached to every request (`dioxus::serve` does not, which per-client rate limiting
+/// needs). Does not return.
+pub fn serve(app: fn() -> dioxus::prelude::Element) -> ! {
+    dioxus::logger::initialize_default();
+    let runtime = tokio::runtime::Runtime::new().expect("cannot start the async runtime");
+    let result: anyhow::Result<()> = runtime.block_on(async {
+        let addr = dioxus::cli_config::fullstack_address_or_localhost();
+        let router = build_router(app).await?;
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        tracing::info!("listening on {addr}");
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await?;
+        Ok(())
+    });
+    match result {
+        Ok(()) => unreachable!("the server never stops on its own"),
+        Err(e) => {
+            eprintln!("fatal: {e:#}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Builds the axum router: Dioxus app and server functions, with state, session and HTTP guard layers.
 pub async fn build_router(app: fn() -> dioxus::prelude::Element) -> anyhow::Result<axum::Router> {
     let config = config::AppConfig::from_env()?;
@@ -69,6 +96,11 @@ pub async fn build_router(app: fn() -> dioxus::prelude::Element) -> anyhow::Resu
         .connect(&config.database_url)
         .await?;
     sqlx::migrate!("../../migrations").run(&pool).await?;
+    // In setup mode this puts the setup code in the log right after boot (the lazy path in
+    // `setup::required` still covers expiry later on).
+    setup::required(&pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("setup check failed: {e:?}"))?;
     let session_layer = session::layer(pool.clone(), &config).await?;
     let guard = auth::http::HttpGuard::new(&config);
     let state = AppState::new(pool, config, keys, blind)?;

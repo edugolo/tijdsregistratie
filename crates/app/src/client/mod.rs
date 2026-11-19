@@ -14,7 +14,7 @@ pub mod staff;
 use dioxus::prelude::*;
 
 use crate::api::setup::setup_required;
-use employee::{EnrollPage, EnrollToken, HomePage, LoginPage};
+use employee::{EnrollPage, HomePage, LegacyCode, LegacyEnrollPage, LoginPage};
 use preview::{PreviewAll, PreviewOne, ScreenId};
 use setup::{OrgSettingsPage, SetupPage};
 use staff::pages::{StaffPeoplePage, StaffSitesPage, StaffTeamPage};
@@ -25,8 +25,10 @@ enum Route {
     #[layout(SetupGuard)]
         #[route("/")]
         HomePage {},
-        #[route("/koppel/:token")]
-        EnrollPage { token: EnrollToken },
+        #[route("/koppel")]
+        EnrollPage {},
+        #[route("/koppel/:code")]
+        LegacyEnrollPage { code: LegacyCode },
         #[route("/aanmelden")]
         LoginPage {},
         #[route("/beheer")]
@@ -65,11 +67,15 @@ pub fn App() -> Element {
     }
 }
 
+/// Pages that stay reachable in setup mode: the wizard itself and the enrollment link that
+/// `admin bootstrap-admin` prints for the first admin.
 fn is_setup_route() -> bool {
-    router().full_route_string().starts_with("/setup")
+    let route = router().full_route_string();
+    route.starts_with("/setup") || route.starts_with("/koppel")
 }
 
-/// While the installation has no admin yet, every page except `/setup` redirects there.
+/// While the installation has no admin yet, every page except `/setup` and `/koppel` redirects
+/// to the setup wizard.
 #[component]
 fn SetupGuard() -> Element {
     let nav = use_navigator();

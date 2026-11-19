@@ -15,5 +15,5 @@ fn main() {
 
 #[cfg(feature = "server")]
 fn main() {
-    dioxus::serve(|| async { server::build_router(client::App).await });
+    server::serve(client::App);
 }

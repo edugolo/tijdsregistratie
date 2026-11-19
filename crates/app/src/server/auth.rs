@@ -95,12 +95,13 @@ pub async fn require_manager_of(site_id: Uuid) -> Result<StaffScope, ServerFnErr
 /// the per-request session expiry.
 pub mod http {
     use std::collections::HashMap;
-    use std::net::IpAddr;
+    use std::net::{IpAddr, SocketAddr};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
     use axum::Router;
-    use axum::extract::{Request, State};
+    use axum::extract::{ConnectInfo, Request, State};
     use axum::http::header::{
         CONTENT_LENGTH, CONTENT_TYPE, ORIGIN, RETRY_AFTER, STRICT_TRANSPORT_SECURITY,
     };
@@ -119,6 +120,8 @@ pub mod http {
     const RATE_LIMIT_EXEMPT: &str = "/api/auth/me";
     /// Above this many tracked clients, idle (full) buckets are dropped.
     const PRUNE_ABOVE: usize = 10_000;
+    /// Safety cap for all auth requests together, used when no client address is known.
+    const GLOBAL_CAP_PER_MINUTE: u32 = 600;
 
     /// Content Security Policy for the Dioxus WASM app.
     ///
@@ -193,6 +196,8 @@ pub mod http {
         https: bool,
         trust_proxy_headers: bool,
         limiter: Arc<RateLimiter>,
+        global: Arc<RateLimiter>,
+        warned_no_peer: Arc<AtomicBool>,
     }
 
     impl HttpGuard {
@@ -202,31 +207,57 @@ pub mod http {
                 https: config.is_https(),
                 trust_proxy_headers: config.trust_proxy_headers,
                 limiter: Arc::new(RateLimiter::new(config.auth_rate_limit_per_minute)),
+                global: Arc::new(RateLimiter::new(GLOBAL_CAP_PER_MINUTE)),
+                warned_no_peer: Arc::new(AtomicBool::new(false)),
             }
         }
 
-        /// Rate limit key of the request's client. Axum cannot see the peer address through
-        /// `dioxus::serve`, so without a trusted proxy all clients share one bucket (a cap on
-        /// the whole service, not per client). Behind a proxy the last `X-Forwarded-For`
-        /// entry is the address the proxy itself saw; earlier entries are client-supplied.
+        /// Rate limit key of the request's client, `None` when no address is known.
+        ///
+        /// The peer address comes from axum's `ConnectInfo` (the server is started with
+        /// `into_make_service_with_connect_info`, see `server::serve`). Behind a trusted proxy
+        /// the last `X-Forwarded-For` entry is the address the proxy itself saw; earlier
+        /// entries are client-supplied. Without trusted proxy headers the header is ignored.
         /// IPv6 clients are grouped by /64.
-        fn client_key(&self, req: &Request) -> String {
-            if !self.trust_proxy_headers {
-                return "direct".to_string();
-            }
-            let forwarded = req
-                .headers()
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.rsplit(',').next())
-                .and_then(|v| v.trim().parse::<IpAddr>().ok());
-            match forwarded {
-                Some(IpAddr::V6(ip)) => {
+        fn client_key(&self, req: &Request) -> Option<String> {
+            let peer = req
+                .extensions()
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|c| c.0.ip());
+            let ip = if self.trust_proxy_headers {
+                req.headers()
+                    .get("x-forwarded-for")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.rsplit(',').next())
+                    .and_then(|v| v.trim().parse::<IpAddr>().ok())
+                    .or(peer)
+            } else {
+                peer
+            };
+            Some(match ip? {
+                IpAddr::V6(ip) => {
                     let s = ip.segments();
                     format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
                 }
-                Some(ip) => ip.to_string(),
-                None => "unknown".to_string(),
+                ip => ip.to_string(),
+            })
+        }
+
+        /// Takes a token for this request: from the client's own bucket, or from the global
+        /// safety cap when the client cannot be told apart (no peer address available).
+        fn allow(&self, req: &Request, now: Instant) -> bool {
+            match self.client_key(req) {
+                Some(key) => self.limiter.allow(&key, now),
+                None => {
+                    if !self.warned_no_peer.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(
+                            "client address unknown: per-client rate limiting is off and only a \
+                             global cap applies; run behind a reverse proxy with \
+                             TRUST_PROXY_HEADERS=true"
+                        );
+                    }
+                    self.global.allow("global", now)
+                }
             }
         }
     }
@@ -246,7 +277,7 @@ pub mod http {
         let path = req.uri().path();
         if path.starts_with(RATE_LIMITED_PREFIX)
             && path != RATE_LIMIT_EXEMPT
-            && !guard.limiter.allow(&guard.client_key(&req), Instant::now())
+            && !guard.allow(&req, Instant::now())
         {
             tracing::warn!("auth rate limit hit");
             return (
@@ -332,6 +363,7 @@ pub mod http {
         use std::time::Duration;
 
         use axum::body::Body;
+        use axum::extract::ConnectInfo;
         use axum::http::Request as HttpRequest;
         use axum::routing::{get, post};
         use tower::ServiceExt;
@@ -386,6 +418,87 @@ pub mod http {
                 .oneshot(req.body(Body::empty()).unwrap())
                 .await
                 .unwrap()
+        }
+
+        /// Like `send`, with the peer address that `into_make_service_with_connect_info` adds.
+        async fn send_from(
+            app: &Router,
+            peer: &str,
+            path: &str,
+            headers: &[(&str, &str)],
+        ) -> StatusCode {
+            let mut req = HttpRequest::builder().method("POST").uri(path);
+            for (k, v) in headers {
+                req = req.header(*k, *v);
+            }
+            let mut req = req.body(Body::empty()).unwrap();
+            let addr: std::net::SocketAddr = format!("{peer}:4000").parse().unwrap();
+            req.extensions_mut().insert(ConnectInfo(addr));
+            app.clone().oneshot(req).await.unwrap().status()
+        }
+
+        const LOGIN: &str = "/api/auth/login/begin";
+
+        #[tokio::test]
+        async fn peer_addresses_get_separate_buckets_without_trusted_proxy() {
+            let app = app(guard("https://tijd.example.org", false, 2));
+            for _ in 0..2 {
+                assert_eq!(
+                    send_from(&app, "198.51.100.1", LOGIN, &[]).await,
+                    StatusCode::OK
+                );
+            }
+            assert_eq!(
+                send_from(&app, "198.51.100.1", LOGIN, &[]).await,
+                StatusCode::TOO_MANY_REQUESTS
+            );
+            // Another employee on another address is not locked out.
+            assert_eq!(
+                send_from(&app, "198.51.100.2", LOGIN, &[]).await,
+                StatusCode::OK
+            );
+            // A spoofed forwarding header changes nothing without a trusted proxy.
+            let spoof = [("x-forwarded-for", "203.0.113.50")];
+            assert_eq!(
+                send_from(&app, "198.51.100.1", LOGIN, &spoof).await,
+                StatusCode::TOO_MANY_REQUESTS
+            );
+        }
+
+        #[tokio::test]
+        async fn trusted_proxy_keys_on_forwarded_entry_and_falls_back_to_peer() {
+            let app = app(guard("https://tijd.example.org", true, 1));
+            let a = [("x-forwarded-for", "203.0.113.7")];
+            let b = [("x-forwarded-for", "203.0.113.8")];
+            assert_eq!(send_from(&app, "10.0.0.1", LOGIN, &a).await, StatusCode::OK);
+            assert_eq!(send_from(&app, "10.0.0.1", LOGIN, &b).await, StatusCode::OK);
+            assert_eq!(
+                send_from(&app, "10.0.0.1", LOGIN, &a).await,
+                StatusCode::TOO_MANY_REQUESTS
+            );
+            // No header: the peer address is the key.
+            assert_eq!(
+                send_from(&app, "10.0.0.2", LOGIN, &[]).await,
+                StatusCode::OK
+            );
+            assert_eq!(
+                send_from(&app, "10.0.0.2", LOGIN, &[]).await,
+                StatusCode::TOO_MANY_REQUESTS
+            );
+        }
+
+        #[tokio::test]
+        async fn without_peer_address_only_the_global_cap_applies() {
+            // Per-client limit of 1, yet many requests pass: no usable client key.
+            let app = app(guard("https://tijd.example.org", false, 1));
+            let mut passed = 0;
+            for _ in 0..GLOBAL_CAP_PER_MINUTE * 2 {
+                if send(&app, "POST", LOGIN, &[]).await.status() == StatusCode::OK {
+                    passed += 1;
+                }
+            }
+            // The cap, plus what refills while the loop runs.
+            assert!((GLOBAL_CAP_PER_MINUTE..GLOBAL_CAP_PER_MINUTE + 50).contains(&passed));
         }
 
         #[tokio::test]
@@ -444,26 +557,7 @@ pub mod http {
         }
 
         #[tokio::test]
-        async fn forwarded_header_is_ignored_unless_trusted_and_last_entry_counts() {
-            // Untrusted: one shared bucket, spoofing changes nothing.
-            let app_direct = app(guard("https://tijd.example.org", false, 2));
-            for ip in ["198.51.100.1", "198.51.100.2"] {
-                send(
-                    &app_direct,
-                    "POST",
-                    "/api/auth/login/begin",
-                    &[("x-forwarded-for", ip)],
-                )
-                .await;
-            }
-            let r = send(
-                &app_direct,
-                "POST",
-                "/api/auth/login/begin",
-                &[("x-forwarded-for", "198.51.100.3")],
-            )
-            .await;
-            assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        async fn last_forwarded_entry_counts_when_trusted() {
             // Trusted: the client cannot pick its bucket by prepending addresses.
             let app_proxy = app(guard("https://tijd.example.org", true, 2));
             for spoof in ["1.1.1.1", "2.2.2.2"] {

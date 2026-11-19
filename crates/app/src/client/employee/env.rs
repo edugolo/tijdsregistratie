@@ -34,6 +34,12 @@ mod imp {
         platform::is_standalone()
     }
 
+    /// The URL fragment (with `#`), which is then removed from the address bar and history so
+    /// the enrollment code does not linger there.
+    pub fn take_fragment() -> String {
+        platform::take_fragment()
+    }
+
     pub fn is_ios_safari() -> bool {
         platform::is_ios_safari()
     }
@@ -103,6 +109,10 @@ mod imp {
 
     pub fn is_standalone() -> bool {
         false
+    }
+
+    pub fn take_fragment() -> String {
+        String::new()
     }
 
     pub fn is_ios_safari() -> bool {

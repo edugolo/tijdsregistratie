@@ -100,7 +100,7 @@ Exact versions are pinned in `Cargo.toml`.
   admin for managers, the CLI for the first admin.
 - The enroller taps "Koppel toestel" → the server creates an enrollment token: 256-bit random,
   stored hashed, **15 minutes valid, single use, bound to one person**, `issued_by` recorded.
-- The enroller's screen shows a QR code with `https://<domain>/koppel/<token>`. The person scans it
+- The enroller's screen shows a QR code with `https://<domain>/koppel#<token>` (fragment: never sent to servers or proxies). The person scans it
   with their own phone, installs the PWA and registers a passkey (user verification required,
   resident key preferred so login is discoverable).
 - The enroller's screen polls and switches to "Gekoppeld".

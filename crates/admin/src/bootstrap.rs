@@ -32,9 +32,9 @@ pub async fn count_active_admins(pool: &PgPool) -> Result<i64> {
     .await?)
 }
 
-/// `{origin}/koppel/{raw}`; a trailing slash on the origin is ignored.
+/// `{origin}/koppel#{raw}` (the code is in the fragment: never sent to servers); a trailing slash on the origin is ignored.
 pub fn enrollment_url(origin: &str, raw: &str) -> String {
-    format!("{}/koppel/{raw}", origin.trim_end_matches('/'))
+    format!("{}/koppel#{raw}", origin.trim_end_matches('/'))
 }
 
 pub fn render_qr(url: &str) -> Result<String> {
@@ -77,17 +77,17 @@ mod tests {
     fn url_has_no_double_slash() {
         assert_eq!(
             enrollment_url("https://tijd.example.org/", "abc"),
-            "https://tijd.example.org/koppel/abc"
+            "https://tijd.example.org/koppel#abc"
         );
         assert_eq!(
             enrollment_url("https://tijd.example.org", "abc"),
-            "https://tijd.example.org/koppel/abc"
+            "https://tijd.example.org/koppel#abc"
         );
     }
 
     #[test]
     fn qr_renders_multiline_block_art() {
-        let qr = render_qr("https://tijd.example.org/koppel/abc").unwrap();
+        let qr = render_qr("https://tijd.example.org/koppel#abc").unwrap();
         assert!(qr.lines().count() > 10);
     }
 
@@ -121,7 +121,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(url.starts_with("https://tijd.example.org/koppel/"));
+        assert!(url.starts_with("https://tijd.example.org/koppel#"));
         assert!(role::is_admin(&pool, id).await.unwrap());
         let audits: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE entity_id = $1")
             .bind(id)

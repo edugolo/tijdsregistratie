@@ -7,6 +7,13 @@ use super::env::PasskeyError;
 use crate::api::auth::Me;
 use crate::client::i18n::{format_time, t};
 
+/// The enrollment code in a URL fragment (`#<code>`); `None` when there is none. The code lives
+/// in the fragment because browsers never send it to servers, proxies or `Referer` headers.
+pub fn token_from_hash(hash: &str) -> Option<String> {
+    let code = hash.strip_prefix('#').unwrap_or(hash).trim();
+    (!code.is_empty()).then(|| code.to_string())
+}
+
 /// Whole minutes between `started` and `now`; never negative.
 pub fn elapsed_minutes(started: DateTime<Utc>, now: DateTime<Utc>) -> u32 {
     u32::try_from((now - started).num_minutes().max(0)).unwrap_or(u32::MAX)
@@ -183,6 +190,15 @@ mod tests {
         assert_eq!(destination(true, 2), Destination::Home);
         assert_eq!(destination(false, 0), Destination::Home);
         assert_eq!(destination(false, 1), Destination::Home);
+    }
+
+    #[test]
+    fn enrollment_code_comes_from_the_fragment() {
+        assert_eq!(token_from_hash("#abc_-"), Some("abc_-".to_string()));
+        assert_eq!(token_from_hash("abc"), Some("abc".to_string()));
+        assert_eq!(token_from_hash("#"), None);
+        assert_eq!(token_from_hash(""), None);
+        assert_eq!(token_from_hash("  "), None);
     }
 
     #[test]

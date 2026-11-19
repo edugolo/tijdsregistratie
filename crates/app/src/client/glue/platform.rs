@@ -62,6 +62,28 @@ pub fn platform() -> Platform {
     platform_from_user_agent(&ua, nav.max_touch_points().max(0) as u32)
 }
 
+/// Returns `location.hash` and removes it from the address bar (`history.replaceState`), so the
+/// fragment stays out of history and screenshots.
+pub fn take_fragment() -> String {
+    let Some(window) = web_sys::window() else {
+        return String::new();
+    };
+    let location = window.location();
+    let hash = location.hash().unwrap_or_default();
+    if !hash.is_empty()
+        && let Ok(history) = window.history()
+    {
+        let path = location.pathname().unwrap_or_default();
+        let search = location.search().unwrap_or_default();
+        let _ = history.replace_state_with_url(
+            &wasm_bindgen::JsValue::NULL,
+            "",
+            Some(&format!("{path}{search}")),
+        );
+    }
+    hash
+}
+
 /// True when running as an installed app (display-mode standalone, or iOS `navigator.standalone`).
 pub fn is_standalone() -> bool {
     let Some(window) = web_sys::window() else {

@@ -188,7 +188,7 @@ pub fn missing_stop(previous: Option<&EventRow>, tz: Tz) -> Option<TodayStatusDt
 }
 
 pub fn enrollment_url(origin: &str, raw: &str) -> String {
-    format!("{}/koppel/{raw}", origin.trim_end_matches('/'))
+    format!("{}/koppel#{raw}", origin.trim_end_matches('/'))
 }
 
 pub fn qr_svg(url: &str) -> Result<String> {
@@ -891,17 +891,17 @@ mod tests {
     fn enrollment_url_uses_origin() {
         assert_eq!(
             enrollment_url("https://tijd.example.org", "abc_-"),
-            "https://tijd.example.org/koppel/abc_-"
+            "https://tijd.example.org/koppel#abc_-"
         );
         assert_eq!(
             enrollment_url("https://tijd.example.org/", "abc"),
-            "https://tijd.example.org/koppel/abc"
+            "https://tijd.example.org/koppel#abc"
         );
     }
 
     #[test]
     fn qr_is_an_svg_with_dark_modules_and_min_size() {
-        let svg = qr_svg("https://tijd.example.org/koppel/abc").unwrap();
+        let svg = qr_svg("https://tijd.example.org/koppel#abc").unwrap();
         assert!(svg.contains("<svg"));
         assert!(svg.contains("#111111"));
         assert!(svg.contains("width=\"") && !svg.contains("width=\"0\""));
@@ -1169,7 +1169,7 @@ mod tests {
         let s = seed(&pool, &k).await;
         let e = env(&pool, &k);
         let dto = start_enrollment(&e, &s.mgr_a, s.emp_a).await.unwrap();
-        assert!(dto.url.starts_with("https://tijd.example.org/koppel/"));
+        assert!(dto.url.starts_with("https://tijd.example.org/koppel#"));
         assert!(dto.qr_svg.contains("<svg"));
         assert_eq!(dto.expires_at - dto.issued_at, 15 * 60 * 1000);
         assert_eq!(audit_actions(&pool).await, vec!["enrollment.issued"]);

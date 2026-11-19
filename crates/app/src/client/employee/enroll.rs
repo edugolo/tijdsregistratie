@@ -1,11 +1,11 @@
-//! `/koppel/:token`: welcome, install, passkey and location explanation (E1, E1b, E2, E3).
+//! `/koppel#<code>`: welcome, install, passkey and location explanation (E1, E1b, E2, E3).
 
 use dioxus::prelude::*;
 
 use super::env::{self, PasskeyError};
 use super::logic::{
     Destination, EnrollStep, destination_for, first_step, ios_steps_offered, needs_location_step,
-    passkey_message,
+    passkey_message, token_from_hash,
 };
 use super::{go, use_org_name};
 use crate::api::auth::{Me, begin_registration, enrollment_info, finish_registration};
@@ -23,37 +23,18 @@ async fn register(token: String) -> Result<Me, PasskeyError> {
         .map_err(|_| PasskeyError::Failed)
 }
 
-/// The enrollment code from the URL. A fallible type is needed as route parameter: the router
-/// derive emits unreachable code (a compiler warning) for infallible ones such as `String`.
-#[derive(Clone, PartialEq, Debug)]
-pub struct EnrollToken(String);
-
-impl std::str::FromStr for EnrollToken {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.is_empty() {
-            Err("empty enrollment code".to_string())
-        } else {
-            Ok(Self(s.to_string()))
-        }
-    }
-}
-
-impl std::fmt::Display for EnrollToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 #[component]
-pub fn EnrollPage(token: EnrollToken) -> Element {
+pub fn EnrollPage() -> Element {
     let org_name = use_org_name();
     let nav = use_navigator();
-    let code = token.to_string();
-    let mut info = use_resource(move || {
-        let code = code.clone();
-        async move { enrollment_info(code).await.ok() }
+    // `None` until the browser has read the fragment; the server render never sees it.
+    let mut token = use_signal(|| None::<Option<String>>);
+    use_effect(move || token.set(Some(token_from_hash(&env::take_fragment()))));
+    let mut info = use_resource(move || async move {
+        match token() {
+            Some(Some(code)) => enrollment_info(code).await.ok(),
+            _ => None,
+        }
     });
     let mut step = use_signal(|| first_step(env::is_standalone()));
     let mut destination = use_signal(|| Destination::Home);
@@ -74,6 +55,11 @@ pub fn EnrollPage(token: EnrollToken) -> Element {
         });
     });
 
+    let code = match token() {
+        None => return rsx! { Loading { org_name } },
+        Some(None) => return rsx! { InvalidCode { org_name } },
+        Some(Some(code)) => code,
+    };
     let loaded = info.read().clone();
     let Some(loaded) = loaded else {
         return rsx! { Loading { org_name } };
@@ -116,9 +102,9 @@ pub fn EnrollPage(token: EnrollToken) -> Element {
                     }
                     busy.set(true);
                     error.set(None);
-                    let token = token.to_string();
+                    let code = code.clone();
                     spawn(async move {
-                        match register(token).await {
+                        match register(code).await {
                             Ok(me) => {
                                 let next = destination_for(&me);
                                 let granted = env::location_granted().await;
@@ -156,4 +142,36 @@ pub fn EnrollPage(token: EnrollToken) -> Element {
             }
         },
     }
+}
+
+/// The path segment of an old `/koppel/<code>` link. Never read. A fallible type is needed as
+/// route parameter: the router derive emits unreachable code (a compiler warning) for infallible
+/// ones such as `String`.
+#[derive(Clone, PartialEq, Debug)]
+pub struct LegacyCode(String);
+
+impl std::str::FromStr for LegacyCode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            Err("empty".to_string())
+        } else {
+            Ok(Self(s.to_string()))
+        }
+    }
+}
+
+impl std::fmt::Display for LegacyCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Old links with the code in the path (it leaks into logs): the code is not used.
+#[component]
+pub fn LegacyEnrollPage(code: LegacyCode) -> Element {
+    let _ = code;
+    let org_name = use_org_name();
+    rsx! { InvalidCode { org_name } }
 }

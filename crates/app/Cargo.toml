@@ -37,7 +37,7 @@ web-sys = { workspace = true, optional = true, features = [
     "Geolocation", "PositionOptions", "Position", "Coordinates", "PositionError",
     "CredentialsContainer", "Credential", "PublicKeyCredential",
     "CredentialCreationOptions", "CredentialRequestOptions",
-    "ServiceWorkerContainer",
+    "ServiceWorkerContainer", "Location", "History",
 ] }
 js-sys = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
