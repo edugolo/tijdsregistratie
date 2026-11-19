@@ -85,6 +85,28 @@ then remove the old lines. Removing a version earlier makes the locations writte
 
 The blind-index key is not rotated by this command.
 
+## Setup never re-opens, and recovery
+
+The first-run wizard is available only until the first admin has registered a passkey. The
+database records this in `organisation_settings.setup_completed_at` (set by a trigger at the
+first passkey of an admin, backfilled by a migration for existing installations, and never cleared
+again). From then on `setup_required` is false forever: no setup code is announced in the log or
+accepted, and `complete_setup` is refused, whatever happens to the admins afterwards (lost
+devices, revoked passkeys, deactivated or deleted admins). An existing organisation can never be
+overwritten through the wizard.
+
+**If every admin has lost their devices**, the only way back in is the operator CLI, which needs
+access to the database and the key files:
+
+```sh
+admin bootstrap-admin --name "Voorbeeld Beheerder" --force
+```
+
+It creates a new admin and prints an enrollment link (valid 30 minutes, single use).
+`--force` is needed because active admins still exist. Deactivate the old admins afterwards if they
+should no longer have access. Before setup is completed, the setup code is logged at startup (or
+shown with `admin setup-code`).
+
 ## Other commands
 
 - `admin list-admins` prints id, state and name of every admin (operator tool; names are decrypted).
@@ -98,10 +120,14 @@ The migrations make the data hard to alter by accident or by a compromised app:
   and `TRUNCATE`.
 - `audit_log` is append-only: `UPDATE`, `DELETE` and `TRUNCATE` are rejected.
 
-These are triggers. **The table owner (and any superuser) can still disable or drop them**
+These are triggers and a **safety net, not a security boundary**: unless the app connects with a
+role that does not own the tables, anyone with the app's database credentials can disable them.
+**The table owner (and any superuser) can still disable or drop them**
 (`ALTER TABLE ... DISABLE TRIGGER`), so they protect against bugs and against an attacker who only
 has the app's credentials, not against a malicious database owner. To make that real, run the app
-with a separate least-privilege role and keep the owner role for migrations only:
+with a separate least-privilege role and keep the owner role for migrations only. **Doing this is
+recommended for every production deployment**; the single-role setup of `deploy/compose.yaml`
+(the database user owns the schema) is only the quick start:
 
 ```sql
 -- Once, as a superuser. The migration role owns the schema; the app role owns nothing.
@@ -153,19 +179,28 @@ servers, so it does not appear in proxy logs or `Referer` headers. Old `/koppel/
 show "Deze code werkt niet meer."
 
 The app itself limits the sign-in and enrollment endpoints (`/api/auth/*`, except the session
-probe) per client address (`AUTH_RATE_LIMIT_PER_MINUTE`, default 10). The client address is the
+probe) per client address (`AUTH_RATE_LIMIT_PER_MINUTE`, default 60: schools sit behind one NAT).
+Failed `login/finish` and `register/finish` attempts (HTTP 400/401) are counted per client
+separately: 10 failures in 10 minutes block further finish attempts from that client. The setup
+wizard endpoints (`/api/setup/*`) allow 10 requests per minute per client, and the public reads
+`/api/branding` and `/api/setup/required` 120. Clocking (`POST /api/clock`) is limited to 20 per
+minute per signed-in person, whatever the address. The client address is the
 TCP peer address. Behind a reverse proxy that is the proxy's address, so **set
 `TRUST_PROXY_HEADERS=true`** (only when the proxy is the sole way in): the app then uses the last
-`X-Forwarded-For` entry, which the proxy adds, so clients are told apart again. Without it, all
+entry of the last `X-Forwarded-For` header line, which the proxy adds (IPv4-mapped IPv6 addresses
+count as IPv4, IPv6 clients are grouped by /64), so clients are told apart again. Without it, all
 clients behind the proxy share one bucket and can lock each other out (for example at 08:00).
 If no client address is available at all, per-client limiting is off, only a global cap of 600
 requests per minute applies and a warning is logged.
 
 ## Key file permissions and blob format
 
+The app logs a warning at startup, and the admin CLI prints one on stderr, when `DATA_KEY_FILE` or
+`BLIND_INDEX_KEY_FILE` is readable or writable by group or others (use `chmod 600`).
+
 - Key files must be readable by the app user only (`chmod 600`). The `crypto` crate provides
   `check_permissions(path)`, which returns a warning when group or others can access the file; the
-  app and the admin CLI are meant to log it at startup (not wired in yet).
+  app and the admin CLI log it at startup.
 - The key version byte of every encrypted blob is part of the AEAD associated data. Blobs written
   before this change cannot be read; there was no production data when it was introduced. A database
   that already holds encrypted data from an older build has to be re-created.

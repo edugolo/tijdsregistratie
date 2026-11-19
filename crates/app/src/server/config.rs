@@ -17,12 +17,14 @@ pub enum ConfigError {
 const COOKIE_NAME: &str = "tr_session";
 /// With `Secure` the `__Host-` prefix pins the cookie to this exact host (no Domain, path `/`).
 const HOST_COOKIE_NAME: &str = "__Host-tr_session";
-const DEFAULT_AUTH_RATE_LIMIT_PER_MINUTE: u32 = 10;
+/// Schools sit behind one NAT, so many employees share a client address.
+const DEFAULT_AUTH_RATE_LIMIT_PER_MINUTE: u32 = 60;
 
 #[derive(Clone)]
 pub struct AppConfig {
     pub database_url: String,
-    /// Public origin, e.g. `https://tijd.example.org` (no path).
+    /// Public origin, e.g. `https://tijd.example.org`: normalised to scheme://host[:port]
+    /// (lowercase, default port dropped, no path), as browsers send it in `Origin`.
     pub app_origin: String,
     /// WebAuthn relying party id; defaults to the host of `app_origin`.
     pub rp_id: String,
@@ -33,7 +35,8 @@ pub struct AppConfig {
     /// Read the client address from `X-Forwarded-For` (set by the reverse proxy). Only enable
     /// this behind a proxy that overwrites the header; otherwise clients can spoof it.
     pub trust_proxy_headers: bool,
-    /// Requests per minute and client address on `/api/auth/*`.
+    /// Requests per minute and client address on `/api/auth/*`. Failed sign-ins are limited
+    /// separately and more strictly.
     pub auth_rate_limit_per_minute: u32,
 }
 
@@ -89,8 +92,7 @@ impl AppConfig {
         let require = |k: &'static str| get(k).ok_or(ConfigError::Missing(k));
 
         let database_url = require("DATABASE_URL")?.to_string();
-        let app_origin = require("APP_ORIGIN")?.trim_end_matches('/').to_string();
-        let origin_url = webauthn_rs::prelude::Url::parse(&app_origin)
+        let origin_url = webauthn_rs::prelude::Url::parse(require("APP_ORIGIN")?)
             .map_err(|_| ConfigError::Invalid("APP_ORIGIN", "not a valid URL"))?;
         if !matches!(origin_url.scheme(), "http" | "https") {
             return Err(ConfigError::Invalid(
@@ -98,6 +100,19 @@ impl AppConfig {
                 "scheme must be http or https",
             ));
         }
+        if !matches!(origin_url.path(), "" | "/")
+            || origin_url.query().is_some()
+            || origin_url.fragment().is_some()
+            || !origin_url.username().is_empty()
+            || origin_url.password().is_some()
+        {
+            return Err(ConfigError::Invalid(
+                "APP_ORIGIN",
+                "must be scheme://host[:port] without a path",
+            ));
+        }
+        // Exactly the form browsers send in the `Origin` header: lowercase, default port dropped.
+        let app_origin = origin_url.origin().ascii_serialization();
         let rp_id = match get("RP_ID") {
             Some(v) => v.to_string(),
             None => origin_url
@@ -240,7 +255,7 @@ mod tests {
     fn proxy_and_rate_limit_settings() {
         let c = AppConfig::from_map(&base()).unwrap();
         assert!(!c.trust_proxy_headers);
-        assert_eq!(c.auth_rate_limit_per_minute, 10);
+        assert_eq!(c.auth_rate_limit_per_minute, 60);
         assert_eq!(c.cookie_name(), "__Host-tr_session");
         let mut m = base();
         m.insert("TRUST_PROXY_HEADERS".into(), "true".into());
@@ -263,5 +278,54 @@ mod tests {
         assert_eq!(c.rp_id, "localhost");
         assert_eq!(c.cookie_name(), "tr_session");
         assert!(!c.is_https());
+    }
+
+    #[test]
+    fn app_origin_is_normalised_to_what_browsers_send_in_origin() {
+        let origin = |v: &str| {
+            let mut m = base();
+            m.insert("APP_ORIGIN".into(), v.into());
+            AppConfig::from_map(&m).map(|c| c.app_origin)
+        };
+        for (given, want) in [
+            ("https://tijd.example.org", "https://tijd.example.org"),
+            ("https://tijd.example.org/", "https://tijd.example.org"),
+            ("HTTPS://Tijd.Example.ORG", "https://tijd.example.org"),
+            ("https://tijd.example.org:443", "https://tijd.example.org"),
+            (
+                "https://tijd.example.org:8443/",
+                "https://tijd.example.org:8443",
+            ),
+        ] {
+            assert_eq!(origin(given).as_deref(), Ok(want), "{given}");
+        }
+        let mut m = base();
+        m.insert("COOKIE_SECURE".into(), "false".into());
+        m.insert("APP_ORIGIN".into(), "http://localhost:80".into());
+        assert_eq!(
+            AppConfig::from_map(&m).unwrap().app_origin,
+            "http://localhost"
+        );
+        m.insert("APP_ORIGIN".into(), "http://localhost:8080".into());
+        assert_eq!(
+            AppConfig::from_map(&m).unwrap().app_origin,
+            "http://localhost:8080"
+        );
+        for bad in [
+            "https://tijd.example.org/app",
+            "https://tijd.example.org/app/",
+            "https://tijd.example.org?x=1",
+            "https://tijd.example.org#frag",
+            "https://user@tijd.example.org",
+        ] {
+            assert_eq!(
+                origin(bad),
+                Err(ConfigError::Invalid(
+                    "APP_ORIGIN",
+                    "must be scheme://host[:port] without a path"
+                )),
+                "{bad}"
+            );
+        }
     }
 }

@@ -121,23 +121,26 @@ pub async fn has_active_since(
 }
 
 /// Revokes all active passkeys of a person and ends every session the person has open
-/// (`person.sessions_valid_after`), in one transaction. Returns how many passkeys were revoked.
-pub async fn revoke_all(pool: &PgPool, person_id: Uuid, revoked_by: Option<Uuid>) -> Result<u64> {
-    let mut tx = pool.begin().await?;
-    let done = sqlx::query(
-        "UPDATE passkey SET revoked_at = now(), revoked_by = $2 \
-         WHERE person_id = $1 AND revoked_at IS NULL",
+/// (`person.sessions_valid_after`), in one statement. Takes a pool or the caller's transaction.
+/// Returns how many passkeys were revoked.
+pub async fn revoke_all<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    person_id: Uuid,
+    revoked_by: Option<Uuid>,
+) -> Result<u64> {
+    let revoked: i64 = sqlx::query_scalar(
+        "WITH revoked AS ( \
+           UPDATE passkey SET revoked_at = now(), revoked_by = $2 \
+           WHERE person_id = $1 AND revoked_at IS NULL RETURNING id), \
+         bumped AS ( \
+           UPDATE person SET sessions_valid_after = clock_timestamp() WHERE id = $1) \
+         SELECT count(*) FROM revoked",
     )
     .bind(person_id)
     .bind(revoked_by)
-    .execute(&mut *tx)
+    .fetch_one(db)
     .await?;
-    sqlx::query("UPDATE person SET sessions_valid_after = now() WHERE id = $1")
-        .bind(person_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(done.rows_affected())
+    Ok(u64::try_from(revoked).unwrap_or(0))
 }
 
 #[cfg(test)]
@@ -320,5 +323,22 @@ mod tests {
         );
         revoke_all(&pool, p, None).await.unwrap();
         assert!(!has_active_since(&pool, p, t0).await.unwrap());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn revoke_all_runs_on_the_callers_transaction(pool: PgPool) {
+        let p = person(&pool).await;
+        let pk = insert(&pool, p, b"c1", json!({})).await.unwrap();
+        let before = Utc::now();
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(revoke_all(&mut *tx, p, None).await.unwrap(), 1);
+        tx.rollback().await.unwrap();
+        assert_eq!(count_active(&pool, p).await.unwrap(), 1);
+        assert!(session_valid(&pool, p, pk, before).await);
+
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(revoke_all(&mut *tx, p, None).await.unwrap(), 1);
+        tx.commit().await.unwrap();
+        assert!(!session_valid(&pool, p, pk, before).await);
     }
 }

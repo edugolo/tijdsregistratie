@@ -5,7 +5,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use crypto::DataKeys;
 use domain::{GeoPoint, SiteZone};
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
 use super::{RepoError, Result};
@@ -120,7 +120,12 @@ fn seal_address(keys: &DataKeys, id: Uuid, address: Option<&str>) -> Result<Opti
         .transpose()?)
 }
 
-pub async fn create_site(pool: &PgPool, keys: &DataKeys, input: &SiteInput) -> Result<Site> {
+/// Takes a pool or a transaction.
+pub async fn create_site<'e>(
+    db: impl PgExecutor<'e>,
+    keys: &DataKeys,
+    input: &SiteInput,
+) -> Result<Site> {
     let id = Uuid::new_v4();
     let row: SiteRow = sqlx::query_as(concat!(
         "INSERT INTO site (id, name, address_enc, lat, lng, radius_m, break_minutes, \
@@ -139,14 +144,14 @@ pub async fn create_site(pool: &PgPool, keys: &DataKeys, input: &SiteInput) -> R
     .bind(input.break_after_minutes)
     .bind(input.zone_policy.as_str())
     .bind(input.active)
-    .fetch_one(pool)
+    .fetch_one(db)
     .await?;
     row.decrypt(keys)
 }
 
-/// Fails with [`RepoError::NotFound`] if the site does not exist.
-pub async fn update_site(
-    pool: &PgPool,
+/// Fails with [`RepoError::NotFound`] if the site does not exist. Takes a pool or a transaction.
+pub async fn update_site<'e>(
+    db: impl PgExecutor<'e>,
     keys: &DataKeys,
     id: Uuid,
     input: &SiteInput,
@@ -168,7 +173,7 @@ pub async fn update_site(
     .bind(input.break_after_minutes)
     .bind(input.zone_policy.as_str())
     .bind(input.active)
-    .fetch_optional(pool)
+    .fetch_optional(db)
     .await?;
     row.ok_or(RepoError::NotFound)?.decrypt(keys)
 }

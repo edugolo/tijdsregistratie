@@ -19,11 +19,8 @@ pub struct OrgSettings {
     pub timezone: Tz,
 }
 
-/// Reads the settings, inserting the default row first if it is missing.
+/// Reads the settings. A plain read: the default row is inserted by the migrations.
 pub async fn get_settings(pool: &PgPool) -> Result<OrgSettings> {
-    sqlx::query("INSERT INTO organisation_settings (id) VALUES (1) ON CONFLICT DO NOTHING")
-        .execute(pool)
-        .await?;
     let (
         display_name,
         short_name,
@@ -89,4 +86,24 @@ pub async fn update_profile(pool: &PgPool, profile: &OrgProfile) -> Result<()> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn get_settings_only_reads(pool: PgPool) {
+        // The migration inserts the row; reading must not (re)create it.
+        sqlx::query("DELETE FROM organisation_settings")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(get_settings(&pool).await.is_err());
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM organisation_settings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
 }

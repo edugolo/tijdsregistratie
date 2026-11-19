@@ -3,7 +3,7 @@
 //! Lifetimes: a session that only carries WebAuthn ceremony state (anonymous) lives 10 minutes.
 //! Login upgrades it: employees stay signed in for 30 days of inactivity, staff for 12 hours
 //! absolute. The expiry is not remembered by tower-sessions between requests, so
-//! [`refresh_expiry`] re-applies it on every API request. Beyond expiry, a session is only
+//! [`refresh_expiry`] re-applies it on every request. Beyond expiry, a session is only
 //! honoured while [`current`] confirms against the database that the person is active, the
 //! passkey it signed in with is not revoked and nothing ended the person's sessions since.
 
@@ -61,15 +61,28 @@ pub async fn layer(
     let store = PostgresStore::new(pool);
     store.migrate().await?;
     tokio::spawn(delete_expired_periodically(store.clone()));
-    Ok(SessionManagerLayer::new(store)
-        .with_name(config.cookie_name())
+    Ok(base_layer(
+        store,
+        config.cookie_name(),
+        config.cookie_secure,
+    ))
+}
+
+/// The session layer settings shared by the server and its tests.
+pub fn base_layer<S: tower_sessions::SessionStore>(
+    store: S,
+    cookie_name: &'static str,
+    secure: bool,
+) -> SessionManagerLayer<S> {
+    SessionManagerLayer::new(store)
+        .with_name(cookie_name)
         .with_path("/")
         .with_http_only(true)
         .with_same_site(SameSite::Lax)
-        .with_secure(config.cookie_secure)
+        .with_secure(secure)
         // Slide the expiry on every request; `refresh_expiry` picks the right one per request.
         .with_always_save(true)
-        .with_expiry(anonymous_expiry()))
+        .with_expiry(anonymous_expiry())
 }
 
 async fn delete_expired_periodically(store: PostgresStore) {
@@ -102,10 +115,12 @@ fn expiry_for(user: Option<&SessionUser>) -> Expiry {
     }
 }
 
-/// Re-applies the expiry that belongs to the session's user. Called on every API request.
-pub async fn refresh_expiry(session: &Session) {
+/// Re-applies the expiry that belongs to the session's user and returns that (unvalidated) user.
+/// Called on every request.
+pub async fn refresh_expiry(session: &Session) -> Option<SessionUser> {
     let user = get_user(session).await.ok().flatten();
     session.set_expiry(Some(expiry_for(user.as_ref())));
+    user
 }
 
 /// The stored user without any validation; use [`current`] to authenticate a request. A user

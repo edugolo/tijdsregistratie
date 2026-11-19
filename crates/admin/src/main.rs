@@ -83,12 +83,34 @@ async fn connect() -> Result<PgPool> {
     Ok(pool)
 }
 
+/// A warning line when the key file at `path` is accessible by group or others.
+#[cfg(unix)]
+fn permission_warning(name: &str, path: &std::path::Path) -> Option<String> {
+    crypto::check_permissions(path)
+        .err()
+        .map(|w| format!("warning: {name}: {w}"))
+}
+
+#[cfg(not(unix))]
+fn permission_warning(_name: &str, _path: &std::path::Path) -> Option<String> {
+    None
+}
+
+/// Reads a key file path from the environment, warning on stderr when it is not private.
+fn key_path(name: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(env(name)?);
+    if let Some(w) = permission_warning(name, &path) {
+        eprintln!("{w}");
+    }
+    Ok(path)
+}
+
 fn data_keys() -> Result<DataKeys> {
-    DataKeys::from_file(env("DATA_KEY_FILE")?).context("cannot load DATA_KEY_FILE")
+    DataKeys::from_file(key_path("DATA_KEY_FILE")?).context("cannot load DATA_KEY_FILE")
 }
 
 fn blind_key() -> Result<BlindIndexKey> {
-    BlindIndexKey::from_file(env("BLIND_INDEX_KEY_FILE")?)
+    BlindIndexKey::from_file(key_path("BLIND_INDEX_KEY_FILE")?)
         .context("cannot load BLIND_INDEX_KEY_FILE")
 }
 
@@ -183,4 +205,23 @@ async fn run(command: Command) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    #[test]
+    fn world_readable_key_file_is_warned_about_without_leaking_content() {
+        let path = std::env::temp_dir().join(format!("admin-key-{}", Uuid::new_v4()));
+        std::fs::write(&path, "v1:secret-material").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let w = permission_warning("DATA_KEY_FILE", &path).expect("warning");
+        assert!(w.contains("DATA_KEY_FILE") && w.contains("644") && !w.contains("secret"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(permission_warning("DATA_KEY_FILE", &path), None);
+        std::fs::remove_file(&path).unwrap();
+    }
 }

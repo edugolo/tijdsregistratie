@@ -124,9 +124,15 @@ fn block_refusal(status: ZoneStatus) -> Option<&'static str> {
     }
 }
 
+/// Whether the site can block anybody: only an active site with coordinates can be stood in or
+/// outside of, so a deactivated or location-less `block` site must not lock people out.
+fn blocks(site: &Site) -> bool {
+    site.zone_policy == ZonePolicy::Block && site.active && site::to_zone(site).is_some()
+}
+
 /// Handles a start/stop tap of `person_id` at server time `now`.
 ///
-/// Zone policy: if ANY of the person's sites has the `block` policy, a start is only accepted when
+/// Zone policy: if ANY of the person's active sites with coordinates has the `block` policy, a start is only accepted when
 /// the status is in-zone (the safest choice for people who work at several sites). Stopping is
 /// never blocked, so nobody is stuck in an open day. The read of the last event and the insert run
 /// in one transaction under a per-person advisory lock, so concurrent taps cannot both be accepted.
@@ -183,7 +189,7 @@ pub async fn clock_for(
 
     // A refused start must not leave a trace (the transaction is dropped without commit).
     if kind == EventKind::Start
-        && ctx.sites.iter().any(|s| s.zone_policy == ZonePolicy::Block)
+        && ctx.sites.iter().any(blocks)
         && let Some(message) = block_refusal(result.status)
     {
         return Ok(ClockResult {
@@ -789,5 +795,28 @@ mod tests {
         assert_eq!(done.last_stop, Some(stop));
         assert_eq!(done.break_minutes, 30);
         assert_eq!(done.worked_minutes, 8 * 60 - 30);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn deactivated_or_coordinate_less_block_sites_block_nobody(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Flag).await;
+        let mut inactive = input(ZonePolicy::Block);
+        inactive.name = "School Oud".to_string();
+        inactive.active = false;
+        let mut no_coordinates = input(ZonePolicy::Block);
+        no_coordinates.name = "School Nieuw".to_string();
+        no_coordinates.lat = None;
+        no_coordinates.lng = None;
+        for extra in [inactive, no_coordinates] {
+            let s = site::create_site(&pool, &k, &extra).await.unwrap();
+            role::assign(&pool, p, Role::Employee, Some(s.id), None)
+                .await
+                .unwrap();
+        }
+        // No location at all: allowed (and flagged), because only the flag site counts.
+        let r = tap(&pool, &k, p, EventKind::Start, None, T0()).await;
+        assert!(r.accepted);
+        assert_eq!(r.zone_status, ZoneStatus::NoLocation);
     }
 }

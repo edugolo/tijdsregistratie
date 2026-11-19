@@ -55,64 +55,90 @@ fn random_bytes<const N: usize>() -> Result<[u8; N]> {
     Ok(bytes)
 }
 
-const SETUP_REQUIRED_SQL: &str = "SELECT NOT EXISTS ( \
-     SELECT 1 FROM passkey pk \
-     JOIN person p ON p.id = pk.person_id \
-     JOIN role_assignment ra ON ra.person_id = p.id AND ra.role = 'admin' \
-     WHERE pk.revoked_at IS NULL AND p.active)";
+/// Setup mode: `setup_completed_at` is unset and no admin has ever had a passkey. The database
+/// sets the marker at the first admin passkey and never clears it, so once false this stays
+/// false: losing devices, revoking passkeys or deactivating admins does not re-open setup.
+macro_rules! setup_required_expr {
+    () => {
+        "COALESCE((SELECT setup_completed_at IS NULL FROM organisation_settings WHERE id = 1), true) \
+         AND NOT EXISTS (SELECT 1 FROM passkey pk \
+         JOIN role_assignment ra ON ra.person_id = pk.person_id AND ra.role = 'admin')"
+    };
+}
+const SETUP_REQUIRED_SQL: &str = concat!("SELECT ", setup_required_expr!());
 
-/// Setup mode: there is no active admin with an active passkey.
+/// Setup mode (see [`SETUP_REQUIRED_SQL`]). A plain read.
 pub async fn setup_required(pool: &PgPool) -> Result<bool> {
     Ok(sqlx::query_scalar(SETUP_REQUIRED_SQL)
         .fetch_one(pool)
         .await?)
 }
 
-/// Records `setup_completed_at` once an admin passkey exists. Returns true when it was set now.
-pub async fn mark_completed_if_done(pool: &PgPool) -> Result<bool> {
-    if setup_required(pool).await? {
-        return Ok(false);
-    }
-    let done = sqlx::query(
-        "INSERT INTO organisation_settings (id, setup_completed_at) VALUES (1, now()) \
-         ON CONFLICT (id) DO UPDATE SET setup_completed_at = now() \
-         WHERE organisation_settings.setup_completed_at IS NULL",
-    )
-    .execute(pool)
-    .await?;
-    Ok(done.rows_affected() > 0)
-}
-
 /// Creates a fresh code (formatted `XXXX-XXXX-XXXX-XXXX`) and invalidates all unused older ones.
 pub async fn new_code(pool: &PgPool) -> Result<String> {
+    let mut tx = pool.begin().await?;
+    let code = insert_new_code(&mut tx).await?;
+    tx.commit().await?;
+    Ok(code)
+}
+
+async fn insert_new_code(tx: &mut Transaction<'_, Postgres>) -> Result<String> {
     let bytes: [u8; CODE_LEN] = random_bytes()?;
     let normalized: String = bytes
         .iter()
         .map(|b| char::from(ALPHABET[usize::from(b & 31)]))
         .collect();
-    let mut tx = pool.begin().await?;
     sqlx::query("UPDATE setup_code SET used_at = now() WHERE used_at IS NULL")
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     sqlx::query("INSERT INTO setup_code (code_hash) VALUES ($1)")
         .bind(code_hash(&normalized))
+        .execute(&mut **tx)
+        .await?;
+    Ok(format_code(&normalized))
+}
+
+/// `$1` is [`CODE_TTL_HOURS`].
+macro_rules! usable_code_expr {
+    () => {
+        "EXISTS (SELECT 1 FROM setup_code WHERE \
+         (used_at IS NULL AND created_at > now() - make_interval(hours => $1)) \
+         OR used_at > now() - interval '30 minutes')"
+    };
+}
+
+/// Makes sure a usable setup code exists while setup is required and returns a new code when it
+/// had to create one (the caller logs it). One statement sequence under an advisory lock, so
+/// concurrent callers create exactly one code. Does nothing once setup is completed.
+pub async fn announce_code_if_needed(pool: &PgPool) -> Result<Option<String>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(1952)")
         .execute(&mut *tx)
         .await?;
+    let needed: bool = sqlx::query_scalar(concat!(
+        "SELECT ",
+        setup_required_expr!(),
+        " AND NOT ",
+        usable_code_expr!()
+    ))
+    .bind(CODE_TTL_HOURS as i32)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !needed {
+        return Ok(None);
+    }
+    let code = insert_new_code(&mut tx).await?;
     tx.commit().await?;
-    Ok(format_code(&normalized))
+    Ok(Some(code))
 }
 
 /// Whether a code can still be shown to the operator: one is unused and unexpired, or setup
 /// finished a moment ago and the new admin is still registering a passkey.
 pub async fn has_usable_code(pool: &PgPool) -> Result<bool> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM setup_code WHERE \
-         (used_at IS NULL AND created_at > now() - make_interval(hours => $1)) \
-         OR used_at > now() - interval '30 minutes')",
-    )
-    .bind(CODE_TTL_HOURS as i32)
-    .fetch_one(pool)
-    .await?)
+    Ok(sqlx::query_scalar(concat!("SELECT ", usable_code_expr!()))
+        .bind(CODE_TTL_HOURS as i32)
+        .fetch_one(pool)
+        .await?)
 }
 
 /// Whether `code` is unused and not expired. Does not consume it.
@@ -482,9 +508,8 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../../migrations")]
-    async fn setup_required_follows_admin_passkeys(pool: PgPool) {
+    async fn setup_required_ends_at_the_first_admin_passkey_and_never_returns(pool: PgPool) {
         assert!(setup_required(&pool).await.unwrap());
-        assert!(!mark_completed_if_done(&pool).await.unwrap());
         let (k, b) = keys();
         let code = new_code(&pool).await.unwrap();
         let done = complete(&pool, &k, &b, &code, &data(false), Duration::minutes(30))
@@ -492,12 +517,142 @@ mod tests {
             .unwrap();
         // An admin without passkey does not end setup mode.
         assert!(setup_required(&pool).await.unwrap());
+        // Any passkey ever registered by an admin does, even one that is revoked later.
         add_admin_passkey(&pool, done.person_id, true).await;
-        assert!(setup_required(&pool).await.unwrap(), "revoked passkey");
-        add_admin_passkey(&pool, done.person_id, false).await;
         assert!(!setup_required(&pool).await.unwrap());
-        assert!(mark_completed_if_done(&pool).await.unwrap());
-        assert!(!mark_completed_if_done(&pool).await.unwrap(), "only once");
+        let completed: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT setup_completed_at FROM organisation_settings")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(completed.is_some(), "recorded by the database itself");
+        // Losing every device, deactivating or deleting the admin does not reopen setup.
+        sqlx::query("UPDATE passkey SET revoked_at = now()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE person SET active = false")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!setup_required(&pool).await.unwrap());
+        sqlx::query("DELETE FROM passkey")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!setup_required(&pool).await.unwrap());
+        // The marker cannot be cleared again.
+        sqlx::query("UPDATE organisation_settings SET setup_completed_at = NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!setup_required(&pool).await.unwrap());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn passkey_of_a_non_admin_does_not_end_setup(pool: PgPool) {
+        let (k, b) = keys();
+        let code = new_code(&pool).await.unwrap();
+        let done = complete(&pool, &k, &b, &code, &data(false), Duration::minutes(30))
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM role_assignment WHERE person_id = $1")
+            .bind(done.person_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        add_admin_passkey(&pool, done.person_id, false).await;
+        assert!(setup_required(&pool).await.unwrap());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn migration_backfills_installations_that_already_have_an_admin_passkey(pool: PgPool) {
+        let (k, b) = keys();
+        let code = new_code(&pool).await.unwrap();
+        let done = complete(&pool, &k, &b, &code, &data(false), Duration::minutes(30))
+            .await
+            .unwrap();
+        add_admin_passkey(&pool, done.person_id, false).await;
+        // Recreate the state of an installation from before the trigger existed.
+        sqlx::raw_sql(
+            "ALTER TABLE organisation_settings DISABLE TRIGGER USER; \
+             UPDATE organisation_settings SET setup_completed_at = NULL; \
+             ALTER TABLE organisation_settings ENABLE TRIGGER USER;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../../migrations/20260401000000_setup_never_reopens.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let completed: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT setup_completed_at FROM organisation_settings")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(completed.is_some());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn settings_row_exists_after_migration(pool: PgPool) {
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM organisation_settings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn announce_creates_one_code_even_when_called_concurrently(pool: PgPool) {
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let pool = pool.clone();
+                tokio::spawn(async move { announce_code_if_needed(&pool).await })
+            })
+            .collect();
+        let mut created = Vec::new();
+        for t in tasks {
+            created.extend(t.await.unwrap().unwrap());
+        }
+        assert_eq!(created.len(), 1, "exactly one caller logs a code");
+        assert!(code_is_valid(&pool, &created[0]).await.unwrap());
+        assert_eq!(announce_code_if_needed(&pool).await.unwrap(), None);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn announce_is_refused_once_setup_is_completed(pool: PgPool) {
+        sqlx::query("UPDATE organisation_settings SET setup_completed_at = now()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(announce_code_if_needed(&pool).await.unwrap(), None);
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM setup_code")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn complete_is_refused_when_setup_is_marked_completed(pool: PgPool) {
+        let (k, b) = keys();
+        let code = new_code(&pool).await.unwrap();
+        sqlx::query(
+            "UPDATE organisation_settings SET setup_completed_at = now(), display_name = 'Bestaand'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let r = complete(&pool, &k, &b, &code, &data(false), Duration::minutes(30)).await;
+        assert!(matches!(r, Err(SetupError::NotRequired)));
+        let name: String = sqlx::query_scalar("SELECT display_name FROM organisation_settings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "Bestaand", "existing organisation untouched");
     }
 
     #[sqlx::test(migrations = "../../migrations")]

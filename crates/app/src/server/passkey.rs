@@ -101,11 +101,12 @@ fn first_name(display_name: &str) -> String {
         .to_string()
 }
 
-async fn active_person(state: &AppState, id: Uuid) -> Result<Person> {
-    match person::get_person(&state.pool, &state.keys, id)
-        .await
-        .map_err(db)?
-    {
+async fn active_person<'e>(
+    exec: impl sqlx::PgExecutor<'e>,
+    keys: &crypto::DataKeys,
+    id: Uuid,
+) -> Result<Person> {
+    match person::get_person(exec, keys, id).await.map_err(db)? {
         Some(p) if p.active => Ok(p),
         _ => Err(AuthError::Login),
     }
@@ -161,7 +162,7 @@ pub async fn enrollment_info(state: &AppState, token: &str) -> EnrollmentInfo {
     let Ok(Some(person_id)) = enrollment::peek_valid(&state.pool, token).await else {
         return invalid;
     };
-    match active_person(state, person_id).await {
+    match active_person(&state.pool, &state.keys, person_id).await {
         Ok(p) => EnrollmentInfo {
             valid: true,
             first_name: Some(first_name(&p.display_name)),
@@ -179,7 +180,7 @@ pub async fn begin_registration(
         .await
         .map_err(db)?
         .ok_or(AuthError::Token)?;
-    let p = active_person(state, person_id)
+    let p = active_person(&state.pool, &state.keys, person_id)
         .await
         .map_err(|_| AuthError::Token)?;
     let exclude: Vec<_> = existing_passkeys(state, person_id)
@@ -249,7 +250,7 @@ pub async fn finish_registration(
         tracing::warn!(person_id = %ceremony.person_id, "credential id already registered");
         return Err(AuthError::Login);
     }
-    let p = active_person(state, ceremony.person_id)
+    let p = active_person(&state.pool, &state.keys, ceremony.person_id)
         .await
         .map_err(|_| AuthError::Token)?;
     let json =
@@ -309,7 +310,7 @@ pub async fn finish_login(
         tracing::warn!(person_id = %stored.person_id, "login with revoked passkey");
         return Err(AuthError::Login);
     }
-    let p = active_person(state, stored.person_id).await?;
+    let p = active_person(&mut *tx, &state.keys, stored.person_id).await?;
     if user_uuid(&p)? != user_handle {
         tracing::warn!(person_id = %p.id, "user handle does not match credential owner");
         return Err(AuthError::Login);
@@ -328,10 +329,11 @@ pub async fn finish_login(
     passkey::update_after_login(&mut *tx, stored.id, json)
         .await
         .map_err(db)?;
-    tx.commit().await.map_err(|e| db(e.into()))?;
-    audit::record(&state.pool, Some(p.id), "login", "person", Some(p.id), &[])
+    // The audit row shares the transaction: no audit row, no login.
+    audit::record(&mut *tx, Some(p.id), "login", "person", Some(p.id), &[])
         .await
         .map_err(db)?;
+    tx.commit().await.map_err(|e| db(e.into()))?;
     sign_in(state, session, &p, stored.id).await
 }
 
@@ -348,7 +350,7 @@ pub async fn me(state: &AppState, session: &Session) -> Result<Option<Me>> {
     else {
         return Ok(None);
     };
-    match active_person(state, user.person_id).await {
+    match active_person(&state.pool, &state.keys, user.person_id).await {
         Ok(p) => Ok(Some(me_of(state, &p).await?.0)),
         Err(AuthError::Login) => Ok(None),
         Err(e) => Err(e),
@@ -866,5 +868,35 @@ mod tests {
         }
         assert_eq!(first_name("Jan Peeters"), "Jan");
         assert_eq!(first_name("  "), "");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn login_is_not_kept_when_its_audit_row_fails(pool: PgPool) {
+        let state = state(pool);
+        let (p, token) = person_with_token(&state, "Jan Peeters").await;
+        let mut auth = SoftPasskey::new(true);
+        let (me, id) = register(&state, &new_session(), &mut auth, &token).await;
+        me.unwrap();
+        let id = id.unwrap();
+        for ddl in [
+            "CREATE FUNCTION fail_audit() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN RAISE EXCEPTION 'audit down'; END; $$",
+            "CREATE TRIGGER fail_audit BEFORE INSERT ON audit_log \
+             FOR EACH ROW WHEN (NEW.action = 'login') EXECUTE FUNCTION fail_audit()",
+        ] {
+            sqlx::query(ddl).execute(&state.pool).await.unwrap();
+        }
+        let s = new_session();
+        assert!(
+            login(&state, &s, &mut auth, &id, &p.user_handle)
+                .await
+                .is_err()
+        );
+        assert!(session::current(&state.pool, &s).await.unwrap().is_none());
+        let stored = passkey::find_by_credential_id(&state.pool, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.last_used_at.is_none(), "passkey update rolled back");
     }
 }

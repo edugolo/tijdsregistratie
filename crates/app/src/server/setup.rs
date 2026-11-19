@@ -117,24 +117,22 @@ pub fn validate_setup(input: &SetupInput) -> Result<SetupData> {
 }
 
 /// Makes sure the operator can find a setup code in the log: generates and logs one when none is
-/// usable. Call at startup in setup mode; `required` also calls it lazily.
+/// usable. Atomic (concurrent callers log one code) and a no-op once setup is completed. Called
+/// at startup and, while in setup mode, when the first visitor arrives or a code has expired.
 pub async fn announce_code(pool: &PgPool) -> Result<()> {
-    if !setup::has_usable_code(pool).await? {
-        let code = setup::new_code(pool).await?;
+    if let Some(code) = setup::announce_code_if_needed(pool).await? {
         tracing::info!("Setup code: {code}");
     }
     Ok(())
 }
 
-/// Setup mode check for the router. In setup mode it also announces a code (lazily, so the log
-/// line exists as soon as the first visitor arrives or after an expiry); outside it records
-/// `setup_completed_at` once the first admin passkey exists.
+/// Setup mode check for the router. A plain read once setup is completed (never writes, never
+/// announces a code); in setup mode it also makes sure a code is announced.
 pub async fn required(pool: &PgPool) -> Result<bool> {
     if setup::setup_required(pool).await? {
         announce_code(pool).await?;
         Ok(true)
     } else {
-        setup::mark_completed_if_done(pool).await?;
         Ok(false)
     }
 }
@@ -318,15 +316,22 @@ mod tests {
         assert_eq!(bad(|i| i.site.lat = 91.0), SetupFnError::Invalid("lat"));
     }
 
+    async fn code_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM setup_code")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
     #[sqlx::test(migrations = "../../migrations")]
     async fn required_announces_one_code_and_follows_passkeys(pool: PgPool) {
         assert!(required(&pool).await.unwrap());
         assert!(required(&pool).await.unwrap());
-        let codes: i64 = sqlx::query_scalar("SELECT count(*) FROM setup_code")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(codes, 1, "no new code while one is usable");
+        assert_eq!(
+            code_count(&pool).await,
+            1,
+            "no new code while one is usable"
+        );
         let (k, b) = keys();
         let code = setup::new_code(&pool).await.unwrap();
         let token = complete(&pool, &k, &b, input(&code)).await.unwrap();
@@ -348,6 +353,44 @@ mod tests {
                 .await
                 .unwrap();
         assert!(done.is_some());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn after_completion_nothing_announces_a_code_or_reopens(pool: PgPool) {
+        let (k, b) = keys();
+        let code = setup::new_code(&pool).await.unwrap();
+        let token = complete(&pool, &k, &b, input(&code)).await.unwrap();
+        let person = enrollment::peek_valid(&pool, &token)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("INSERT INTO passkey (person_id, credential_id, credential) VALUES ($1, $2, '{}'::jsonb)")
+            .bind(person)
+            .bind(vec![7u8])
+            .execute(&pool)
+            .await
+            .unwrap();
+        // The admin loses every device; the code window has long passed.
+        sqlx::query("UPDATE passkey SET revoked_at = now()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM setup_code")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            assert!(!required(&pool).await.unwrap());
+            announce_code(&pool).await.unwrap();
+        }
+        assert_eq!(code_count(&pool).await, 0, "no code is created or logged");
+        assert!(!check_code(&pool, &code).await.unwrap());
+        assert_eq!(
+            complete(&pool, &k, &b, input(&code)).await.unwrap_err(),
+            SetupFnError::NotRequired
+        );
+        let name = branding(&pool).await.unwrap().display_name;
+        assert_eq!(name, "Voorbeeldschool Zuid", "organisation not overwritten");
     }
 
     #[sqlx::test(migrations = "../../migrations")]

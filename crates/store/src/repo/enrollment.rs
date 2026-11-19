@@ -36,9 +36,9 @@ pub fn token_hash(raw: &str) -> Vec<u8> {
 }
 
 /// Issues a single-use token for `person_id`, valid for `ttl`. Earlier unused tokens of the
-/// same person are invalidated.
-pub async fn issue_token(
-    pool: &PgPool,
+/// same person are invalidated. Takes a pool or a transaction.
+pub async fn issue_token<'e>(
+    db: impl sqlx::PgExecutor<'e>,
     person_id: Uuid,
     issued_by: Option<Uuid>,
     ttl: Duration,
@@ -51,15 +51,13 @@ pub async fn issue_token(
     let issued_at = Utc::now();
     let expires_at = issued_at + ttl;
 
-    let mut tx = pool.begin().await?;
+    // One statement (the old tokens are expired by a data-modifying CTE), so it works on a pool
+    // and on the caller's transaction connection alike.
     sqlx::query(
-        "UPDATE enrollment_token SET expires_at = now()          WHERE person_id = $1 AND used_at IS NULL AND expires_at > now()",
-    )
-    .bind(person_id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "INSERT INTO enrollment_token (token_hash, person_id, issued_by, expires_at, created_at) \
+        "WITH expire AS ( \
+           UPDATE enrollment_token SET expires_at = now() \
+           WHERE person_id = $2 AND used_at IS NULL AND expires_at > now()) \
+         INSERT INTO enrollment_token (token_hash, person_id, issued_by, expires_at, created_at) \
          VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(token_hash(&raw))
@@ -67,9 +65,8 @@ pub async fn issue_token(
     .bind(issued_by)
     .bind(expires_at)
     .bind(issued_at)
-    .execute(&mut *tx)
+    .execute(db)
     .await?;
-    tx.commit().await?;
     Ok(IssuedToken {
         raw,
         person_id,

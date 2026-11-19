@@ -250,11 +250,9 @@ async fn commit(tx: Transaction<'static, Postgres>) -> Result<()> {
     Ok(())
 }
 
-/// Writes the audit row on `executor`; pass the mutation's transaction (`&mut *tx`).
-///
-/// Mutations whose repository function only takes a pool (it runs on its own connection) write
-/// the audit row first and commit the transaction after the mutation succeeded: a failing audit
-/// row then prevents the mutation, and a failing mutation leaves no audit row.
+/// Writes the audit row on `executor`; pass the mutation's transaction (`&mut *tx`). Mutation,
+/// audit row and any lockout check all run on that one connection, so a failing audit row rolls
+/// the mutation back and no second pool connection is needed while the transaction is open.
 async fn audit<'e>(
     executor: impl PgExecutor<'e>,
     scope: &StaffScope,
@@ -390,9 +388,9 @@ pub async fn add_member(
     site::get_site(env.pool, env.keys, site_id)
         .await?
         .ok_or(StaffError::NotFound)?;
-    let p =
-        person::create_person(env.pool, env.keys, env.blind, &name, Some(scope.person_id)).await?;
     let mut tx = begin(env).await?;
+    let p =
+        person::create_person(&mut *tx, env.keys, env.blind, &name, Some(scope.person_id)).await?;
     role::assign(
         &mut *tx,
         p.id,
@@ -435,7 +433,7 @@ pub async fn set_person_active(
         "person.deactivated"
     };
     audit(&mut *tx, scope, action, "person", person_id, &["active"]).await?;
-    if !person::set_active(env.pool, person_id, active).await? {
+    if !person::set_active(&mut *tx, person_id, active).await? {
         return Err(StaffError::NotFound);
     }
     commit(tx).await
@@ -455,7 +453,7 @@ pub async fn revoke_devices(env: &StaffEnv<'_>, scope: &StaffScope, person_id: U
         &["passkey"],
     )
     .await?;
-    passkey::revoke_all(env.pool, person_id, Some(scope.person_id)).await?;
+    passkey::revoke_all(&mut *tx, person_id, Some(scope.person_id)).await?;
     commit(tx).await
 }
 
@@ -479,7 +477,7 @@ pub async fn start_enrollment(
     )
     .await?;
     let token = enrollment::issue_token(
-        env.pool,
+        &mut *tx,
         person_id,
         Some(scope.person_id),
         Duration::minutes(ENROLLMENT_TTL_MINUTES),
@@ -547,14 +545,15 @@ pub async fn save_site(
                 &["name", "address", "location", "radius", "break"],
             )
             .await?;
-            let saved = site::update_site(env.pool, env.keys, id, &input).await?;
+            let saved = site::update_site(&mut *tx, env.keys, id, &input).await?;
             commit(tx).await?;
             saved
         }
         None => {
-            // The id only exists after the insert, so here the audit row follows the mutation.
-            let saved = site::create_site(env.pool, env.keys, &input).await?;
-            audit(env.pool, scope, "site.created", "site", saved.id, &["name"]).await?;
+            let mut tx = begin(env).await?;
+            let saved = site::create_site(&mut *tx, env.keys, &input).await?;
+            audit(&mut *tx, scope, "site.created", "site", saved.id, &["name"]).await?;
+            commit(tx).await?;
             saved
         }
     };
@@ -589,7 +588,7 @@ pub async fn set_site_active(
     };
     let mut tx = begin(env).await?;
     audit(&mut *tx, scope, action, "site", site_id, &["active"]).await?;
-    site::update_site(env.pool, env.keys, site_id, &input).await?;
+    site::update_site(&mut *tx, env.keys, site_id, &input).await?;
     commit(tx).await
 }
 
@@ -640,11 +639,11 @@ pub async fn add_person(
 ) -> Result<PersonRowDto> {
     require_admin(scope)?;
     let name = validate_name(name)?;
+    let mut tx = begin(env).await?;
     let p =
-        person::create_person(env.pool, env.keys, env.blind, &name, Some(scope.person_id)).await?;
-    // The id only exists after the insert, so the audit row follows the mutation.
+        person::create_person(&mut *tx, env.keys, env.blind, &name, Some(scope.person_id)).await?;
     audit(
-        env.pool,
+        &mut *tx,
         scope,
         "person.created",
         "person",
@@ -652,6 +651,7 @@ pub async fn add_person(
         &["display_name"],
     )
     .await?;
+    commit(tx).await?;
     person_row(env, &p, &HashMap::new()).await
 }
 
@@ -1594,5 +1594,154 @@ mod tests {
             Err(StaffError::Internal)
         );
         assert!(role::is_admin(&pool, other_admin).await.unwrap());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn creations_are_not_kept_when_their_audit_row_fails(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let count = |table: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*) FROM {table}"
+                )))
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let (people, sites) = (count("person").await, count("site").await);
+
+        fail_audit_of(&pool, "site.created").await;
+        assert_eq!(
+            save_site(&e, &s.admin, form("School C")).await,
+            Err(StaffError::Internal)
+        );
+        assert_eq!(count("site").await, sites);
+
+        fail_audit_of(&pool, "person.created").await;
+        assert_eq!(
+            add_person(&e, &s.admin, "Nina Nieuw").await,
+            Err(StaffError::Internal)
+        );
+        assert_eq!(
+            add_member(&e, &s.admin, s.site_a, "Nick Nieuw").await,
+            Err(StaffError::Internal)
+        );
+        assert_eq!(count("person").await, people);
+        assert_eq!(count("role_assignment").await, 4);
+
+        fail_audit_of(&pool, "site.updated").await;
+        let mut f = form("Hernoemd");
+        f.id = Some(s.site_a);
+        assert_eq!(save_site(&e, &s.admin, f).await, Err(StaffError::Internal));
+        assert_eq!(
+            site::get_site(&pool, &k.0, s.site_a)
+                .await
+                .unwrap()
+                .unwrap()
+                .name,
+            "School A"
+        );
+
+        fail_audit_of(&pool, "site.deactivated").await;
+        assert_eq!(
+            set_site_active(&e, &s.admin, s.site_a, false).await,
+            Err(StaffError::Internal)
+        );
+        assert!(
+            site::get_site(&pool, &k.0, s.site_a)
+                .await
+                .unwrap()
+                .unwrap()
+                .active
+        );
+
+        fail_audit_of(&pool, "enrollment.issued").await;
+        assert_eq!(
+            start_enrollment(&e, &s.admin, s.emp_a).await.map(|_| ()),
+            Err(StaffError::Internal)
+        );
+        let tokens: i64 = sqlx::query_scalar("SELECT count(*) FROM enrollment_token")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(tokens, 0);
+    }
+
+    /// Every lockout-protected mutation holds one transaction connection; none may ask the pool
+    /// for a second one meanwhile, or more concurrent calls than connections would deadlock.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn concurrent_mutations_do_not_starve_a_small_pool(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let small = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(std::time::Duration::from_secs(10))
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let e = env(&small, &k);
+        let (a, b) = (&s.admin, s.emp_a);
+        let results = tokio::join!(
+            revoke_devices(&e, a, b),
+            set_person_active(&e, a, b, false),
+            revoke_devices(&e, a, b),
+            set_person_active(&e, a, b, true),
+            revoke_devices(&e, a, b),
+            set_person_active(&e, a, b, false),
+            revoke_devices(&e, a, b),
+            start_enrollment(&e, a, s.emp_b),
+            save_site(&e, a, form("School D")),
+            async { add_person(&e, a, "Nina Nieuw").await.map(|_| ()) },
+        );
+        let (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10) = results;
+        assert_eq!(r1, Ok(()));
+        assert_eq!(r2, Ok(()));
+        assert_eq!(r3, Ok(()));
+        assert_eq!(r4, Ok(()));
+        assert_eq!(r5, Ok(()));
+        assert_eq!(r6, Ok(()));
+        assert_eq!(r7, Ok(()));
+        assert!(r8.is_ok() && r9.is_ok());
+        assert_eq!(r10, Ok(()));
+    }
+
+    /// The CSP allows inline scripts, so a raw-HTML sink must never receive anything but static
+    /// icon markup or the server-generated QR SVG. A new use has to be reviewed on purpose.
+    #[test]
+    fn raw_html_sinks_stay_on_the_allow_list() {
+        const ALLOWED: [&str; 2] = ["client/components/icon.rs", "client/staff/enroll.rs"];
+        let sink = concat!("dangerous_", "inner_html");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![root.clone()];
+        let mut offenders = Vec::new();
+        let mut seen_allowed = 0;
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let source = std::fs::read_to_string(&path).unwrap();
+                    if !source.contains(sink) {
+                        continue;
+                    }
+                    let rel = path.strip_prefix(&root).unwrap().to_string_lossy();
+                    if ALLOWED.contains(&rel.as_ref()) {
+                        seen_allowed += 1;
+                    } else {
+                        offenders.push(rel.into_owned());
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw HTML sink outside the allow-list (CSP allows inline scripts): {offenders:?}"
+        );
+        assert_eq!(seen_allowed, ALLOWED.len(), "allow-list is stale");
     }
 }

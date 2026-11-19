@@ -106,7 +106,8 @@ impl SetupSiteInput {
     }
 }
 
-/// True while the installation has no admin with an active passkey (setup mode).
+/// True until the first admin has registered a passkey (setup mode). Once false it stays false:
+/// recovery after losing every device is the operator CLI (`admin bootstrap-admin`).
 ///
 /// In setup mode this also makes sure a setup code exists and is logged.
 #[get("/api/setup/required")]

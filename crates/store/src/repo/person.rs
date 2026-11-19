@@ -4,7 +4,7 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 use crypto::{BlindIndexKey, DataKeys, normalize_name};
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
 use super::Result;
@@ -67,8 +67,9 @@ fn decrypt_sorted(rows: Vec<PersonRow>, keys: &DataKeys) -> Result<Vec<Person>> 
     Ok(people)
 }
 
-pub async fn create_person(
-    pool: &PgPool,
+/// Takes a pool or a transaction.
+pub async fn create_person<'e>(
+    db: impl PgExecutor<'e>,
     keys: &DataKeys,
     blind: &BlindIndexKey,
     display_name: &str,
@@ -91,26 +92,30 @@ pub async fn create_person(
     .bind(enc)
     .bind(index)
     .bind(created_by)
-    .fetch_one(pool)
+    .fetch_one(db)
     .await?;
     row.decrypt(keys)
 }
 
-pub async fn get_person(pool: &PgPool, keys: &DataKeys, id: Uuid) -> Result<Option<Person>> {
+pub async fn get_person<'e>(
+    db: impl PgExecutor<'e>,
+    keys: &DataKeys,
+    id: Uuid,
+) -> Result<Option<Person>> {
     sqlx::query_as::<_, PersonRow>(concat!(
         "SELECT ",
         person_columns!(),
         " FROM person WHERE id = $1"
     ))
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(db)
     .await?
     .map(|r| r.decrypt(keys))
     .transpose()
 }
 
-pub async fn get_person_by_user_handle(
-    pool: &PgPool,
+pub async fn get_person_by_user_handle<'e>(
+    db: impl PgExecutor<'e>,
     keys: &DataKeys,
     handle: &[u8],
 ) -> Result<Option<Person>> {
@@ -120,23 +125,23 @@ pub async fn get_person_by_user_handle(
         " FROM person WHERE webauthn_user_handle = $1"
     ))
     .bind(handle)
-    .fetch_optional(pool)
+    .fetch_optional(db)
     .await?
     .map(|r| r.decrypt(keys))
     .transpose()
 }
 
-/// Returns false if the person does not exist. Deactivating also ends all open sessions of the
+/// Returns false if the person does not exist. Takes a pool or a transaction. Deactivating also ends all open sessions of the
 /// person (they stay ended when the person is activated again).
-pub async fn set_active(pool: &PgPool, id: Uuid, active: bool) -> Result<bool> {
+pub async fn set_active<'e>(db: impl PgExecutor<'e>, id: Uuid, active: bool) -> Result<bool> {
     let done = sqlx::query(
         "UPDATE person SET active = $2, \
-         sessions_valid_after = CASE WHEN $2 THEN sessions_valid_after ELSE now() END \
+         sessions_valid_after = CASE WHEN $2 THEN sessions_valid_after ELSE clock_timestamp() END \
          WHERE id = $1",
     )
     .bind(id)
     .bind(active)
-    .execute(pool)
+    .execute(db)
     .await?;
     Ok(done.rows_affected() > 0)
 }
@@ -163,10 +168,10 @@ pub async fn session_is_valid(
 }
 
 /// Whether the person exists and is active (no decryption needed).
-pub async fn is_active(pool: &PgPool, id: Uuid) -> Result<bool> {
+pub async fn is_active<'e>(db: impl PgExecutor<'e>, id: Uuid) -> Result<bool> {
     let active: Option<bool> = sqlx::query_scalar("SELECT active FROM person WHERE id = $1")
         .bind(id)
-        .fetch_optional(pool)
+        .fetch_optional(db)
         .await?;
     Ok(active.unwrap_or(false))
 }
