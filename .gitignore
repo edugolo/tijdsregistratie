@@ -3,3 +3,7 @@ target
 *.key
 dist
 node_modules
+
+# e2e browser tests
+tests/e2e/node_modules
+tests/e2e/artifacts

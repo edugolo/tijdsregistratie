@@ -1,0 +1,19 @@
+{
+  "name": "tijd-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Browser tests for the time registration app",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1",
+    "@types/node": "22.10.5",
+    "jsqr": "1.4.0",
+    "pg": "8.13.1",
+    "pngjs": "7.0.0",
+    "@types/pg": "8.11.10",
+    "@types/pngjs": "6.0.5",
+    "typescript": "5.7.2"
+  }
+}
