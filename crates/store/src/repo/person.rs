@@ -75,9 +75,9 @@ pub async fn create_person(
     created_by: Option<Uuid>,
 ) -> Result<Person> {
     let id = Uuid::new_v4();
-    // 32 random bytes: never derived from the person's data.
-    let mut handle = Uuid::new_v4().as_bytes().to_vec();
-    handle.extend_from_slice(Uuid::new_v4().as_bytes());
+    // WebAuthn user handle: the 16 bytes of a random v4 UUID (what webauthn-rs expects as user
+    // id), never derived from the person's id or data.
+    let handle = Uuid::new_v4().as_bytes().to_vec();
     let enc = seal_str(keys, TABLE, NAME_COLUMN, id, display_name)?;
     let index = blind.index(&normalize_name(display_name)).to_vec();
     let row: PersonRow = sqlx::query_as(concat!(

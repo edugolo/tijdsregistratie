@@ -38,7 +38,8 @@ async fn person_round_trip_decrypts(pool: PgPool) {
         .unwrap();
     assert_eq!(p.display_name, "Jan Peeters");
     assert!(p.active);
-    assert_eq!(p.user_handle.len(), 32);
+    assert_eq!(p.user_handle.len(), 16);
+    assert_ne!(p.user_handle, p.id.as_bytes().to_vec());
     let got = person::get_person(&pool, &k, p.id).await.unwrap().unwrap();
     assert_eq!(got.display_name, "Jan Peeters");
     let by_handle = person::get_person_by_user_handle(&pool, &k, &p.user_handle)
