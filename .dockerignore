@@ -1,0 +1,22 @@
+# Build output and VCS
+target/
+**/target/
+dist/
+.git/
+.github/
+
+# Local configuration and secrets
+.env
+.env.*
+!config/example/.env.example
+secrets/
+*.key
+
+# Browser tests
+tests/e2e/node_modules/
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+tests/e2e/artifacts/
+
+# Large design exports
+docs/design/*.pdf

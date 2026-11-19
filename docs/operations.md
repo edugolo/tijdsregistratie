@@ -37,7 +37,7 @@ Every command except `generate-key` applies pending database migrations first.
    ```
 
    This creates the person with the admin role, prints the enrollment link
-   (`$APP_ORIGIN/koppel/<token>`, valid 30 minutes, single use) and shows it as a QR code.
+   (`$APP_ORIGIN/koppel#<token>`, valid 30 minutes, single use) and shows it as a QR code.
    Scan it with the admin's own phone to register a passkey. If the token expires, run
    `admin list-admins` to find the person; issuing a new link currently means running
    `bootstrap-admin --force` again. The command refuses when an active admin already exists unless
@@ -144,9 +144,22 @@ sign-in. Do not delete rows by hand: it breaks the audit trail and will be refus
 ## Reverse proxy and rate limiting
 
 Run the app behind a reverse proxy (Traefik, nginx, Caddy) that terminates TLS and **rate limits** the
-public endpoints, in particular the login and enrollment routes (`/koppel/*`, the passkey `/api/...`
+public endpoints, in particular the login and enrollment routes (`/koppel`, the passkey `/api/...`
 functions) and `/api/clock`. A limit of a few requests per second per IP with a small burst is
 enough for this application. Only let the app trust forwarded client-IP headers when the proxy is the only way to reach it.
+
+The enrollment token sits in the URL fragment (`/koppel#<token>`), which browsers never send to
+servers, so it does not appear in proxy logs or `Referer` headers. Old `/koppel/<token>` links
+show "Deze code werkt niet meer."
+
+The app itself limits the sign-in and enrollment endpoints (`/api/auth/*`, except the session
+probe) per client address (`AUTH_RATE_LIMIT_PER_MINUTE`, default 10). The client address is the
+TCP peer address. Behind a reverse proxy that is the proxy's address, so **set
+`TRUST_PROXY_HEADERS=true`** (only when the proxy is the sole way in): the app then uses the last
+`X-Forwarded-For` entry, which the proxy adds, so clients are told apart again. Without it, all
+clients behind the proxy share one bucket and can lock each other out (for example at 08:00).
+If no client address is available at all, per-client limiting is off, only a global cap of 600
+requests per minute applies and a warning is logged.
 
 ## Key file permissions and blob format
 
@@ -156,3 +169,64 @@ enough for this application. Only let the app trust forwarded client-IP headers 
 - The key version byte of every encrypted blob is part of the AEAD associated data. Blobs written
   before this change cannot be read; there was no production data when it was introduced. A database
   that already holds encrypted data from an older build has to be re-created.
+
+## Deployment
+
+The `deploy/` directory holds a multi-stage `Dockerfile` and a `compose.yaml` (app and PostgreSQL);
+the README has the quick start. This section covers running it for real.
+
+### Reverse proxy and TLS
+
+Passkeys require HTTPS (except on `http://localhost`). Terminate TLS in a reverse proxy and forward
+to the app, which the compose file publishes on `127.0.0.1:${HOST_PORT}` only.
+
+- Set `APP_ORIGIN` to the final public origin (`https://...`, no path) **before first use**.
+  Passkeys are bound to that domain: changing it invalidates every registered passkey.
+- Keep `COOKIE_SECURE=true` (the default) for an `https` origin.
+- Set `TRUST_PROXY_HEADERS=true` only when the proxy overwrites `X-Forwarded-For` and is the only
+  way to reach the app. Otherwise clients can spoof their address and bypass the per-address rate
+  limit on `/api/auth/*`.
+- Forward the `Host` header unchanged and enable WebSocket/HTTP streaming as needed by your proxy.
+- Optional hardening: restrict `/api/health` to the local network or the proxy.
+
+### Backups
+
+- **Database:** `pg_dump` the database on a schedule, for example
+  `docker compose -f deploy/compose.yaml exec -T db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" | gzip > tijd-$(date +%F).sql.gz`.
+  Test a restore regularly.
+- **Keys:** back up `secrets/` (both key files) **separately** from the database dumps, offline or in
+  a separate secret store. Restoring a dump without the matching key leaves all personal data
+  unreadable, and storing both together makes the encryption pointless.
+- Back up again after every key rotation (the data key file gains a line).
+
+### Upgrades and migrations
+
+```sh
+git pull
+docker compose -f deploy/compose.yaml --env-file .env up -d --build --wait
+```
+
+Pending database migrations are applied automatically at startup (and by every `admin` command
+except `generate-key`). Take a database backup first. The old container keeps serving until the new
+one is built; there is a short gap while it restarts.
+
+### Running the admin CLI
+
+The image contains the `admin` binary; run it with the same environment and key files as the app:
+
+```sh
+docker compose -f deploy/compose.yaml --env-file .env run --rm app admin bootstrap-admin --name "Example Admin"
+docker compose -f deploy/compose.yaml --env-file .env run --rm app admin setup-code
+```
+
+The container user must be able to read the key files (see `APP_UID` / `APP_GID` in
+`config/example/.env.example`; rootless Docker needs `0`/`0`). To seed sites, mount the file:
+`run --rm -v "$PWD/sites.toml:/tmp/sites.toml:ro" app admin seed-sites --file /tmp/sites.toml`.
+
+### Scheduled purge of coordinates
+
+Run `admin purge-locations` daily from the host cron (see "Purging coordinates" above):
+
+```cron
+15 3 * * * cd /srv/tijdsregistratie && docker compose -f deploy/compose.yaml --env-file .env run --rm -T app admin purge-locations >> purge.log 2>&1
+```

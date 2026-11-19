@@ -1,0 +1,56 @@
+# Run from the repository root:
+#   cp config/example/.env.example .env      # then edit it
+#   docker compose -f deploy/compose.yaml --env-file .env up -d --build
+#
+# Operator CLI:
+#   docker compose -f deploy/compose.yaml --env-file .env run --rm app admin --help
+
+name: tijdsregistratie
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: tijdsregistratie:latest
+    env_file: ../.env
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
+    environment:
+      # The key files are mounted at these fixed paths; they override any value in .env.
+      DATA_KEY_FILE: /run/secrets/data_key
+      BLIND_INDEX_KEY_FILE: /run/secrets/blind_index_key
+    secrets:
+      - data_key
+      - blind_index_key
+    depends_on:
+      db:
+        condition: service_healthy
+    # Published on loopback only; put a TLS-terminating reverse proxy in front.
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8080}:8080"
+    restart: unless-stopped
+
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tijd}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-tijd}
+    volumes:
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+secrets:
+  # Keys are read from files in ./secrets/ next to this file's project root (not committed).
+  data_key:
+    file: ../secrets/data.key
+  blind_index_key:
+    file: ../secrets/blind.key
+
+volumes:
+  db-data:
