@@ -1,10 +1,11 @@
-//! Server-only code: auth, sessions, repository. Server function declarations live in `crate::api`.
+//! Server-only code: auth, sessions. The repository lives in the `store` crate. Server function declarations live in `crate::api`.
 
 pub mod auth;
+pub mod clock;
 pub mod config;
-pub mod crypto_ext;
-pub mod repo;
+pub mod passkey;
 pub mod session;
+pub mod staff;
 pub mod state;
 
 use axum::Extension;

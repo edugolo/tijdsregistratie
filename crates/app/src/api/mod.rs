@@ -1,6 +1,10 @@
 //! Server function declarations. Compiled for both targets: the macro keeps the body on the
 //! server and generates an HTTP call on the client. Bodies delegate to `crate::server`.
 
+pub mod auth;
+pub mod clock;
+pub mod staff;
+
 use dioxus::prelude::*;
 
 /// Liveness probe: checks that the database answers.

@@ -2,6 +2,9 @@
 
 use clap::{Parser, Subcommand};
 
+// Dependencies for the subcommands that are still stubs; remove as each one lands.
+use {qrcode as _, store as _};
+
 #[derive(Parser)]
 #[command(
     name = "admin",

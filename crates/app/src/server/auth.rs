@@ -4,18 +4,10 @@ use dioxus::prelude::ServerFnError;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::repo::person;
-use super::repo::role::{self, Role, RoleAssignment};
 use super::session::{SessionKind, SessionUser, get_user};
 use super::{app_state, session};
-
-/// What a manager or admin may see: all sites (admin) or the sites they manage.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StaffScope {
-    pub person_id: Uuid,
-    pub is_admin: bool,
-    pub site_ids: Vec<Uuid>,
-}
+use store::repo::person;
+use store::repo::role::{self, StaffScope, scope_allows_sites, scope_from_roles};
 
 fn http_error(code: u16, message: &str) -> ServerFnError {
     ServerFnError::ServerError {
@@ -36,31 +28,6 @@ fn forbidden() -> ServerFnError {
 fn internal(e: impl std::fmt::Display) -> ServerFnError {
     tracing::error!(error = %e, "server function failed");
     http_error(500, "internal error")
-}
-
-/// Pure part of the staff guard: derives the scope from a person's roles, `None` if they are
-/// neither admin nor manager of any site.
-pub fn scope_from_roles(person_id: Uuid, roles: &[RoleAssignment]) -> Option<StaffScope> {
-    let is_admin = roles.iter().any(|r| r.role == Role::Admin);
-    let site_ids: Vec<Uuid> = roles
-        .iter()
-        .filter(|r| r.role == Role::Manager)
-        .filter_map(|r| r.site_id)
-        .collect();
-    (is_admin || !site_ids.is_empty()).then_some(StaffScope {
-        person_id,
-        is_admin,
-        site_ids,
-    })
-}
-
-/// Pure part of the person check: admin always, otherwise the person must work at one of the
-/// scope's sites.
-pub fn scope_allows_sites(scope: &StaffScope, person_employee_sites: &[Uuid]) -> bool {
-    scope.is_admin
-        || person_employee_sites
-            .iter()
-            .any(|s| scope.site_ids.contains(s))
 }
 
 /// Whether `person_id` falls within the scope.

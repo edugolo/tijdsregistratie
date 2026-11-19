@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::Result;
-use crate::server::crypto_ext::{open_str, seal_str};
+use crate::crypto_ext::{open_str, seal_str};
 
 const TABLE: &str = "person";
 const NAME_COLUMN: &str = "display_name";

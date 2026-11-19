@@ -128,3 +128,36 @@ pub async fn is_admin(pool: &PgPool, person_id: Uuid) -> Result<bool> {
     .fetch_one(pool)
     .await?)
 }
+
+/// What a manager or admin may see: all sites (admin) or the sites they manage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaffScope {
+    pub person_id: Uuid,
+    pub is_admin: bool,
+    pub site_ids: Vec<Uuid>,
+}
+
+/// Pure part of the staff guard: derives the scope from a person's roles, `None` if they are
+/// neither admin nor manager of any site.
+pub fn scope_from_roles(person_id: Uuid, roles: &[RoleAssignment]) -> Option<StaffScope> {
+    let is_admin = roles.iter().any(|r| r.role == Role::Admin);
+    let site_ids: Vec<Uuid> = roles
+        .iter()
+        .filter(|r| r.role == Role::Manager)
+        .filter_map(|r| r.site_id)
+        .collect();
+    (is_admin || !site_ids.is_empty()).then_some(StaffScope {
+        person_id,
+        is_admin,
+        site_ids,
+    })
+}
+
+/// Pure part of the person check: admin always, otherwise the person must work at one of the
+/// scope's sites.
+pub fn scope_allows_sites(scope: &StaffScope, person_employee_sites: &[Uuid]) -> bool {
+    scope.is_admin
+        || person_employee_sites
+            .iter()
+            .any(|s| scope.site_ids.contains(s))
+}

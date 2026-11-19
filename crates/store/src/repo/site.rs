@@ -9,7 +9,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{RepoError, Result};
-use crate::server::crypto_ext::{open_str, seal_str};
+use crate::crypto_ext::{open_str, seal_str};
 
 const TABLE: &str = "site";
 const ADDRESS_COLUMN: &str = "address";

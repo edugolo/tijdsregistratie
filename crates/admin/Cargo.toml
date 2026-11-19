@@ -8,3 +8,9 @@ publish.workspace = true
 
 [dependencies]
 clap = { workspace = true }
+store = { workspace = true }
+crypto = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+qrcode = { workspace = true }

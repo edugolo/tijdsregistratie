@@ -1,0 +1,15 @@
+[package]
+name = "store"
+description = "Encrypted PostgreSQL repository layer shared by the app server and the admin CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crypto = { workspace = true }
+domain = { workspace = true }
+sqlx = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }

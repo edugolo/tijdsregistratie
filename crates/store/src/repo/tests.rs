@@ -5,9 +5,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::role::{self, Role};
+use super::role::{StaffScope, scope_allows_sites, scope_from_roles};
 use super::site::{self, SiteInput, ZonePolicy};
 use super::{audit, person, settings};
-use crate::server::auth::{StaffScope, scope_allows_sites, scope_from_roles};
 
 fn keys() -> (DataKeys, BlindIndexKey) {
     (
@@ -348,16 +348,14 @@ async fn settings_default_row_created_once(pool: PgPool) {
 fn crypto_ext_round_trip_and_binding() {
     let (k, _) = keys();
     let id = Uuid::new_v4();
-    let blob =
-        crate::server::crypto_ext::seal_str(&k, "person", "display_name", id, "Jan").unwrap();
+    let blob = crate::crypto_ext::seal_str(&k, "person", "display_name", id, "Jan").unwrap();
     assert_eq!(
-        crate::server::crypto_ext::open_str(&k, "person", "display_name", id, &blob).unwrap(),
+        crate::crypto_ext::open_str(&k, "person", "display_name", id, &blob).unwrap(),
         "Jan"
     );
-    assert!(crate::server::crypto_ext::open_str(&k, "person", "email", id, &blob).is_err());
+    assert!(crate::crypto_ext::open_str(&k, "person", "email", id, &blob).is_err());
     assert!(
-        crate::server::crypto_ext::open_str(&k, "person", "display_name", Uuid::new_v4(), &blob)
-            .is_err()
+        crate::crypto_ext::open_str(&k, "person", "display_name", Uuid::new_v4(), &blob).is_err()
     );
 }
 
