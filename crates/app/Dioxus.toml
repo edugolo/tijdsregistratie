@@ -1,4 +1,7 @@
 [application]
+# Static files (manifest, icons, service worker) live at the repository root and are
+# copied to the web root of the build output (served at "/manifest.webmanifest", "/sw.js", ...).
+public_dir = "../../public"
 
 [web.app]
 title = "Tijdsregistratie"
