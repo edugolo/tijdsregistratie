@@ -1,12 +1,14 @@
-//! "Instellingen": organisation, schools and appearance for admins; HR sees appearance. Every
+//! "Instellingen": organisation, schools, export profiles, integrations and appearance for admins; HR sees appearance. Every
 //! staff member has "Mijn toestellen".
 
 use dioxus::prelude::*;
 
 use super::devices::MyDevices;
 use super::flow::{ErrorNotice, report_error};
+use super::integrations::IntegrationsSection;
 use super::load::{Skeleton, use_loaded};
 use super::map::{site_form_to_dto, site_from_dto};
+use super::profiles::ProfilesSection;
 use super::sites::{SaveRequest, SitesPage};
 use crate::api::hours::set_site_cost_centre;
 use crate::api::staff::{StaffContext, list_sites, save_site, set_site_active};
@@ -19,14 +21,18 @@ use i18n_embed_fl::fl;
 enum Section {
     Organisation,
     Sites,
+    Export,
+    Integrations,
     Appearance,
     Devices,
 }
 
 impl Section {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 6] = [
         Self::Organisation,
         Self::Sites,
+        Self::Export,
+        Self::Integrations,
         Self::Appearance,
         Self::Devices,
     ];
@@ -46,6 +52,8 @@ impl Section {
         match self {
             Self::Organisation => fl!(LANGUAGE_LOADER, "settings-org"),
             Self::Sites => fl!(LANGUAGE_LOADER, "settings-sites"),
+            Self::Export => fl!(LANGUAGE_LOADER, "settings-export"),
+            Self::Integrations => fl!(LANGUAGE_LOADER, "settings-integrations"),
             Self::Appearance => fl!(LANGUAGE_LOADER, "settings-appearance"),
             Self::Devices => fl!(LANGUAGE_LOADER, "settings-devices"),
         }
@@ -84,6 +92,8 @@ pub fn StaffSettingsPage() -> Element {
                     match current {
                         Section::Organisation => rsx! { OrgSettingsPage {} },
                         Section::Sites => rsx! { SitesSection {} },
+                        Section::Export => rsx! { ProfilesSection {} },
+                        Section::Integrations => rsx! { IntegrationsSection {} },
                         Section::Appearance => rsx! {
                             h2 { {fl!(LANGUAGE_LOADER, "settings-appearance")} }
                             div { class: "st-card", AppearancePicker {} }

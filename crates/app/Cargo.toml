@@ -49,6 +49,7 @@ web-sys = { workspace = true, optional = true, features = [
     "CredentialsContainer", "Credential", "PublicKeyCredential",
     "CredentialCreationOptions", "CredentialRequestOptions",
     "ServiceWorkerContainer", "Location", "History", "Document", "Element", "Storage",
+    "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "HtmlElement", "Node", "Clipboard",
 ] }
 js-sys = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }

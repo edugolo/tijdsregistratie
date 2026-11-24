@@ -22,6 +22,9 @@ pub struct StaffContext {
     /// Personeelsdienst: all sites like an admin, but no settings and no admin or HR changes.
     pub is_hr: bool,
     pub sites: Vec<SiteOption>,
+    /// IANA name of the organisation time zone: all times on the staff pages are shown in it,
+    /// whatever the zone of the browser.
+    pub timezone: String,
 }
 
 /// Today's registration state; times are preformatted `hh:mm` in the organisation time zone.

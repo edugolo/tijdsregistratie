@@ -348,3 +348,25 @@
 @media (prefers-reduced-motion: reduce) {
   .st-shell * { transition: none !important; animation: none !important; }
 }
+
+/* Uren tabs, export, profiles and integrations */
+.st-subnav { display: flex; flex-wrap: wrap; gap: 8px; }
+.st-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; overflow-wrap: anywhere; }
+.st-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.5; min-height: 320px; white-space: pre; overflow: auto; }
+.st-table-preview td, .st-table-preview th { white-space: nowrap; }
+.st-help > summary { cursor: pointer; min-height: 40px; display: flex; align-items: center; font-weight: 600; color: var(--st-primary); }
+.st-help > summary:focus-visible { outline: 3px solid var(--st-primary); outline-offset: 2px; border-radius: 8px; }
+.st-fieldset { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.st-fieldset > legend { padding: 0; margin-bottom: 4px; font-size: 14px; font-weight: 600; }
+.st-check {
+  display: flex; align-items: flex-start; gap: 12px; min-height: 48px; padding: 8px 12px;
+  border: 1px solid var(--st-outline-variant); border-radius: 12px; cursor: pointer;
+}
+.st-check input { width: 20px; height: 20px; margin-top: 2px; accent-color: var(--st-primary); flex: none; }
+.st-check input:focus-visible { outline: 3px solid var(--st-primary); outline-offset: 2px; }
+.st-check-text { display: flex; flex-direction: column; gap: 2px; font-size: 14px; }
+.st-created { border-color: var(--st-primary); }
+.st-key { align-items: flex-start; }
+@media (max-width: 640px) {
+  .st-table-preview td { text-align: right; }
+}

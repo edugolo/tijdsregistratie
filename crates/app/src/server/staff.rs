@@ -401,6 +401,11 @@ pub async fn staff_context(env: &StaffEnv<'_>, scope: &StaffScope) -> Result<Sta
         is_admin: scope.is_admin(),
         is_hr: scope.is_hr(),
         sites,
+        timezone: settings::get_settings(env.pool)
+            .await?
+            .timezone
+            .name()
+            .to_string(),
     })
 }
 
@@ -1285,6 +1290,7 @@ mod tests {
         assert!(!ctx.is_admin && !ctx.is_hr);
         assert_eq!(ctx.sites.len(), 1);
         assert_eq!(ctx.sites[0].id, s.site_a);
+        assert_eq!(ctx.timezone, "Europe/Brussels");
         let ctx = staff_context(&e, &s.admin).await.unwrap();
         assert!(ctx.is_admin);
         assert_eq!(ctx.sites.len(), 2);

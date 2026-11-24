@@ -139,6 +139,7 @@ pub fn StaffLayout() -> Element {
 /// Provides the loaded staff context to the pages below.
 #[component]
 fn ContextScope(ctx: StaffContext, children: Element) -> Element {
+    super::timing::set_org_timezone(&ctx.timezone);
     use_context_provider(|| ctx);
     children
 }

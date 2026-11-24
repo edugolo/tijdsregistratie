@@ -1,17 +1,18 @@
 //! "Uren": hours per person and day for a period, the validation bar of a school and the side
 //! panel of one day with its corrections.
 
-use chrono::NaiveDate;
+use chrono::{Duration, NaiveDate};
 use dioxus::prelude::*;
 use domain::{EventKind, ZoneStatus};
 use uuid::Uuid;
 
+use super::export::ExportTab;
 use super::field::{Field, error_id};
 use super::flow::{ErrorNotice, error_code, report_error};
 use super::hours_fmt::{
-    Coverage, Issues, Preset, REASON_MAX_CHARS, Sign, coverage, day_label, format_deviation,
-    format_duration, open_issues, parse_clock, parse_date, preset_range, range_is_valid, reason_ok,
-    sign_of, validation_range,
+    Coverage, Issues, MAX_RANGE_DAYS, Preset, REASON_MAX_CHARS, Sign, coverage, day_label,
+    format_deviation, format_duration, open_issues, parse_clock, parse_date, preset_range,
+    range_is_valid, reason_ok, sign_of, validation_range,
 };
 use super::icons::{Icon, IconKind};
 use super::load::{Skeleton, use_loaded};
@@ -41,20 +42,99 @@ fn date_input(date: NaiveDate) -> String {
     date.format("%Y-%m-%d").to_string()
 }
 
-/// `/beheer/uren`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HoursTab {
+    Overview,
+    Export,
+}
+
+/// A school and stretch to open in the overview, from a problem of the export.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Focus {
+    site: Uuid,
+    from: NaiveDate,
+    to: NaiveDate,
+}
+
+/// `/beheer/uren`: the overview, and for HR and admins the export next to it.
 #[component]
 pub fn StaffHoursPage() -> Element {
     let ctx = use_context::<StaffContext>();
+    let can_export = ctx.can_view_all_sites();
+    let mut tab = use_signal(|| HoursTab::Overview);
+    let mut focus = use_signal(|| None::<Focus>);
+    // The server refuses the export for managers; the tab is not rendered for them either.
+    let current = if can_export {
+        tab()
+    } else {
+        HoursTab::Overview
+    };
+    let tabs = rsx! {
+        if can_export {
+            nav { class: "st-subnav", aria_label: fl!(LANGUAGE_LOADER, "hours-tabs-label"),
+                for (option, label) in [
+                    (HoursTab::Overview, fl!(LANGUAGE_LOADER, "hours-tab-overview")),
+                    (HoursTab::Export, fl!(LANGUAGE_LOADER, "hours-tab-export")),
+                ] {
+                    button {
+                        key: "{label}",
+                        r#type: "button",
+                        class: if option == current { "st-filter st-filter-active" } else { "st-filter" },
+                        aria_current: if option == current { "page" } else { "false" },
+                        onclick: move |_| tab.set(option),
+                        "{label}"
+                    }
+                }
+            }
+        }
+    };
+    match current {
+        HoursTab::Overview => rsx! {
+            HoursOverview { key: "{focus():?}", tabs, focus: focus() }
+        },
+        HoursTab::Export => rsx! {
+            ExportTab {
+                tabs,
+                on_open_hours: move |(site, from, to)| {
+                    focus.set(Some(Focus { site, from, to }));
+                    tab.set(HoursTab::Overview);
+                },
+            }
+        },
+    }
+}
+
+/// The period, the validation bar of a school and the hours of each person.
+#[component]
+fn HoursOverview(tabs: Element, focus: Option<Focus>) -> Element {
+    let ctx = use_context::<StaffContext>();
     let today = use_hook(today_date);
-    let mut preset = use_signal(|| Preset::ThisWeek);
-    let initial = preset_range(Preset::ThisWeek, today);
+    // From the export the stretch of a problem opens, cut to what the overview shows.
+    let focused = focus.map(|f| {
+        (
+            f.from,
+            f.to.min(f.from + Duration::days(MAX_RANGE_DAYS - 1)),
+        )
+    });
+    let mut preset = use_signal(|| {
+        if focused.is_some() {
+            Preset::Custom
+        } else {
+            Preset::ThisWeek
+        }
+    });
+    let initial = focused.or_else(|| preset_range(Preset::ThisWeek, today));
     let mut custom_from = use_signal(|| initial.map(|r| date_input(r.0)).unwrap_or_default());
     let mut custom_to = use_signal(|| initial.map(|r| date_input(r.1)).unwrap_or_default());
     // One school is selected at once for a manager with a single school; otherwise all.
-    let mut site = use_signal(|| match ctx.sites.as_slice() {
-        [only] => Some(only.id),
-        _ => None,
+    let mut site = use_signal(|| {
+        focus.map(|f| f.site).or(match ctx.sites.as_slice() {
+            [only] => Some(only.id),
+            _ => None,
+        })
     });
+    // Bumped after every change so an open day panel loads the day again.
+    let generation = use_signal(|| 0u32);
     let mut query = use_signal(String::new);
     let mut selected = use_signal(|| None::<(Uuid, NaiveDate)>);
 
@@ -87,6 +167,8 @@ pub fn StaffHoursPage() -> Element {
     let reload = move || {
         loaded.reload();
         status.reload();
+        let mut next = generation;
+        next += 1;
     };
 
     let data = loaded.get();
@@ -126,6 +208,7 @@ pub fn StaffHoursPage() -> Element {
                     }
                 }
             }
+            {tabs}
             div { class: "st-toolbar",
                 div { class: "st-chips", role: "group", aria_label: fl!(LANGUAGE_LOADER, "hours-period"),
                     for option in Preset::ALL {
@@ -248,6 +331,7 @@ pub fn StaffHoursPage() -> Element {
                         name,
                         date,
                         site: site(),
+                        generation,
                         can_reopen: ctx.can_view_all_sites(),
                         on_close: move |_| selected.set(None),
                         on_changed: move |_| reload(),
@@ -655,18 +739,21 @@ fn DayPanel(
     name: String,
     date: NaiveDate,
     site: Option<Uuid>,
+    generation: Signal<u32>,
     can_reopen: bool,
     on_close: EventHandler<()>,
     on_changed: EventHandler<()>,
 ) -> Element {
-    let detail = use_loaded(move || day_detail(person_id, date));
+    // Loads again whenever the page reloads: a period validated or reopened meanwhile locks or
+    // unlocks the day at once.
+    let detail = use_loaded(move || {
+        generation();
+        day_detail(person_id, date)
+    });
     let mut action = use_signal(|| None::<Action>);
     let mut reopening = use_signal(|| false);
     let message = use_signal(|| None::<String>);
-    let refresh = move || {
-        detail.reload();
-        on_changed.call(());
-    };
+    let refresh = move || on_changed.call(());
     rsx! {
         aside { class: "st-panel", aria_label: fl!(LANGUAGE_LOADER, "hours-panel-label", name = name.as_str(), date = day_label(date)),
             header { class: "st-panel-head",
@@ -775,7 +862,7 @@ fn DayBody(
                 }
             }
         }
-        if let Some(chosen) = action {
+        if let (Some(chosen), false) = (action, locked) {
             CorrectionForm {
                 key: "{chosen:?}",
                 person_id: day.person_id,

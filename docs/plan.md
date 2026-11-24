@@ -300,7 +300,7 @@ Security-relevant tasks (T2, T4, T5, T8) get an independent review before merge.
 | 5 | Project name and branding | first public push |
 | 6 | People without a smartphone: kiosk mode later or out of scope | later |
 
-## 14. Payroll export and integrations (decided 2026-11-24; server side built, screens and connectors to do)
+## 14. Payroll export and integrations (decided 2026-11-24; server side and screens built, connectors to do)
 
 Depends on Uren (hours overview), corrections and validation. The backend of these exists
 (`server::hours`, `api::hours`: overview, day detail, corrections, period validation, contract
@@ -333,7 +333,13 @@ minutes, payroll number, site cost centre; schema in §9); the screens and the e
     `GET /exports/{profile}`, `GET /periods`. Webhooks later (e.g. period validated).
   - **OpenAPI** generated from code with `utoipa` (+ `utoipa-axum`), served at `/api/v1/openapi.json`;
     interactive docs with **Scalar** via `utoipa-scalar` at `/api/v1/docs` (owner's choice over
-    RapiDoc). The Scalar script is vendored in `public/` (no CDN) so the strict CSP stays intact; the
+    RapiDoc). The Scalar script is vendored in `crates/app/vendor/scalar/` and embedded in the binary (no CDN) so the strict CSP stays intact; the
     docs page can be disabled by configuration.
 - **Outbound connectors**: "send directly" next to "download" (e.g. Acerta REST API if access is
   granted); connector credentials stored encrypted with the data key.
+
+- **Built (screens)**: Uren › Export (HR/admin: profile, period up to 366 days, schools, basis, preview with
+  plain-language problems, download from base64 via Blob, history with verify), Instellingen › Export
+  (admin: copy shipped profile, TOML editor with server-side validation, deactivate) and
+  Instellingen › Integraties (admin: API keys shown once, revoke, links to `/api/v1/docs`). Staff
+  pages show all times in the organisation time zone (`StaffContext.timezone`), not the browser's.

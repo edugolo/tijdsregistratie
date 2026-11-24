@@ -188,5 +188,5 @@ only logged as warnings.
 ## Content Security Policy
 
 `/api/v1/docs` runs under the app's regular CSP. The Scalar script is vendored
-(`public/vendor/scalar/`) and served from this origin as `/api/v1/docs/scalar.js`, and the page has
+(`crates/app/vendor/scalar/`) and served from this origin as `/api/v1/docs/scalar.js`, and the page has
 no inline script, so no relaxed policy is needed.

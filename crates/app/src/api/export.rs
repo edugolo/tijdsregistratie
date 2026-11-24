@@ -2,9 +2,6 @@
 //! admins only; creating, editing and deactivating custom profiles is admin only. Dates are local
 //! dates, timestamps unix milliseconds. The logic lives in `crate::server::export`.
 
-// The client bundle has no caller yet: the export screens land in a later task. Remove this then.
-#![cfg_attr(not(feature = "server"), allow(dead_code))]
-
 use chrono::NaiveDate;
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};

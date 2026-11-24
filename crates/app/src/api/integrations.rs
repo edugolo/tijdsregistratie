@@ -5,11 +5,8 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// The DTOs are only constructed on the server until the Integraties page (next task) uses them
-// in the browser, so the web build sees them as unused.
 /// An API key as listed: never contains the secret, only a display prefix.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub struct ApiKeyDto {
     pub id: Uuid,
     pub name: String,
@@ -27,7 +24,6 @@ pub struct ApiKeyDto {
 
 /// The answer to creating a key: `key` is the only time the secret is available.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub struct CreatedKeyDto {
     pub key: String,
     pub info: ApiKeyDto,

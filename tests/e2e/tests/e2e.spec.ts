@@ -437,7 +437,11 @@ test('7e. admin follows up the hours: correct a day, validate the period, a corr
   await expect(card('Amira Test').getByText('Gecorrigeerd')).toBeVisible();
 
   // Validate the period: the confirmation lists the open points. The day panel stays open.
-  await card('Amira Test').locator('button.st-link').click();
+  const [dayResponse] = await Promise.all([
+    page.waitForResponse((r) => r.url().endsWith('/api/hours/day')),
+    card('Amira Test').locator('button.st-link').click(),
+  ]);
+  const day = await dayResponse.json();
   await expect(panel.getByRole('button', { name: 'Tijd aanpassen' }).first()).toBeVisible();
   await bar.getByRole('button', { name: 'Periode valideren' }).click();
   await expect(bar.getByText('1 dag niet op school')).toBeVisible();
@@ -446,17 +450,23 @@ test('7e. admin follows up the hours: correct a day, validate the period, a corr
   await expect(card('Amira Test').getByText('Gevalideerd', { exact: true })).toBeVisible();
   await shot(page, '22-admin-hours-validated');
 
-  // A further correction is refused by the server.
-  await panel.getByRole('button', { name: 'Tijd aanpassen' }).first().click();
-  await panel.getByLabel('Reden').fill('Nog een aanpassing');
-  await panel.getByRole('button', { name: 'Opslaan' }).click();
-  await expect(panel.getByRole('alert').getByText('Deze periode is gevalideerd. Heropen ze eerst.')).toBeVisible();
-
-  // Opened again, the day shows it is locked and offers to reopen.
-  await panel.getByRole('button', { name: 'Sluiten' }).click();
-  await card('Amira Test').locator('button.st-link').click();
+  // The open day panel locks at once: the notice shows and no edit button is left.
   await expect(panel.getByText('Deze periode is gevalideerd. Heropen ze eerst.')).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Tijd aanpassen' })).toHaveCount(0);
+  await expect(panel.getByRole('button', { name: 'Ongeldig maken' })).toHaveCount(0);
   await expect(panel.getByRole('button', { name: 'Ontbrekende start/stop toevoegen' })).toHaveCount(0);
+
+  // Whatever the screen shows, the server refuses a further correction.
+  const refused = await page.request.post('/api/hours/correct', {
+    headers: { Origin: origin() },
+    data: {
+      person_id: day.person_id,
+      date: day.date,
+      change: { Void: { event_id: day.effective[0].key } },
+      reason: 'Nog een aanpassing',
+    },
+  });
+  expect(refused.status()).toBe(409);
   await panel.getByRole('button', { name: 'Sluiten' }).click();
 
   // Reopen: validated no more.
@@ -464,6 +474,12 @@ test('7e. admin follows up the hours: correct a day, validate the period, a corr
   await bar.getByRole('button', { name: 'Ja', exact: true }).click();
   await expect(bar).toContainText('Niet gevalideerd');
   await expect(bar.getByRole('button', { name: 'Periode valideren' })).toBeVisible();
+
+  // An open day panel unlocks at once as well.
+  await card('Amira Test').locator('button.st-link').click();
+  await expect(panel.getByRole('button', { name: 'Tijd aanpassen' }).first()).toBeVisible();
+  await expect(panel.getByText('Deze periode is gevalideerd. Heropen ze eerst.')).toHaveCount(0);
+  await panel.getByRole('button', { name: 'Sluiten' }).click();
 });
 
 test('7f. admin sets contract, payroll number and cost centre', async () => {
@@ -510,6 +526,167 @@ test('7f. admin sets contract, payroll number and cost centre', async () => {
   await expect(page.getByRole('status').filter({ hasText: 'Opgeslagen' })).toBeVisible();
   await page.getByRole('button', { name: 'Bewerken: Basisschool Voorbeeld' }).click();
   await expect(page.getByLabel('Kostenplaats')).toHaveValue('KP-1');
+});
+
+/** Today in the organisation time zone as `<input type="date">` writes it. */
+async function orgToday(page: Page): Promise<string> {
+  return page.evaluate(() =>
+    new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Brussels', year: 'numeric', month: '2-digit', day: '2-digit' }).format(
+      new Date(),
+    ),
+  );
+}
+
+/** Opens Uren > Export and chooses today as the period. */
+async function openExportForToday(page: Page) {
+  await page.goto('/beheer/uren');
+  await page.getByRole('button', { name: 'Export', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Export voor de loonadministratie' })).toBeVisible();
+  await page.getByRole('button', { name: 'Andere periode', exact: true }).click();
+  const today = await orgToday(page);
+  await page.locator('#export-from').fill(today);
+  await page.locator('#export-to').fill(today);
+}
+
+test('7g. HR or admin exports: problems first, then preview and download, then verify', async () => {
+  const { page } = admin;
+  await openExportForToday(page);
+  const download = page.getByRole('button', { name: 'Downloaden', exact: true });
+  const preview = page.getByRole('button', { name: 'Voorbeeld', exact: true });
+  await expect(download).toBeDisabled();
+  await preview.click();
+  const problems = page.getByRole('alert').filter({ hasText: 'Dit moet eerst nog in orde' });
+  await expect(problems).toContainText('nog niet gevalideerd');
+  await expect(download).toBeDisabled();
+  await shot(page, '24-admin-export-problems');
+
+  // Each unvalidated school links to Uren for that school and period: validate it there.
+  const links = await problems.getByRole('button', { name: 'Naar de uren' }).count();
+  expect(links).toBeGreaterThan(0);
+  for (let i = 0; i < links; i++) {
+    await openExportForToday(page);
+    await preview.click();
+    await problems.getByRole('button', { name: 'Naar de uren' }).first().click();
+    const bar = page.getByRole('group', { name: /Validatie van/ });
+    await expect(bar).toBeVisible();
+    await bar.getByRole('button', { name: 'Periode valideren' }).click();
+    await bar.getByRole('button', { name: 'Valideren', exact: true }).click();
+    await expect(bar).toContainText('Gevalideerd door Beheerder Test op');
+  }
+
+  // Now only missing payroll numbers are left: each name opens the person panel.
+  await openExportForToday(page);
+  await preview.click();
+  await expect(problems).toContainText('nog geen personeelsnummer');
+  await expect(problems).not.toContainText('nog niet gevalideerd');
+  const names = await problems.locator('ul.st-issues').last().getByRole('button').allTextContents();
+  expect(names.length).toBeGreaterThan(0);
+  for (const [index, name] of names.entries()) {
+    await openExportForToday(page);
+    await preview.click();
+    await problems.getByRole('button', { name, exact: true }).click();
+    await expect(page).toHaveURL(/\/beheer\/mensen\?open=/);
+    const panel = page.locator('aside.st-panel');
+    await expect(panel.getByRole('heading', { name })).toBeVisible();
+    await panel.locator('#payroll-number').fill(`P-20${index}`);
+    await panel.getByRole('button', { name: 'Personeelsnummer opslaan' }).click();
+    await expect(panel.getByText('Opgeslagen')).toBeVisible();
+  }
+
+  // Nothing blocks any more: preview shows rows, the download is enabled.
+  await openExportForToday(page);
+  await preview.click();
+  await expect(page.getByText(/^\d+ rij(en)?/).first()).toBeVisible();
+  await expect(page.locator('table.st-table-preview tbody tr').first()).toBeVisible();
+  await expect(download).toBeEnabled();
+  await shot(page, '25-admin-export-preview');
+
+  const [file] = await Promise.all([page.waitForEvent('download'), download.click()]);
+  expect(file.suggestedFilename()).toMatch(/^[^/\\]+\.(csv|xlsx)$/);
+  await expect(page.getByText(/Bestand gemaakt · controlegetal [0-9a-f]{12}$/)).toBeVisible();
+  await shot(page, '26-admin-export-done');
+
+  // The history lists the export; checking it again gives the same checksum.
+  const history = page.locator('table').last();
+  await expect(history.locator('tbody tr').first()).toContainText('Beheerder Test');
+  await history.getByRole('button', { name: 'Controleren' }).first().click();
+  await expect(history.getByText('Klopt').first()).toBeVisible();
+});
+
+test('7h. admin copies a profile, sees the errors of a wrong one and deactivates the copy', async () => {
+  const { page } = admin;
+  await page.goto('/beheer/instellingen');
+  await page.getByRole('button', { name: 'Export', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Exportprofielen' })).toBeVisible();
+  await page.getByRole('button', { name: /^Kopie maken: / }).first().click();
+  const toml = page.getByLabel('Instellingen van het profiel');
+  const original = await toml.inputValue();
+  expect(original).toContain('profile_version');
+  await page.getByLabel('Naam', { exact: true }).fill('Kopie voor test');
+
+  await toml.fill(original + '\nonbekende_instelling = 1\n');
+  await page.getByRole('button', { name: 'Bewaren' }).click();
+  const errors = page.getByRole('alert').filter({ hasText: 'Het profiel klopt nog niet' });
+  await expect(errors.locator('li').first()).toBeVisible();
+  await shot(page, '27-admin-profile-errors');
+
+  await toml.fill(original);
+  await page.getByRole('button', { name: 'Bewaren' }).click();
+  const copy = page.getByRole('listitem').filter({ hasText: 'Kopie voor test' });
+  await expect(copy).toContainText('Eigen profiel');
+  await copy.getByRole('button', { name: 'Uitschakelen' }).click();
+  await copy.getByRole('button', { name: 'Ja', exact: true }).click();
+  await expect(copy).toContainText('Uitgeschakeld');
+});
+
+test('7i. admin makes an API key, sees it once, uses it and revokes it', async ({ request }) => {
+  const { page } = admin;
+  await page.goto('/beheer/instellingen');
+  await page.getByRole('button', { name: 'Integraties', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Integraties' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'API-documentatie' })).toHaveAttribute('href', '/api/v1/docs');
+  await expect(page.getByRole('link', { name: 'API-documentatie' })).toHaveAttribute('target', '_blank');
+
+  await page.getByRole('button', { name: 'Sleutel aanmaken' }).click();
+  await page.getByRole('button', { name: 'Sleutel aanmaken' }).click();
+  await expect(page.getByText('Geef een naam van 1 tot 100 tekens.')).toBeVisible();
+  await page.getByLabel('Naam', { exact: true }).fill('Loonsync e2e');
+  await page.getByRole('button', { name: 'Sleutel aanmaken' }).click();
+  await expect(page.getByText('Kies minstens één recht.')).toBeVisible();
+  await page.getByRole('checkbox', { name: /Mensen lezen/ }).check();
+  await page.getByRole('button', { name: 'Sleutel aanmaken' }).click();
+
+  const secret = page.locator('#new-api-key');
+  await expect(secret).toBeVisible();
+  const key = await secret.inputValue();
+  expect(key).toMatch(/^tr_live_/);
+  await expect(page.getByText('Bewaar deze sleutel nu. Je ziet hem niet meer.')).toBeVisible();
+  await shot(page, '28-admin-integrations-key');
+
+  const row = page.locator('li.st-key').filter({ hasText: 'Loonsync e2e' });
+  await expect(row).toContainText('Actief');
+  await expect(row).toContainText('Mensen lezen');
+  await expect(row).toContainText('Alle scholen');
+  await expect(row).not.toContainText(key);
+
+  const auth = { Authorization: `Bearer ${key}` };
+  expect((await request.get(origin() + '/api/v1/people', { headers: auth })).status()).toBe(200);
+
+  // Once confirmed, the secret is gone from the page.
+  await page.getByRole('button', { name: 'Ik heb de sleutel bewaard' }).click();
+  await expect(page.locator('#new-api-key')).toHaveCount(0);
+
+  await row.getByRole('button', { name: 'Intrekken' }).click();
+  await row.getByRole('button', { name: 'Ja', exact: true }).click();
+  await expect(row).toContainText('Ingetrokken');
+  expect((await request.get(origin() + '/api/v1/people', { headers: auth })).status()).toBe(401);
+  await shot(page, '29-admin-integrations-list');
+
+  // The interactive documentation loads from this origin (the CSP check of scenario 8 covers it).
+  await page.goto('/api/v1/docs');
+  await expect(page.locator('.scalar-app').first()).toBeVisible();
+  await expect(page.getByText('Tijdsregistratie API').first()).toBeVisible();
+  await shot(page, '30-api-docs');
 });
 
 test('8. security headers and no CSP violations', async ({ request }) => {
