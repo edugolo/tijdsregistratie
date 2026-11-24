@@ -155,6 +155,8 @@ impl Geocoder {
             .user_agent(USER_AGENT)
             .default_headers(headers)
             .timeout(REQUEST_TIMEOUT)
+            // A redirect could lead the server to an internal address.
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         Ok(Self {
             url,
@@ -366,6 +368,27 @@ mod tests {
             g.search("Voorbeeldstraat").await,
             Err(GeocodeError::Disabled)
         );
+    }
+
+    #[tokio::test]
+    async fn redirects_from_the_geocoder_are_not_followed() {
+        let (target, hits) = mock(StatusCode::OK, PLACES).await;
+        let app = axum::Router::new().route(
+            "/search",
+            get(move || {
+                let target = target.clone();
+                async move { (StatusCode::FOUND, [(axum::http::header::LOCATION, target)]) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let g = geocoder(&format!("http://{addr}/search"));
+        assert_eq!(
+            g.search("Voorbeeldstraat 1").await,
+            Err(GeocodeError::Upstream)
+        );
+        assert!(hits.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -45,7 +45,7 @@ pub struct AppConfig {
     pub geocoder_url: Option<String>,
 }
 
-/// The database URL carries credentials and is left out.
+/// The database URL carries credentials and the geocoder URL may carry a key: both are left out.
 impl std::fmt::Debug for AppConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppConfig")
@@ -61,13 +61,16 @@ impl std::fmt::Debug for AppConfig {
                 "auth_rate_limit_per_minute",
                 &self.auth_rate_limit_per_minute,
             )
-            .field("geocoder_url", &self.geocoder_url)
+            .field(
+                "geocoder_url",
+                &self.geocoder_url.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
 
 /// `GEOCODER_URL`: unset means the public instance, empty or `off` disables the search,
-/// anything else must be an http(s) URL.
+/// anything else must be an http(s) URL without credentials.
 fn parse_geocoder_url(value: Option<&str>) -> Result<Option<String>, ConfigError> {
     let Some(value) = value.map(str::trim) else {
         return Ok(Some(DEFAULT_GEOCODER_URL.to_string()));
@@ -81,6 +84,12 @@ fn parse_geocoder_url(value: Option<&str>) -> Result<Option<String>, ConfigError
         return Err(ConfigError::Invalid(
             "GEOCODER_URL",
             "must be an http or https URL",
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ConfigError::Invalid(
+            "GEOCODER_URL",
+            "must not contain credentials",
         ));
     }
     Ok(Some(url.to_string()))
@@ -238,6 +247,33 @@ mod tests {
         );
         assert!(with(Some("ftp://example.org/search")).is_err());
         assert!(with(Some("not a url")).is_err());
+    }
+
+    #[test]
+    fn geocoder_url_with_credentials_is_refused_without_echoing_them() {
+        for value in [
+            "https://user:hunter2@geo.example.org/search",
+            "https://user@geo.example.org/search",
+            "https://:hunter2@geo.example.org/search",
+        ] {
+            let mut m = base();
+            m.insert("GEOCODER_URL".into(), value.into());
+            let err = AppConfig::from_map(&m).unwrap_err();
+            assert!(matches!(err, ConfigError::Invalid("GEOCODER_URL", _)));
+            assert!(!format!("{err} {err:?}").contains("hunter2"));
+        }
+    }
+
+    #[test]
+    fn debug_redacts_the_geocoder_url() {
+        let mut m = base();
+        m.insert(
+            "GEOCODER_URL".into(),
+            "https://geo.internal.example.org/search?key=abc123".into(),
+        );
+        let shown = format!("{:?}", AppConfig::from_map(&m).unwrap());
+        assert!(!shown.contains("geo.internal") && !shown.contains("abc123"));
+        assert!(shown.contains("geocoder_url"));
     }
 
     #[test]

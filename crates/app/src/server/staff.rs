@@ -251,6 +251,43 @@ async fn check_person(env: &StaffEnv<'_>, scope: &StaffScope, person_id: Uuid) -
         .ok_or(StaffError::Forbidden)
 }
 
+/// The person check again, inside the mutation's transaction and after its lock, on freshly read
+/// roles: the early [`check_person`] may be stale by then. Returns those roles; the writes must
+/// be based on them.
+async fn roles_for_change(
+    env: &StaffEnv<'_>,
+    scope: &StaffScope,
+    conn: &mut PgConnection,
+    person_id: Uuid,
+) -> Result<Vec<role::RoleAssignment>> {
+    if scope.can_view_all_sites() {
+        person::get_person(&mut *conn, env.keys, person_id)
+            .await?
+            .ok_or(StaffError::NotFound)?;
+    }
+    let roles = role::roles_of(&mut *conn, person_id).await?;
+    may_manage(scope, &roles)
+        .then_some(roles)
+        .ok_or(StaffError::Forbidden)
+}
+
+/// An existing, active site, read inside the transaction with a share lock so it cannot be
+/// deactivated before the transaction ends.
+async fn active_site_for_share(
+    env: &StaffEnv<'_>,
+    conn: &mut PgConnection,
+    site_id: Uuid,
+) -> Result<Site> {
+    let site = site::get_site_for_share(conn, env.keys, site_id)
+        .await?
+        .ok_or(StaffError::NotFound)?;
+    if site.active {
+        Ok(site)
+    } else {
+        Err(StaffError::Invalid("site"))
+    }
+}
+
 /// Starts the transaction in which a mutation and its audit row are committed together.
 async fn begin(env: &StaffEnv<'_>) -> Result<Transaction<'static, Postgres>> {
     Ok(env
@@ -477,12 +514,10 @@ pub async fn add_person_with_role(
         check_site(scope, site_id)?;
     }
     let name = validate_name(name)?;
-    if let Some(site_id) = site_id {
-        site::get_site(env.pool, env.keys, site_id)
-            .await?
-            .ok_or(StaffError::NotFound)?;
-    }
     let mut tx = begin(env).await?;
+    if let Some(site_id) = site_id {
+        active_site_for_share(env, &mut tx, site_id).await?;
+    }
     let p =
         person::create_person(&mut *tx, env.keys, env.blind, &name, Some(scope.person_id)).await?;
     role::assign(&mut *tx, p.id, role, site_id, Some(scope.person_id)).await?;
@@ -496,7 +531,16 @@ pub async fn add_person_with_role(
     )
     .await?;
     if role != Role::Employee {
-        audit(&mut *tx, scope, "role.changed", "person", p.id, &["role"]).await?;
+        let detail = format!("role:{}", role.as_str());
+        audit(
+            &mut *tx,
+            scope,
+            "role.changed",
+            "person",
+            p.id,
+            &["role", &detail],
+        )
+        .await?;
     }
     commit(tx).await?;
     Ok(member_dto(&p, false, TodayStatusDto::NotStarted))
@@ -735,12 +779,25 @@ pub async fn people(
 /// never on someone who holds the admin or HR role (see [`may_manage`]); managers never change
 /// roles. The sites of the person stay: switching to employee or manager turns every site role
 /// into that role (and drops admin and HR), admin and HR only add the organisation-wide role
-/// (one replaces the other). A manager needs at least one site.
+/// (one replaces the other). Employee and manager need at least one site, so nobody is left without a
+/// role. Everything is checked again inside the transaction, under the admin-change lock.
 pub async fn set_person_role(
     env: &StaffEnv<'_>,
     scope: &StaffScope,
     person_id: Uuid,
     new: RoleDto,
+) -> Result<()> {
+    set_person_role_gap(env, scope, person_id, new, std::future::ready(())).await
+}
+
+/// [`set_person_role`] with a seam between the early checks and the transaction, so tests can
+/// change the person there like a concurrent request would.
+async fn set_person_role_gap(
+    env: &StaffEnv<'_>,
+    scope: &StaffScope,
+    person_id: Uuid,
+    new: RoleDto,
+    gap: impl Future<Output = ()>,
 ) -> Result<()> {
     if !scope.can_view_all_sites() || !scope.can_grant_role(role_of_dto(new)) {
         return Err(StaffError::Forbidden);
@@ -749,15 +806,16 @@ pub async fn set_person_role(
     if new != RoleDto::Admin && person_id == scope.person_id {
         return Err(StaffError::Invalid("self"));
     }
-    let current = role::roles_of(env.pool, person_id).await?;
+    gap.await;
+    let mut tx = begin(env).await?;
+    role::lock_admin_changes(&mut tx).await?;
+    let current = roles_for_change(env, scope, &mut tx, person_id).await?;
     let mut sites: Vec<Uuid> = current.iter().filter_map(|r| r.site_id).collect();
     sites.sort();
     sites.dedup();
-    if new == RoleDto::Manager && sites.is_empty() {
+    if matches!(new, RoleDto::Employee | RoleDto::Manager) && sites.is_empty() {
         return Err(StaffError::Invalid("site"));
     }
-    let mut tx = begin(env).await?;
-    role::lock_admin_changes(&mut tx).await?;
     let by = Some(scope.person_id);
     match new {
         RoleDto::Admin => {
@@ -784,13 +842,14 @@ pub async fn set_person_role(
             }
         }
     }
+    let detail = format!("role:{}", role_of_dto(new).as_str());
     audit(
         &mut *tx,
         scope,
         "role.changed",
         "person",
         person_id,
-        &["role"],
+        &["role", &detail],
     )
     .await?;
     commit(tx).await
@@ -798,63 +857,97 @@ pub async fn set_person_role(
 
 /// Replaces the schools of a person. Admins and HR may set any existing sites; managers only sites they
 /// manage, on employees they may manage, and never an empty set (that would hide the person
-/// from them). New schools get the person's current site role (manager if they have one,
-/// otherwise employee).
+/// from them). New schools must be active and get the person's current site role (manager if
+/// they have one, otherwise employee). Someone whose only roles are school roles keeps at least
+/// one school. Everything is checked again inside the transaction, under the admin-change lock.
 pub async fn set_person_sites(
     env: &StaffEnv<'_>,
     scope: &StaffScope,
     person_id: Uuid,
     site_ids: Vec<Uuid>,
 ) -> Result<()> {
+    set_person_sites_gap(env, scope, person_id, site_ids, std::future::ready(())).await
+}
+
+/// [`set_person_sites`] with the same test seam as [`set_person_role_gap`].
+async fn set_person_sites_gap(
+    env: &StaffEnv<'_>,
+    scope: &StaffScope,
+    person_id: Uuid,
+    site_ids: Vec<Uuid>,
+    gap: impl Future<Output = ()>,
+) -> Result<()> {
     let mut wanted = site_ids;
     wanted.sort();
     wanted.dedup();
     for id in &wanted {
         check_site(scope, *id)?;
-        site::get_site(env.pool, env.keys, *id)
-            .await?
-            .ok_or(StaffError::NotFound)?;
     }
     check_person(env, scope, person_id).await?;
     if !scope.can_view_all_sites() && wanted.is_empty() {
         return Err(StaffError::Invalid("site"));
     }
-    let current = role::roles_of(env.pool, person_id).await?;
+    gap.await;
+    let mut tx = begin(env).await?;
+    role::lock_admin_changes(&mut tx).await?;
+    let current = roles_for_change(env, scope, &mut tx, person_id).await?;
+    let holds = |site: Uuid| {
+        current
+            .iter()
+            .any(|r| r.role != Role::Admin && r.site_id == Some(site))
+    };
+    for id in &wanted {
+        // A school the person already works at may stay, even if it was deactivated since.
+        if holds(*id) {
+            site::get_site_for_share(&mut tx, env.keys, *id)
+                .await?
+                .ok_or(StaffError::NotFound)?;
+        } else {
+            active_site_for_share(env, &mut tx, *id).await?;
+        }
+    }
+    if wanted.is_empty()
+        && !current
+            .iter()
+            .any(|r| matches!(r.role, Role::Admin | Role::Hr))
+    {
+        return Err(StaffError::Invalid("site"));
+    }
     let kind = if current.iter().any(|r| r.role == Role::Manager) {
         Role::Manager
     } else {
         Role::Employee
     };
-    let mut tx = begin(env).await?;
-    let mut changed = false;
+    let mut details = vec!["site_id".to_string()];
     for r in current.iter().filter(|r| r.role != Role::Admin) {
-        if let Some(site) = r.site_id.filter(|s| !wanted.contains(s)) {
-            changed |= role::revoke(&mut *tx, person_id, r.role, Some(site)).await?;
+        if let Some(site) = r.site_id.filter(|s| !wanted.contains(s))
+            && role::revoke(&mut *tx, person_id, r.role, Some(site)).await?
+        {
+            details.push(format!("removed:{site}"));
         }
     }
-    for site in &wanted {
-        let has = current
-            .iter()
-            .any(|r| r.role != Role::Admin && r.site_id == Some(*site));
-        if !has {
-            changed |= role::assign(
-                &mut *tx,
-                person_id,
-                kind,
-                Some(*site),
-                Some(scope.person_id),
-            )
-            .await?;
+    for site in wanted.iter().filter(|s| !holds(**s)) {
+        if role::assign(
+            &mut *tx,
+            person_id,
+            kind,
+            Some(*site),
+            Some(scope.person_id),
+        )
+        .await?
+        {
+            details.push(format!("added:{site}"));
         }
     }
-    if changed {
+    if details.len() > 1 {
+        let fields: Vec<&str> = details.iter().map(String::as_str).collect();
         audit(
             &mut *tx,
             scope,
             "person.sites_changed",
             "person",
             person_id,
-            &["site_id"],
+            &fields,
         )
         .await?;
     }
@@ -1912,6 +2005,10 @@ mod tests {
         let e = env(&pool, &k);
         let a = two_admins(&pool, &k).await;
         let target = a.working.person_id;
+        let school = mk_site(&pool, &k, "School A").await;
+        role::assign(&pool, target, Role::Employee, Some(school), None)
+            .await
+            .unwrap();
         // `keyless` is an admin but cannot sign in, so `working` is the only usable admin.
         assert!(matches!(
             set_person_role(&e, &a.keyless, target, RoleDto::Employee).await,
@@ -1941,6 +2038,16 @@ mod tests {
         let k = keys();
         let e = env(&pool, &k);
         let a = two_admins(&pool, &k).await;
+        let school = mk_site(&pool, &k, "School A").await;
+        role::assign(
+            &pool,
+            a.working.person_id,
+            Role::Employee,
+            Some(school),
+            None,
+        )
+        .await
+        .unwrap();
         passkey::insert(
             &pool,
             a.keyless.person_id,
@@ -1993,6 +2100,9 @@ mod tests {
         let e = env(&pool, &k);
         let other_admin = mk_person(&pool, &k, "Olga Andere").await;
         role::assign(&pool, other_admin, Role::Admin, None, None)
+            .await
+            .unwrap();
+        role::assign(&pool, other_admin, Role::Employee, Some(s.site_a), None)
             .await
             .unwrap();
         passkey::insert(&pool, s.emp_a, b"emp-a", serde_json::json!({}))
@@ -2546,5 +2656,227 @@ mod tests {
             Err(StaffError::Invalid(_))
         ));
         assert!(role::is_admin(&pool, a.working.person_id).await.unwrap());
+    }
+
+    async fn audit_fields(pool: &PgPool, action: &str) -> Vec<Vec<String>> {
+        sqlx::query_scalar("SELECT changed_fields FROM audit_log WHERE action = $1 ORDER BY at, id")
+            .bind(action)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    // --- concurrent changes between the early checks and the transaction ---
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn hr_role_change_is_refused_when_the_target_became_admin_meanwhile(pool: PgPool) {
+        let k = keys();
+        let w = world(&pool, &k).await;
+        let e = env(&pool, &k);
+        let target = w.s.emp_b;
+        for new in [RoleDto::Employee, RoleDto::Manager] {
+            let promote = async {
+                role::assign(&pool, target, Role::Admin, None, None)
+                    .await
+                    .unwrap();
+            };
+            assert_eq!(
+                set_person_role_gap(&e, &w.hr, target, new, promote).await,
+                Err(StaffError::Forbidden)
+            );
+            assert!(role::is_admin(&pool, target).await.unwrap());
+            role::revoke(&pool, target, Role::Admin, None)
+                .await
+                .unwrap();
+        }
+        assert!(audit_actions(&pool).await.is_empty());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn hr_site_change_is_refused_when_the_target_became_hr_meanwhile(pool: PgPool) {
+        let k = keys();
+        let w = world(&pool, &k).await;
+        let e = env(&pool, &k);
+        let target = w.s.emp_b;
+        let promote = async {
+            role::assign(&pool, target, Role::Hr, None, None)
+                .await
+                .unwrap();
+        };
+        assert_eq!(
+            set_person_sites_gap(&e, &w.hr, target, vec![w.s.site_a], promote).await,
+            Err(StaffError::Forbidden)
+        );
+        assert_eq!(
+            role::employee_sites(&pool, target).await.unwrap(),
+            vec![w.s.site_b]
+        );
+        assert!(audit_actions(&pool).await.is_empty());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn manager_site_change_is_refused_when_the_target_got_another_school_meanwhile(
+        pool: PgPool,
+    ) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let widen = async {
+            role::assign(&pool, s.emp_a, Role::Employee, Some(s.site_b), None)
+                .await
+                .unwrap();
+        };
+        assert_eq!(
+            set_person_sites_gap(&e, &s.mgr_a, s.emp_a, vec![s.site_a], widen).await,
+            Err(StaffError::Forbidden)
+        );
+        let mut both = vec![s.site_a, s.site_b];
+        both.sort();
+        assert_eq!(role::employee_sites(&pool, s.emp_a).await.unwrap(), both);
+    }
+
+    // --- nobody ends up without a role ---
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_person_never_ends_up_without_any_role(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        // An admin without a school cannot become an employee, and stays admin.
+        let ex_admin = mk_person(&pool, &k, "Ex Admin").await;
+        role::assign(&pool, ex_admin, Role::Admin, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            set_person_role(&e, &s.admin, ex_admin, RoleDto::Employee).await,
+            Err(StaffError::Invalid("site"))
+        );
+        assert!(role::is_admin(&pool, ex_admin).await.unwrap());
+        // Neither can someone without any role.
+        let nobody = mk_person(&pool, &k, "Zonder Rol").await;
+        assert_eq!(
+            set_person_role(&e, &s.admin, nobody, RoleDto::Employee).await,
+            Err(StaffError::Invalid("site"))
+        );
+        // Emptying the schools of someone whose only roles are school roles is refused.
+        assert_eq!(
+            set_person_sites(&e, &s.admin, s.emp_a, vec![]).await,
+            Err(StaffError::Invalid("site"))
+        );
+        assert_eq!(
+            role::employee_sites(&pool, s.emp_a).await.unwrap(),
+            vec![s.site_a]
+        );
+        // Someone who is also admin keeps that role when the schools go.
+        role::assign(&pool, s.emp_a, Role::Admin, None, None)
+            .await
+            .unwrap();
+        set_person_sites(&e, &s.admin, s.emp_a, vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            role::roles_of(&pool, s.emp_a).await.unwrap(),
+            vec![role::RoleAssignment {
+                role: Role::Admin,
+                site_id: None
+            }]
+        );
+    }
+
+    // --- audit detail ---
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn role_and_site_changes_record_what_changed(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        set_person_role(&e, &s.admin, s.emp_a, RoleDto::Manager)
+            .await
+            .unwrap();
+        assert_eq!(
+            audit_fields(&pool, "role.changed").await,
+            vec![vec!["role".to_string(), "role:manager".to_string()]]
+        );
+        set_person_sites(&e, &s.admin, s.emp_a, vec![s.site_b])
+            .await
+            .unwrap();
+        assert_eq!(
+            audit_fields(&pool, "person.sites_changed").await,
+            vec![vec![
+                "site_id".to_string(),
+                format!("removed:{}", s.site_a),
+                format!("added:{}", s.site_b),
+            ]]
+        );
+        add_person_with_role(&e, &s.admin, "Hugo Personeel", RoleDto::Hr, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            audit_fields(&pool, "role.changed").await.last().unwrap(),
+            &vec!["role".to_string(), "role:hr".to_string()]
+        );
+    }
+
+    // --- inactive sites ---
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn people_cannot_be_put_on_an_inactive_site(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        set_site_active(&e, &s.admin, s.site_b, false)
+            .await
+            .unwrap();
+        let people_before = person::list_all_people(&pool, &k.0).await.unwrap().len();
+        assert_eq!(
+            add_person_with_role(
+                &e,
+                &s.admin,
+                "Nieuw Persoon",
+                RoleDto::Employee,
+                Some(s.site_b)
+            )
+            .await
+            .map(drop),
+            Err(StaffError::Invalid("site"))
+        );
+        assert_eq!(
+            person::list_all_people(&pool, &k.0).await.unwrap().len(),
+            people_before
+        );
+        assert_eq!(
+            set_person_sites(&e, &s.admin, s.emp_a, vec![s.site_a, s.site_b]).await,
+            Err(StaffError::Invalid("site"))
+        );
+        assert_eq!(
+            role::employee_sites(&pool, s.emp_a).await.unwrap(),
+            vec![s.site_a]
+        );
+        // A school the person already works at may stay while it is inactive.
+        set_person_sites(&e, &s.admin, s.emp_b, vec![s.site_b])
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn save_site_refuses_coordinates_out_of_range(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let sites_before = list_sites(&e, &s.admin).await.unwrap().len();
+        for (lat, lng, field) in [
+            (90.5, 4.0, "lat"),
+            (-91.0, 4.0, "lat"),
+            (51.0, 180.5, "lng"),
+        ] {
+            let mut f = form("School Z");
+            f.lat = lat;
+            f.lng = lng;
+            assert_eq!(
+                save_site(&e, &s.admin, f).await.map(drop),
+                Err(StaffError::Invalid(field))
+            );
+        }
+        assert_eq!(list_sites(&e, &s.admin).await.unwrap().len(), sites_before);
     }
 }

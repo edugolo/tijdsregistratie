@@ -5,7 +5,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use crypto::DataKeys;
 use domain::{GeoPoint, SiteZone};
-use sqlx::{PgExecutor, PgPool};
+use sqlx::{PgConnection, PgExecutor, PgPool};
 use uuid::Uuid;
 
 use super::{RepoError, Result};
@@ -178,14 +178,37 @@ pub async fn update_site<'e>(
     row.ok_or(RepoError::NotFound)?.decrypt(keys)
 }
 
-pub async fn get_site(pool: &PgPool, keys: &DataKeys, id: Uuid) -> Result<Option<Site>> {
+pub async fn get_site<'e>(
+    executor: impl PgExecutor<'e>,
+    keys: &DataKeys,
+    id: Uuid,
+) -> Result<Option<Site>> {
     sqlx::query_as::<_, SiteRow>(concat!(
         "SELECT ",
         site_columns!(),
         " FROM site WHERE id = $1"
     ))
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
+    .await?
+    .map(|r| r.decrypt(keys))
+    .transpose()
+}
+
+/// Like [`get_site`], but holds a share lock on the row until the transaction ends, so a
+/// concurrent deactivation waits for the caller's commit.
+pub async fn get_site_for_share(
+    conn: &mut PgConnection,
+    keys: &DataKeys,
+    id: Uuid,
+) -> Result<Option<Site>> {
+    sqlx::query_as::<_, SiteRow>(concat!(
+        "SELECT ",
+        site_columns!(),
+        " FROM site WHERE id = $1 FOR SHARE"
+    ))
+    .bind(id)
+    .fetch_optional(conn)
     .await?
     .map(|r| r.decrypt(keys))
     .transpose()

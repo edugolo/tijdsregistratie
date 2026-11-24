@@ -132,6 +132,11 @@ i18n: i18n-embed + `fl!`. Messages live in `crates/app/i18n/<locale>/app.ftl`; a
   check `can_view_all_sites()`.
 - Every server function checks scope on the server.
 - Every manager/admin mutation writes an audit row (who, what, when; ids only, no plaintext personal data).
+  Role and site changes record the new role (`role:<name>`) and the added/removed site ids
+  (`added:<id>`, `removed:<id>`) in `changed_fields`.
+- Role and site changes re-read the target and re-check the permission inside the transaction,
+  under the admin-change lock; nobody is left without a role (employee and manager need a site);
+  people are only added to active sites.
 
 ## 5. Location control
 

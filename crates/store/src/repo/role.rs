@@ -88,12 +88,15 @@ pub async fn revoke<'e>(
     Ok(done.rows_affected() > 0)
 }
 
-pub async fn roles_of(pool: &PgPool, person_id: Uuid) -> Result<Vec<RoleAssignment>> {
+pub async fn roles_of<'e>(
+    executor: impl PgExecutor<'e>,
+    person_id: Uuid,
+) -> Result<Vec<RoleAssignment>> {
     let rows: Vec<(String, Option<Uuid>)> = sqlx::query_as(
         "SELECT role, site_id FROM role_assignment WHERE person_id = $1 ORDER BY created_at, id",
     )
     .bind(person_id)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
     rows.into_iter()
         .map(|(role, site_id)| {
