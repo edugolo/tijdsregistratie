@@ -39,41 +39,43 @@ pub async fn enrollment_info(token: String) -> Result<EnrollmentInfo> {
 
 /// Starts passkey registration for the person the token belongs to.
 #[post("/api/auth/register/begin")]
-pub async fn begin_registration(token: String) -> Result<CreationChallengeResponse> {
+pub async fn begin_registration(token: String) -> Result<CreationChallengeResponse, ServerFnError> {
     let state = crate::server::app_state().await?;
     let session = crate::server::session().await?;
     crate::server::passkey::begin_registration(&state, &session, &token)
         .await
-        .map_err(|e| ServerFnError::from(e).into())
+        .map_err(ServerFnError::from)
 }
 
 /// Verifies the new passkey, consumes the token and signs the person in.
 #[post("/api/auth/register/finish")]
-pub async fn finish_registration(credential: RegisterPublicKeyCredential) -> Result<Me> {
+pub async fn finish_registration(
+    credential: RegisterPublicKeyCredential,
+) -> Result<Me, ServerFnError> {
     let state = crate::server::app_state().await?;
     let session = crate::server::session().await?;
     crate::server::passkey::finish_registration(&state, &session, &credential)
         .await
-        .map_err(|e| ServerFnError::from(e).into())
+        .map_err(ServerFnError::from)
 }
 
 /// Starts a discoverable (usernameless) passkey login.
 #[post("/api/auth/login/begin")]
-pub async fn begin_login() -> Result<RequestChallengeResponse> {
+pub async fn begin_login() -> Result<RequestChallengeResponse, ServerFnError> {
     let state = crate::server::app_state().await?;
     let session = crate::server::session().await?;
     crate::server::passkey::begin_login(&state, &session)
         .await
-        .map_err(|e| ServerFnError::from(e).into())
+        .map_err(ServerFnError::from)
 }
 
 #[post("/api/auth/login/finish")]
-pub async fn finish_login(credential: PublicKeyCredential) -> Result<Me> {
+pub async fn finish_login(credential: PublicKeyCredential) -> Result<Me, ServerFnError> {
     let state = crate::server::app_state().await?;
     let session = crate::server::session().await?;
     crate::server::passkey::finish_login(&state, &session, &credential)
         .await
-        .map_err(|e| ServerFnError::from(e).into())
+        .map_err(ServerFnError::from)
 }
 
 #[post("/api/auth/logout")]

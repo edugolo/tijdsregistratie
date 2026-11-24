@@ -126,11 +126,12 @@
 .st-chip-ok { background: var(--st-ok-container); color: var(--st-on-ok-container); }
 .st-chip-warn { background: var(--st-warn-container); color: var(--st-on-warn-container); }
 .st-chip-error { background: var(--st-error-container); color: var(--st-on-error-container); }
-.st-chip-neutral { background: var(--st-high); color: var(--st-on-surface); }
-/* Matching container/on-container pairs: admin role chip (tertiary) and enrollment countdown (secondary). */
+.st-chip-neutral { background: var(--st-high); color: var(--st-on-variant); }
+/* Matching container/on-container pairs. Manager (secondary) and admin (tertiary) differ; the
+   enrollment countdown uses the secondary pair too. */
 .st-chip-brand { background: var(--st-tertiary-container); color: var(--st-on-tertiary-container); }
 .st-chip-brand[role="timer"] { background: var(--st-secondary-container); color: var(--st-on-secondary-container); }
-.st-chip-tertiary { background: var(--st-tertiary-container); color: var(--st-on-tertiary-container); }
+.st-chip-secondary { background: var(--st-secondary-container); color: var(--st-on-secondary-container); }
 .st-icon { flex: none; }
 
 /* Filter and toggle chips */

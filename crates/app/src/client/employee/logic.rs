@@ -1,6 +1,7 @@
 //! Pure helpers for the employee flow (no UI, no browser).
 
 use chrono::{DateTime, Timelike, Utc};
+use dioxus::prelude::ServerFnError;
 use domain::{EventKind, ZoneStatus};
 
 use super::env::PasskeyError;
@@ -102,6 +103,30 @@ pub fn passkey_message(error: PasskeyError) -> String {
         PasskeyError::Cancelled => fl!(LANGUAGE_LOADER, "key-cancelled"),
         PasskeyError::Unsupported => fl!(LANGUAGE_LOADER, "key-unsupported"),
         PasskeyError::Failed => fl!(LANGUAGE_LOADER, "key-failed"),
+    }
+}
+
+/// Plain-language text for a stable server code (`clock-*`, `token-invalid`, `login-failed`).
+/// Unknown codes get the generic text.
+pub fn server_message(code: &str) -> String {
+    match code {
+        "clock-blocked" => fl!(LANGUAGE_LOADER, "clock-blocked"),
+        "clock-no-location" => fl!(LANGUAGE_LOADER, "clock-no-location"),
+        "clock-uncertain" => fl!(LANGUAGE_LOADER, "clock-uncertain"),
+        "clock-already-started" => fl!(LANGUAGE_LOADER, "clock-already-started"),
+        "clock-not-started" => fl!(LANGUAGE_LOADER, "clock-not-started"),
+        "token-invalid" => fl!(LANGUAGE_LOADER, "token-invalid"),
+        "login-failed" => fl!(LANGUAGE_LOADER, "login-failed"),
+        _ => fl!(LANGUAGE_LOADER, "error-generic"),
+    }
+}
+
+/// Text for a failed server call: the translated code it carries, or the generic text when the
+/// call never reached the server's error handling.
+pub fn server_error_message(error: &ServerFnError) -> String {
+    match error {
+        ServerFnError::ServerError { message, .. } => server_message(message),
+        _ => fl!(LANGUAGE_LOADER, "error-generic"),
     }
 }
 
@@ -232,6 +257,44 @@ mod tests {
             passkey_message(PasskeyError::Failed),
             passkey_message(PasskeyError::Unsupported)
         );
+    }
+
+    #[test]
+    fn server_codes_have_translated_text() {
+        assert_eq!(
+            server_message("clock-blocked"),
+            "Je bent niet op school. Starten kan alleen op school."
+        );
+        assert_eq!(
+            server_message("clock-no-location"),
+            "We weten niet waar je bent. Starten kan alleen op school."
+        );
+        assert_eq!(
+            server_message("clock-uncertain"),
+            "Je locatie is niet nauwkeurig genoeg. Probeer opnieuw buiten."
+        );
+        assert_eq!(server_message("clock-already-started"), "Je dag loopt al.");
+        assert_eq!(
+            server_message("clock-not-started"),
+            "Je dag is nog niet gestart."
+        );
+        assert_eq!(
+            server_message("token-invalid"),
+            "Deze code werkt niet meer. Vraag een nieuwe aan je verantwoordelijke."
+        );
+        assert_eq!(
+            server_message("login-failed"),
+            "Aanmelden is niet gelukt. Probeer opnieuw."
+        );
+    }
+
+    #[test]
+    fn unknown_server_code_falls_back_to_generic_text() {
+        assert_eq!(
+            server_message("something-new"),
+            "Er ging iets mis. Probeer opnieuw."
+        );
+        assert_eq!(server_message(""), "Er ging iets mis. Probeer opnieuw.");
     }
 
     #[test]

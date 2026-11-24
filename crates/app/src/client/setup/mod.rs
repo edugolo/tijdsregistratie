@@ -6,7 +6,6 @@
 
 mod color;
 mod form;
-mod i18n;
 mod org;
 mod platform;
 
@@ -17,9 +16,10 @@ use crate::api::setup::{
     OrgSettingsInput, SetupInput, check_name, check_setup_code, complete_setup,
 };
 use crate::client::components::{Icon, PrimaryButton, SecondaryButton};
+use crate::client::i18n::LANGUAGE_LOADER;
 use color::{ColorPicker, ThemePreview};
 use form::{DEFAULT_COLOR, FormError, SiteFields, TextField, TimezoneSelect, format_coordinate};
-use i18n::{field_error, progress, t};
+use i18n_embed_fl::fl;
 use platform::{LocateFailure, PasskeyFailure};
 
 pub use org::OrgSettingsPage;
@@ -139,9 +139,9 @@ impl Wizard {
         s.set(step);
     }
 
-    fn fail(self, message: &str) {
+    fn fail(self, message: String) {
         let mut e = self.error;
-        e.set(Some(message.to_string()));
+        e.set(Some(message));
     }
 
     fn set_busy(self, value: bool) {
@@ -195,14 +195,14 @@ impl Wizard {
     fn submit_code(self) {
         let code = (self.code)();
         if code.trim().is_empty() {
-            return self.fail(t("err.code"));
+            return self.fail(fl!(LANGUAGE_LOADER, "setup-err-code"));
         }
         self.set_busy(true);
         spawn(async move {
             match check_setup_code(code).await {
                 Ok(true) => self.goto(Step::Org),
-                Ok(false) => self.fail(t("setup.s1.code_wrong")),
-                Err(_) => self.fail(t("setup.s4.failed")),
+                Ok(false) => self.fail(fl!(LANGUAGE_LOADER, "setup-s1-code-wrong")),
+                Err(_) => self.fail(fl!(LANGUAGE_LOADER, "setup-s4-failed")),
             }
             self.set_busy(false);
         });
@@ -232,7 +232,7 @@ impl Wizard {
                     t.set(Some(token));
                     self.goto(Step::Key);
                 }
-                Err(_) => self.fail(t("setup.s4.failed")),
+                Err(_) => self.fail(fl!(LANGUAGE_LOADER, "setup-s4-failed")),
             }
             self.set_busy(false);
         });
@@ -248,11 +248,13 @@ impl Wizard {
                 Ok((la, lo)) => {
                     lat.set(format_coordinate(la));
                     lng.set(format_coordinate(lo));
-                    note.set(Some(t("setup.s3.located").to_string()));
+                    note.set(Some(fl!(LANGUAGE_LOADER, "setup-s3-located")));
                 }
-                Err(LocateFailure::Denied) => note.set(Some(t("setup.s3.denied").to_string())),
+                Err(LocateFailure::Denied) => {
+                    note.set(Some(fl!(LANGUAGE_LOADER, "setup-s3-denied")))
+                }
                 Err(LocateFailure::Unavailable) => {
-                    note.set(Some(t("setup.s3.unavailable").to_string()));
+                    note.set(Some(fl!(LANGUAGE_LOADER, "setup-s3-unavailable")));
                 }
             }
             locating.set(false);
@@ -271,21 +273,44 @@ impl Wizard {
                 Ok(options) => options,
                 // The token is only valid for 30 minutes; a failure here is most likely expiry.
                 Err(_) => {
-                    self.fail(t("setup.s5.expired"));
+                    self.fail(fl!(LANGUAGE_LOADER, "setup-s5-expired"));
                     return self.set_busy(false);
                 }
             };
             match platform::create_passkey(options).await {
                 Ok(credential) => match finish_registration(credential).await {
                     Ok(_) => self.goto(Step::Done),
-                    Err(_) => self.fail(t("setup.s5.failed")),
+                    Err(_) => self.fail(fl!(LANGUAGE_LOADER, "setup-s5-failed")),
                 },
-                Err(PasskeyFailure::Cancelled) => self.fail(t("setup.s5.cancelled")),
-                Err(PasskeyFailure::Unsupported) => self.fail(t("setup.s5.unsupported")),
-                Err(PasskeyFailure::Failed) => self.fail(t("setup.s5.failed")),
+                Err(PasskeyFailure::Cancelled) => {
+                    self.fail(fl!(LANGUAGE_LOADER, "setup-s5-cancelled"))
+                }
+                Err(PasskeyFailure::Unsupported) => {
+                    self.fail(fl!(LANGUAGE_LOADER, "setup-s5-unsupported"))
+                }
+                Err(PasskeyFailure::Failed) => self.fail(fl!(LANGUAGE_LOADER, "setup-s5-failed")),
             }
             self.set_busy(false);
         });
+    }
+}
+
+/// Message for a field error code from the validators; unknown codes get the generic name error.
+fn field_error(code: &str) -> String {
+    match code {
+        "display_name" => fl!(LANGUAGE_LOADER, "setup-err-display-name"),
+        "short_name" => fl!(LANGUAGE_LOADER, "setup-err-short-name"),
+        "brand_color" => fl!(LANGUAGE_LOADER, "setup-err-brand-color"),
+        "timezone" => fl!(LANGUAGE_LOADER, "setup-err-timezone"),
+        "site_name" => fl!(LANGUAGE_LOADER, "setup-err-site-name"),
+        "address" => fl!(LANGUAGE_LOADER, "setup-err-address"),
+        "lat" => fl!(LANGUAGE_LOADER, "setup-err-lat"),
+        "lng" => fl!(LANGUAGE_LOADER, "setup-err-lng"),
+        "radius_m" => fl!(LANGUAGE_LOADER, "setup-err-radius-m"),
+        "break_minutes" => fl!(LANGUAGE_LOADER, "setup-err-break-minutes"),
+        "break_after_minutes" => fl!(LANGUAGE_LOADER, "setup-err-break-after-minutes"),
+        "admin_name" | "name" => fl!(LANGUAGE_LOADER, "setup-err-admin-name"),
+        _ => fl!(LANGUAGE_LOADER, "setup-err-code"),
     }
 }
 
@@ -295,19 +320,19 @@ pub fn SetupPage() -> Element {
     let w = Wizard::new();
     let step = (w.step)();
     let title = match step {
-        Step::Welcome => t("setup.s1.title"),
-        Step::Org => t("setup.s2.title"),
-        Step::School => t("setup.s3.title"),
-        Step::About => t("setup.s4.title"),
-        Step::Key => t("setup.s5.title"),
-        Step::Done => t("setup.s6.title"),
+        Step::Welcome => fl!(LANGUAGE_LOADER, "setup-s1-title"),
+        Step::Org => fl!(LANGUAGE_LOADER, "setup-s2-title"),
+        Step::School => fl!(LANGUAGE_LOADER, "setup-s3-title"),
+        Step::About => fl!(LANGUAGE_LOADER, "setup-s4-title"),
+        Step::Key => fl!(LANGUAGE_LOADER, "setup-s5-title"),
+        Step::Done => fl!(LANGUAGE_LOADER, "setup-s6-title"),
     };
     rsx! {
         document::Stylesheet { href: SETUP_CSS }
         div { class: "su-page",
             main { class: "su-card",
                 if let Some(n) = step.number() {
-                    p { class: "su-progress", {progress(n, NUMBERED_STEPS)} }
+                    p { class: "su-progress", {fl!(LANGUAGE_LOADER, "setup-progress", step = n, total = NUMBERED_STEPS)} }
                     div { class: "su-bar", aria_hidden: "true",
                         div { class: "su-bar-fill", style: "width: {n * 100 / NUMBERED_STEPS}%" }
                     }
@@ -326,13 +351,13 @@ pub fn SetupPage() -> Element {
                     div { class: "su-actions",
                         if step.previous().is_some() {
                             SecondaryButton {
-                                label: t("setup.prev").to_string(),
+                                label: fl!(LANGUAGE_LOADER, "setup-prev"),
                                 disabled: (w.busy)(),
                                 onclick: move |_| w.back(),
                             }
                         }
                         PrimaryButton {
-                            label: t("setup.next").to_string(),
+                            label: fl!(LANGUAGE_LOADER, "setup-next"),
                             disabled: (w.busy)(),
                             onclick: move |_| w.next(),
                         }
@@ -346,18 +371,18 @@ pub fn SetupPage() -> Element {
 #[component]
 fn Welcome(w: Wizard) -> Element {
     rsx! {
-        p { {t("setup.s1.body")} }
+        p { {fl!(LANGUAGE_LOADER, "setup-s1-body")} }
         ol { class: "su-steps",
-            li { {t("setup.s1.step_code")} }
-            li { {t("setup.s1.step_org")} }
-            li { {t("setup.s1.step_school")} }
-            li { {t("setup.s1.step_you")} }
-            li { {t("setup.s1.step_key")} }
+            li { {fl!(LANGUAGE_LOADER, "setup-s1-step-code")} }
+            li { {fl!(LANGUAGE_LOADER, "setup-s1-step-org")} }
+            li { {fl!(LANGUAGE_LOADER, "setup-s1-step-school")} }
+            li { {fl!(LANGUAGE_LOADER, "setup-s1-step-you")} }
+            li { {fl!(LANGUAGE_LOADER, "setup-s1-step-key")} }
         }
         TextField {
-            label: t("setup.s1.code_label").to_string(),
+            label: fl!(LANGUAGE_LOADER, "setup-s1-code-label"),
             value: w.code,
-            hint: t("setup.s1.code_hint").to_string(),
+            hint: fl!(LANGUAGE_LOADER, "setup-s1-code-hint"),
             autocomplete: "off",
         }
     }
@@ -367,15 +392,15 @@ fn Welcome(w: Wizard) -> Element {
 fn OrgStep(w: Wizard) -> Element {
     rsx! {
         TextField {
-            label: t("setup.s2.name").to_string(),
+            label: fl!(LANGUAGE_LOADER, "setup-s2-name"),
             value: w.org_name,
-            hint: t("setup.s2.name_hint").to_string(),
+            hint: fl!(LANGUAGE_LOADER, "setup-s2-name-hint"),
             autocomplete: "organization",
         }
         TextField {
-            label: t("setup.s2.short").to_string(),
+            label: fl!(LANGUAGE_LOADER, "setup-s2-short"),
             value: w.short_name,
-            hint: t("setup.s2.short_hint").to_string(),
+            hint: fl!(LANGUAGE_LOADER, "setup-s2-short-hint"),
         }
         ColorPicker { value: w.color }
         ThemePreview { color: w.color, short_name: w.short_name }
@@ -386,16 +411,16 @@ fn OrgStep(w: Wizard) -> Element {
 #[component]
 fn SchoolStep(w: Wizard) -> Element {
     let (locate_icon, locate_label) = if (w.locating)() {
-        ("loader", t("setup.s3.locating"))
+        ("loader", fl!(LANGUAGE_LOADER, "setup-s3-locating"))
     } else {
-        ("map-pin", t("setup.s3.locate"))
+        ("map-pin", fl!(LANGUAGE_LOADER, "setup-s3-locate"))
     };
     rsx! {
-        TextField { label: t("setup.s3.name").to_string(), value: w.site_name }
+        TextField { label: fl!(LANGUAGE_LOADER, "setup-s3-name"), value: w.site_name }
         TextField {
-            label: t("setup.s3.address").to_string(),
+            label: fl!(LANGUAGE_LOADER, "setup-s3-address"),
             value: w.address,
-            hint: t("setup.s3.address_hint").to_string(),
+            hint: fl!(LANGUAGE_LOADER, "setup-s3-address-hint"),
             autocomplete: "street-address",
         }
         div { class: "su-locate",
@@ -407,27 +432,27 @@ fn SchoolStep(w: Wizard) -> Element {
                 Icon { name: locate_icon, size: 18 }
                 {locate_label}
             }
-            p { class: "su-hint", {t("setup.s3.locate_hint")} }
+            p { class: "su-hint", {fl!(LANGUAGE_LOADER, "setup-s3-locate-hint")} }
             if let Some(note) = (w.locate_note)() {
                 p { class: "su-hint", role: "status", "{note}" }
             }
         }
         div { class: "su-grid",
-            TextField { label: t("setup.s3.lat").to_string(), value: w.lat, inputmode: "decimal" }
-            TextField { label: t("setup.s3.lng").to_string(), value: w.lng, inputmode: "decimal" }
+            TextField { label: fl!(LANGUAGE_LOADER, "setup-s3-lat"), value: w.lat, inputmode: "decimal" }
+            TextField { label: fl!(LANGUAGE_LOADER, "setup-s3-lng"), value: w.lng, inputmode: "decimal" }
         }
         TextField {
-            label: t("setup.s3.radius").to_string(),
+            label: fl!(LANGUAGE_LOADER, "setup-s3-radius"),
             value: w.radius,
-            hint: t("setup.s3.radius_hint").to_string(),
+            hint: fl!(LANGUAGE_LOADER, "setup-s3-radius-hint"),
             inputmode: "numeric",
         }
         div { class: "su-grid",
-            TextField { label: t("setup.s3.break").to_string(), value: w.break_minutes, inputmode: "numeric" }
+            TextField { label: fl!(LANGUAGE_LOADER, "setup-s3-break"), value: w.break_minutes, inputmode: "numeric" }
             TextField {
-                label: t("setup.s3.break_after").to_string(),
+                label: fl!(LANGUAGE_LOADER, "setup-s3-break-after"),
                 value: w.break_after,
-                hint: t("setup.s3.break_after_hint").to_string(),
+                hint: fl!(LANGUAGE_LOADER, "setup-s3-break-after-hint"),
                 inputmode: "numeric",
             }
         }
@@ -438,9 +463,9 @@ fn SchoolStep(w: Wizard) -> Element {
 fn AboutStep(w: Wizard) -> Element {
     let mut also_manager = w.also_manager;
     rsx! {
-        p { {t("setup.s4.body")} }
+        p { {fl!(LANGUAGE_LOADER, "setup-s4-body")} }
         TextField {
-            label: t("setup.s4.name").to_string(),
+            label: fl!(LANGUAGE_LOADER, "setup-s4-name"),
             value: w.admin_name,
             autocomplete: "name",
         }
@@ -450,7 +475,7 @@ fn AboutStep(w: Wizard) -> Element {
                 checked: also_manager(),
                 onchange: move |e| also_manager.set(e.checked()),
             }
-            span { {t("setup.s4.manager")} }
+            span { {fl!(LANGUAGE_LOADER, "setup-s4-manager")} }
         }
     }
 }
@@ -461,17 +486,17 @@ fn KeyStep(w: Wizard) -> Element {
     rsx! {
         div { class: "su-key",
             Icon { name: "fingerprint", size: 48 }
-            p { {t("setup.s5.body")} }
+            p { {fl!(LANGUAGE_LOADER, "setup-s5-body")} }
         }
         FormError { message: (w.error)() }
         div { class: "su-actions",
             PrimaryButton {
                 label: if (w.busy)() {
-                    t("setup.busy").to_string()
+                    fl!(LANGUAGE_LOADER, "setup-busy")
                 } else if failed {
-                    t("setup.s5.retry").to_string()
+                    fl!(LANGUAGE_LOADER, "setup-s5-retry")
                 } else {
-                    t("setup.s5.create").to_string()
+                    fl!(LANGUAGE_LOADER, "setup-s5-create")
                 },
                 disabled: (w.busy)(),
                 onclick: move |_| w.create_key(),
@@ -485,12 +510,12 @@ fn DoneStep() -> Element {
     rsx! {
         div { class: "su-key",
             Icon { name: "check", size: 48 }
-            p { {t("setup.s6.body")} }
+            p { {fl!(LANGUAGE_LOADER, "setup-s6-body")} }
         }
         div { class: "su-next",
-            a { class: "btn btn-primary", href: "/beheer/personen", {t("setup.s6.people")} }
-            p { class: "su-hint", {t("setup.s6.people_hint")} }
-            a { class: "btn btn-secondary", href: "/beheer", {t("setup.s6.home")} }
+            a { class: "btn btn-primary", href: "/beheer/personen", {fl!(LANGUAGE_LOADER, "setup-s6-people")} }
+            p { class: "su-hint", {fl!(LANGUAGE_LOADER, "setup-s6-people-hint")} }
+            a { class: "btn btn-secondary", href: "/beheer", {fl!(LANGUAGE_LOADER, "setup-s6-home")} }
         }
     }
 }
@@ -498,6 +523,43 @@ fn DoneStep() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_text() {
+        assert_eq!(
+            fl!(
+                LANGUAGE_LOADER,
+                "setup-progress",
+                step = 2,
+                total = NUMBERED_STEPS
+            ),
+            "Stap 2 van 5"
+        );
+    }
+
+    #[test]
+    fn every_validator_code_has_a_message() {
+        for code in [
+            "display_name",
+            "short_name",
+            "brand_color",
+            "timezone",
+            "site_name",
+            "address",
+            "lat",
+            "lng",
+            "radius_m",
+            "break_minutes",
+            "break_after_minutes",
+            "admin_name",
+        ] {
+            assert_ne!(
+                field_error(code),
+                fl!(LANGUAGE_LOADER, "setup-err-code"),
+                "{code}"
+            );
+        }
+    }
 
     #[test]
     fn steps_are_numbered_one_to_five() {

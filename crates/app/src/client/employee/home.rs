@@ -7,7 +7,7 @@ use domain::EventKind;
 use super::env;
 use super::logic::{
     Aftermath, Destination, ZoneNotice, after_accepted, after_zone_ok, destination_for,
-    elapsed_minutes, local_text, refusal_needs_message,
+    elapsed_minutes, local_text, refusal_needs_message, server_message,
 };
 use super::{go, use_org_name};
 use crate::api::auth::{Me, me};
@@ -116,7 +116,7 @@ async fn settle(
     let next_now = today.peek().as_ref().map(|t| t.next);
     let notice = next_now
         .is_some_and(|next| refusal_needs_message(kind, next))
-        .then_some(result.message)
+        .then_some(result.code.as_deref().map(server_message))
         .flatten();
     Phase::ready(false, notice, !loaded)
 }

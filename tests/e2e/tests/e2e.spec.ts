@@ -239,7 +239,7 @@ test('7. revoking the devices ends the session and the old passkey stops working
   await page.goto('/');
   await expect(page).toHaveURL(/\/aanmelden$/);
   await page.getByRole('button', { name: 'Aanmelden' }).click();
-  await expect(page.getByText('Er ging iets mis. Probeer opnieuw.')).toBeVisible();
+  await expect(page.getByText('Aanmelden is niet gelukt. Probeer opnieuw.')).toBeVisible();
   await expect(page).toHaveURL(/\/aanmelden$/);
   await shot(page, '13-employee-login-refused');
 });

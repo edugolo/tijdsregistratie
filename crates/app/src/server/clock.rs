@@ -20,11 +20,12 @@ use crate::api::clock::{ClockResult, FixDto, TodayDto};
 /// A client timestamp further than this from the server time is ignored.
 const MAX_CLIENT_SKEW: Duration = Duration::hours(24);
 
-const MSG_BLOCKED: &str = "Je bent niet op school. Starten kan alleen op school.";
-const MSG_NO_LOCATION: &str = "We weten niet waar je bent. Starten kan alleen op school.";
-const MSG_UNCERTAIN: &str = "Je locatie is niet nauwkeurig genoeg. Probeer opnieuw buiten.";
-const MSG_ALREADY_STARTED: &str = "Je dag loopt al.";
-const MSG_NOT_STARTED: &str = "Je dag is nog niet gestart.";
+/// Stable codes for refused taps; the client translates them through `i18n/nl-BE/app.ftl`.
+const CODE_BLOCKED: &str = "clock-blocked";
+const CODE_NO_LOCATION: &str = "clock-no-location";
+const CODE_UNCERTAIN: &str = "clock-uncertain";
+const CODE_ALREADY_STARTED: &str = "clock-already-started";
+const CODE_NOT_STARTED: &str = "clock-not-started";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClockError {
@@ -118,9 +119,9 @@ async fn events_today<'e>(
 fn block_refusal(status: ZoneStatus) -> Option<&'static str> {
     match status {
         ZoneStatus::InZone => None,
-        ZoneStatus::OutOfZone => Some(MSG_BLOCKED),
-        ZoneStatus::NoLocation => Some(MSG_NO_LOCATION),
-        ZoneStatus::Uncertain => Some(MSG_UNCERTAIN),
+        ZoneStatus::OutOfZone => Some(CODE_BLOCKED),
+        ZoneStatus::NoLocation => Some(CODE_NO_LOCATION),
+        ZoneStatus::Uncertain => Some(CODE_UNCERTAIN),
     }
 }
 
@@ -159,10 +160,10 @@ pub async fn clock_for(
             zone_status: last.map_or(ZoneStatus::NoLocation, |e| e.zone_status),
             site_name: name_of(&ctx.sites, last.and_then(|e| e.site_id)),
             accepted: false,
-            message: Some(
+            code: Some(
                 match kind {
-                    EventKind::Start => MSG_ALREADY_STARTED,
-                    EventKind::Stop => MSG_NOT_STARTED,
+                    EventKind::Start => CODE_ALREADY_STARTED,
+                    EventKind::Stop => CODE_NOT_STARTED,
                 }
                 .to_string(),
             ),
@@ -198,7 +199,7 @@ pub async fn clock_for(
             zone_status: result.status,
             site_name: nearest.map(|s| s.name.clone()),
             accepted: false,
-            message: Some(message.to_string()),
+            code: Some(message.to_string()),
         });
     }
 
@@ -225,7 +226,7 @@ pub async fn clock_for(
         zone_status: row.zone_status,
         site_name: nearest.map(|s| s.name.clone()),
         accepted: true,
-        message: None,
+        code: None,
     })
 }
 
@@ -425,7 +426,7 @@ mod tests {
         assert!(!r.accepted);
         assert_eq!(r.kind, EventKind::Start);
         assert_eq!(r.at, T0());
-        assert!(r.message.is_some());
+        assert!(r.code.is_some());
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM time_event")
             .fetch_one(&pool)
             .await
@@ -496,10 +497,7 @@ mod tests {
         let r = tap(&pool, &k, p, EventKind::Start, far(), T0()).await;
         assert!(!r.accepted);
         assert_eq!(r.zone_status, ZoneStatus::OutOfZone);
-        assert_eq!(
-            r.message.as_deref(),
-            Some("Je bent niet op school. Starten kan alleen op school.")
-        );
+        assert_eq!(r.code.as_deref(), Some("clock-blocked"));
         assert_eq!(event_count(&pool).await, 0);
     }
 
@@ -510,10 +508,7 @@ mod tests {
         let r = tap(&pool, &k, p, EventKind::Start, None, T0()).await;
         assert!(!r.accepted);
         assert_eq!(r.zone_status, ZoneStatus::NoLocation);
-        assert_eq!(
-            r.message.as_deref(),
-            Some("We weten niet waar je bent. Starten kan alleen op school.")
-        );
+        assert_eq!(r.code.as_deref(), Some("clock-no-location"));
         assert_eq!(event_count(&pool).await, 0);
     }
 
@@ -524,10 +519,7 @@ mod tests {
         let r = tap(&pool, &k, p, EventKind::Start, inaccurate(), T0()).await;
         assert!(!r.accepted);
         assert_eq!(r.zone_status, ZoneStatus::Uncertain);
-        assert_eq!(
-            r.message.as_deref(),
-            Some("Je locatie is niet nauwkeurig genoeg. Probeer opnieuw buiten.")
-        );
+        assert_eq!(r.code.as_deref(), Some("clock-uncertain"));
         assert_eq!(event_count(&pool).await, 0);
     }
 

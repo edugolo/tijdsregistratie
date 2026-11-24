@@ -173,7 +173,7 @@ fn PersonRow(person: PersonRowDto, selected: bool, on_select: EventHandler<Uuid>
     let schools = school_names(&person);
     let role_class = match role {
         RoleDto::Employee => "st-chip st-chip-neutral",
-        RoleDto::Manager => "st-chip st-chip-tertiary",
+        RoleDto::Manager => "st-chip st-chip-secondary",
         RoleDto::Admin => "st-chip st-chip-brand",
     };
     rsx! {

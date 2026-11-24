@@ -2,18 +2,19 @@
 
 use dioxus::prelude::*;
 
-use super::env::{self, PasskeyError};
-use super::logic::{destination_for, passkey_message};
+use super::env;
+use super::logic::{destination_for, passkey_message, server_error_message};
 use super::{go, use_org_name};
 use crate::api::auth::{Me, begin_login, finish_login};
 use crate::client::screens::employee::Login;
 
-async fn sign_in() -> Result<Me, PasskeyError> {
-    let options = begin_login().await.map_err(|_| PasskeyError::Failed)?;
-    let credential = env::get_passkey(options).await?;
+/// Signs in with a passkey; the error is the text to show.
+async fn sign_in() -> Result<Me, String> {
+    let options = begin_login().await.map_err(|e| server_error_message(&e))?;
+    let credential = env::get_passkey(options).await.map_err(passkey_message)?;
     finish_login(credential)
         .await
-        .map_err(|_| PasskeyError::Failed)
+        .map_err(|e| server_error_message(&e))
 }
 
 /// `/aanmelden`
@@ -33,8 +34,8 @@ pub fn LoginPage() -> Element {
         spawn(async move {
             match sign_in().await {
                 Ok(me) => go(nav, destination_for(&me)),
-                Err(e) => {
-                    error.set(Some(passkey_message(e)));
+                Err(message) => {
+                    error.set(Some(message));
                     busy.set(false);
                 }
             }

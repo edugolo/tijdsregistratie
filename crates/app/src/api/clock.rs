@@ -19,7 +19,7 @@ pub struct FixDto {
 /// When `accepted` is true, `kind` and `at` describe the event that was just recorded. When it is
 /// false nothing was stored: `kind` is the kind of the last event today (`Stop` if there is none)
 /// and `at` its time (now if there is none), so the client can show the current state, and
-/// `message` explains why.
+/// `code` names why (a stable code such as `clock-blocked`; the client translates it).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClockResult {
     pub kind: EventKind,
@@ -27,7 +27,7 @@ pub struct ClockResult {
     pub zone_status: ZoneStatus,
     pub site_name: Option<String>,
     pub accepted: bool,
-    pub message: Option<String>,
+    pub code: Option<String>,
 }
 
 /// The own working day so far.

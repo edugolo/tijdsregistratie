@@ -3,9 +3,10 @@
 
 use dioxus::prelude::*;
 
-use super::i18n::t;
 use crate::api::setup::{FieldError, SetupSiteInput};
 use crate::client::components::Icon;
+use crate::client::i18n::LANGUAGE_LOADER;
+use i18n_embed_fl::fl;
 
 /// Time zones offered in the select; the server accepts any IANA name.
 pub const TIMEZONES: &[&str] = &[
@@ -20,15 +21,27 @@ pub const TIMEZONES: &[&str] = &[
 
 pub const DEFAULT_COLOR: &str = "#1e3a8a";
 
-/// Preset swatches: hex value and i18n key of the colour name.
-pub const SWATCHES: &[(&str, &str)] = &[
-    ("#1e3a8a", "color.blue"),
-    ("#0f766e", "color.teal"),
-    ("#6d28d9", "color.purple"),
-    ("#be123c", "color.red"),
-    ("#c2410c", "color.orange"),
-    ("#15803d", "color.green"),
-    ("#334155", "color.slate"),
+/// Name of a preset colour, translated where it is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Swatch {
+    Blue,
+    Teal,
+    Purple,
+    Red,
+    Orange,
+    Green,
+    Slate,
+}
+
+/// Preset swatches: hex value and the name of the colour.
+pub const SWATCHES: &[(&str, Swatch)] = &[
+    ("#1e3a8a", Swatch::Blue),
+    ("#0f766e", Swatch::Teal),
+    ("#6d28d9", Swatch::Purple),
+    ("#be123c", Swatch::Red),
+    ("#c2410c", Swatch::Orange),
+    ("#15803d", Swatch::Green),
+    ("#334155", Swatch::Slate),
 ];
 
 /// The raw text of the school fields of step S3.
@@ -120,7 +133,7 @@ pub fn TimezoneSelect(mut value: Signal<String>) -> Element {
     let current = value();
     rsx! {
         label { class: "su-field",
-            span { class: "su-label", {t("setup.s2.timezone")} }
+            span { class: "su-label", {fl!(LANGUAGE_LOADER, "setup-s2-timezone")} }
             select {
                 class: "su-input",
                 value: "{value}",

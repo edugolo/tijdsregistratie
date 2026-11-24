@@ -4,9 +4,10 @@
 
 use dioxus::prelude::*;
 
-use super::form::{DEFAULT_COLOR, SWATCHES};
-use super::i18n::t;
+use super::form::{DEFAULT_COLOR, SWATCHES, Swatch};
 use crate::client::components::Icon;
+use crate::client::i18n::LANGUAGE_LOADER;
+use i18n_embed_fl::fl;
 
 /// Normalises typed colour input to `#rrggbb` (lower case). The leading `#` is optional.
 pub fn normalize_hex(text: &str) -> Option<String> {
@@ -30,6 +31,19 @@ pub fn preview_style(seed: &str, dark: bool) -> Option<String> {
     )
 }
 
+/// Translated name of a preset colour.
+fn swatch_name(swatch: Swatch) -> String {
+    match swatch {
+        Swatch::Blue => fl!(LANGUAGE_LOADER, "setup-color-blue"),
+        Swatch::Teal => fl!(LANGUAGE_LOADER, "setup-color-teal"),
+        Swatch::Purple => fl!(LANGUAGE_LOADER, "setup-color-purple"),
+        Swatch::Red => fl!(LANGUAGE_LOADER, "setup-color-red"),
+        Swatch::Orange => fl!(LANGUAGE_LOADER, "setup-color-orange"),
+        Swatch::Green => fl!(LANGUAGE_LOADER, "setup-color-green"),
+        Swatch::Slate => fl!(LANGUAGE_LOADER, "setup-color-slate"),
+    }
+}
+
 #[component]
 pub fn ColorPicker(mut value: Signal<String>) -> Element {
     let current = value().to_ascii_lowercase();
@@ -45,8 +59,8 @@ pub fn ColorPicker(mut value: Signal<String>) -> Element {
     };
     rsx! {
         div { class: "su-field",
-            span { class: "su-label", {t("setup.s2.color")} }
-            div { class: "su-swatches", role: "radiogroup", aria_label: t("setup.s2.color"),
+            span { class: "su-label", {fl!(LANGUAGE_LOADER, "setup-s2-color")} }
+            div { class: "su-swatches", role: "radiogroup", aria_label: fl!(LANGUAGE_LOADER, "setup-s2-color"),
                 for (hex, name) in SWATCHES {
                     button {
                         key: "{hex}",
@@ -54,8 +68,8 @@ pub fn ColorPicker(mut value: Signal<String>) -> Element {
                         class: "su-swatch",
                         role: "radio",
                         aria_checked: "{current == *hex}",
-                        aria_label: t(name),
-                        title: t(name),
+                        aria_label: swatch_name(*name),
+                        title: swatch_name(*name),
                         style: "background: {hex}",
                         onclick: move |_| {
                             typed.set(None);
@@ -69,7 +83,7 @@ pub fn ColorPicker(mut value: Signal<String>) -> Element {
             }
             div { class: "su-custom",
                 label { class: "su-custom-well",
-                    span { class: "su-hint", {t("setup.s2.color_custom")} }
+                    span { class: "su-hint", {fl!(LANGUAGE_LOADER, "setup-s2-color-custom")} }
                     input {
                         r#type: "color",
                         value: "{current}",
@@ -82,7 +96,7 @@ pub fn ColorPicker(mut value: Signal<String>) -> Element {
                     }
                 }
                 label { class: "su-custom-hex",
-                    span { class: "su-hint", {t("setup.s2.color_hex")} }
+                    span { class: "su-hint", {fl!(LANGUAGE_LOADER, "setup-s2-color-hex")} }
                     input {
                         class: "su-input",
                         r#type: "text",
@@ -99,10 +113,10 @@ pub fn ColorPicker(mut value: Signal<String>) -> Element {
             if invalid {
                 p { class: "su-error", role: "alert",
                     Icon { name: "alert-triangle", size: 16 }
-                    {t("err.hex")}
+                    {fl!(LANGUAGE_LOADER, "setup-err-hex")}
                 }
             }
-            span { class: "su-hint", {t("setup.s2.color_hint")} }
+            span { class: "su-hint", {fl!(LANGUAGE_LOADER, "setup-s2-color-hint")} }
         }
     }
 }
@@ -116,16 +130,16 @@ pub fn ThemePreview(color: Signal<String>, short_name: Signal<String>) -> Elemen
     let dark = preview_style(&seed, true).unwrap_or_default();
     let name = short_name();
     let name = if name.trim().is_empty() {
-        t("preview.name_fallback").to_string()
+        fl!(LANGUAGE_LOADER, "setup-preview-name-fallback")
     } else {
         name.trim().to_string()
     };
     rsx! {
         div { class: "su-preview",
-            span { class: "su-label", {t("preview.title")} }
+            span { class: "su-label", {fl!(LANGUAGE_LOADER, "setup-preview-title")} }
             div { class: "su-phones",
-                Phone { caption: t("preview.light").to_string(), style: light, name: name.clone() }
-                Phone { caption: t("preview.dark").to_string(), style: dark, name }
+                Phone { caption: fl!(LANGUAGE_LOADER, "setup-preview-light"), style: light, name: name.clone() }
+                Phone { caption: fl!(LANGUAGE_LOADER, "setup-preview-dark"), style: dark, name }
             }
         }
     }
@@ -137,11 +151,11 @@ fn Phone(caption: String, style: String, name: String) -> Element {
         figure { class: "su-phone-wrap",
             div { class: "su-phone", style: "{style}", aria_hidden: "true",
                 div { class: "su-phone-name", "{name}" }
-                div { class: "su-phone-start", {t("preview.start")} }
-                div { class: "su-phone-btn", {t("preview.button")} }
+                div { class: "su-phone-start", {fl!(LANGUAGE_LOADER, "setup-preview-start")} }
+                div { class: "su-phone-btn", {fl!(LANGUAGE_LOADER, "setup-preview-button")} }
                 div { class: "su-phone-chip",
                     Icon { name: "check", size: 12 }
-                    {t("preview.chip")}
+                    {fl!(LANGUAGE_LOADER, "setup-preview-chip")}
                 }
             }
             figcaption { class: "su-hint", {caption} }

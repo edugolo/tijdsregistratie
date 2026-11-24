@@ -2,10 +2,10 @@
 
 use dioxus::prelude::*;
 
-use super::env::{self, PasskeyError};
+use super::env;
 use super::logic::{
     Destination, EnrollStep, destination_for, first_step, ios_steps_offered, needs_location_step,
-    passkey_message, token_from_hash,
+    passkey_message, server_error_message, token_from_hash,
 };
 use super::{go, use_org_name};
 use crate::api::auth::{Me, begin_registration, enrollment_info, finish_registration};
@@ -13,14 +13,17 @@ use crate::client::screens::employee::{
     CreateKey, InvalidCode, IosInstall, LoadFailed, Loading, LocationExplain, Welcome,
 };
 
-async fn register(token: String) -> Result<Me, PasskeyError> {
+/// Registers the passkey; the error is the text to show.
+async fn register(token: String) -> Result<Me, String> {
     let options = begin_registration(token)
         .await
-        .map_err(|_| PasskeyError::Failed)?;
-    let credential = env::create_passkey(options).await?;
+        .map_err(|e| server_error_message(&e))?;
+    let credential = env::create_passkey(options)
+        .await
+        .map_err(passkey_message)?;
     finish_registration(credential)
         .await
-        .map_err(|_| PasskeyError::Failed)
+        .map_err(|e| server_error_message(&e))
 }
 
 #[component]
@@ -116,8 +119,8 @@ pub fn EnrollPage() -> Element {
                                     go(nav, next);
                                 }
                             }
-                            Err(e) => {
-                                error.set(Some(passkey_message(e)));
+                            Err(message) => {
+                                error.set(Some(message));
                                 busy.set(false);
                             }
                         }
