@@ -116,9 +116,13 @@ i18n: i18n-embed + `fl!`. Messages live in `crates/app/i18n/<locale>/app.ftl`; a
 ### 4.2 Roles
 
 - `role_assignment(person_id, role, site_id)`: `employee` at a site, `manager` of a site,
-  `admin` of the organisation (site null).
+  `hr` (personeelsdienst) and `admin` of the organisation (site null).
 - A person can have several roles (a manager who also clocks their own time).
 - Employee: own events only. Manager: people and events of their own sites only. Admin: everything.
+- HR (personeelsdienst), decided 2026-11-24: sees Vandaag and Mensen for all sites, and (when built)
+  views, corrects and exports hours for all sites; adds people and links devices for employees and
+  managers at any site; cannot grant the admin or HR role, cannot change settings, sites or branding.
+  Only admins grant admin/HR.
 - Every server function checks scope on the server.
 - Every manager/admin mutation writes an audit row (who, what, when; ids only, no plaintext personal data).
 

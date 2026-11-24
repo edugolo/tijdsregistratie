@@ -45,6 +45,8 @@ The organisation name and logo in the mockups are placeholders; branding is conf
 | start / stop working | starten / stoppen | in- / uitklokken |
 | site | school (or the configured site label) | vestigingsplaats, locatie-ID |
 | manager | verantwoordelijke | manager, admin |
+| HR role | personeelsdienst | HR, admin |
+| admin role | beheerder | admin |
 | out of zone | niet op school | buiten geofence |
 
 ### Standard messages
