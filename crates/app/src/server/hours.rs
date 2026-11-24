@@ -25,8 +25,8 @@ use uuid::Uuid;
 use super::clock::today_bounds;
 use super::staff::StaffEnv;
 use crate::api::hours::{
-    CorrectionChangeDto, CorrectionDto, CorrectionKindDto, DayDetailDto, DayFlagsDto, DayHoursDto,
-    EffectiveEventDto, HoursDto, PersonHoursDto, RawEventDto,
+    ContractDto, CorrectionChangeDto, CorrectionDto, CorrectionKindDto, DayDetailDto, DayFlagsDto,
+    DayHoursDto, EffectiveEventDto, HoursDto, PersonHoursDto, RawEventDto, ValidationDto,
 };
 
 /// Longest range of the overview, in days.
@@ -178,7 +178,7 @@ pub fn validate_reason(reason: &str) -> Result<String> {
     Ok(reason.to_string())
 }
 
-fn validate_code(value: &str, max: usize, what: &'static str) -> Result<String> {
+pub(super) fn validate_code(value: &str, max: usize, what: &'static str) -> Result<String> {
     let value = value.trim();
     let n = value.chars().count();
     if n == 0 || n > max || value.chars().any(char::is_control) {
@@ -196,7 +196,7 @@ fn correction_time(tz: Tz, date: NaiveDate, ms: i64, now: DateTime<Utc>) -> Resu
     Ok(at)
 }
 
-fn check_period(from: NaiveDate, to: NaiveDate, max_days: i64) -> Result<()> {
+pub(super) fn check_period(from: NaiveDate, to: NaiveDate, max_days: i64) -> Result<()> {
     let span = (to - from).num_days();
     if span < 0 || span >= max_days {
         return Err(HoursError::Invalid("range"));
@@ -298,7 +298,10 @@ struct Bucket {
     corrections: Vec<CorrectionRow>,
 }
 
-async fn employee_sites_of(pool: &PgPool, person_ids: &[Uuid]) -> Result<HashMap<Uuid, Vec<Uuid>>> {
+pub(super) async fn employee_sites_of(
+    pool: &PgPool,
+    person_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<Uuid>>> {
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT person_id, site_id FROM role_assignment \
          WHERE role = 'employee' AND site_id IS NOT NULL AND person_id = ANY($1) \
@@ -389,6 +392,18 @@ pub async fn hours(
             }
         },
     };
+    hours_of(env, tz, people, from, to, now).await
+}
+
+/// The overview of `people` (already scope-checked by the caller) over `[from, to]`.
+pub(super) async fn hours_of(
+    env: &StaffEnv<'_>,
+    tz: Tz,
+    people: Vec<person::Person>,
+    from: NaiveDate,
+    to: NaiveDate,
+    now: DateTime<Utc>,
+) -> Result<HoursDto> {
     let ids: Vec<Uuid> = people.iter().map(|p| p.id).collect();
     if ids.is_empty() {
         return Ok(HoursDto {
@@ -850,6 +865,54 @@ pub async fn set_site_cost_centre(
     .await?;
     tx.commit().await?;
     Ok(())
+}
+
+pub async fn person_contract(
+    env: &StaffEnv<'_>,
+    scope: &StaffScope,
+    person_id: Uuid,
+) -> Result<ContractDto> {
+    require_org_wide(scope)?;
+    person::get_person(env.pool, env.keys, person_id)
+        .await?
+        .ok_or(HoursError::NotFound)?;
+    let minutes_per_weekday = contract::schedules(env.pool, &[person_id])
+        .await?
+        .get(&person_id)
+        .copied()
+        .unwrap_or_default();
+    let payroll_number = person::payroll_numbers(env.pool, env.keys, &[person_id])
+        .await?
+        .remove(&person_id);
+    Ok(ContractDto {
+        minutes_per_weekday,
+        payroll_number,
+    })
+}
+
+pub async fn period_status(
+    env: &StaffEnv<'_>,
+    scope: &StaffScope,
+    site_id: Uuid,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<Vec<ValidationDto>> {
+    check_site(scope, site_id)?;
+    check_period(from, to, MAX_PERIOD_DAYS)?;
+    let mut out = Vec::new();
+    for v in validation::active_between(env.pool, &[site_id], from, to).await? {
+        let validated_by_name = person::get_person(env.pool, env.keys, v.validated_by)
+            .await?
+            .map(|p| p.display_name)
+            .unwrap_or_default();
+        out.push(ValidationDto {
+            from: v.period_start,
+            to: v.period_end,
+            validated_by_name,
+            validated_at: ms(v.validated_at),
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1829,6 +1892,61 @@ mod tests {
                 .matches("site.cost_centre_changed")
                 .count(),
             2
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn contract_and_period_status_are_readable_within_scope(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let empty = person_contract(&e, &s.hr, s.emp_a).await.unwrap();
+        assert_eq!(empty, ContractDto::default());
+        let week = [456, 456, 228, 456, 456, 0, 0];
+        set_contract(&e, &s.hr, s.emp_a, week).await.unwrap();
+        set_payroll_number(&e, &s.hr, s.emp_a, Some("P-100"))
+            .await
+            .unwrap();
+        let got = person_contract(&e, &s.admin, s.emp_a).await.unwrap();
+        assert_eq!(got.minutes_per_weekday, week);
+        assert_eq!(got.payroll_number.as_deref(), Some("P-100"));
+        assert_eq!(
+            person_contract(&e, &s.mgr_a, s.emp_a).await.unwrap_err(),
+            HoursError::Forbidden
+        );
+        assert_eq!(
+            person_contract(&e, &s.hr, Uuid::new_v4())
+                .await
+                .unwrap_err(),
+            HoursError::NotFound
+        );
+
+        assert!(
+            period_status(&e, &s.mgr_a, s.site_a, d(1), d(9))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        validate_period(&e, &s.mgr_a, s.site_a, d(1), d(7), now())
+            .await
+            .unwrap();
+        let list = period_status(&e, &s.hr, s.site_a, d(5), d(9))
+            .await
+            .unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!((list[0].from, list[0].to), (d(1), d(7)));
+        assert!(!list[0].validated_by_name.is_empty());
+        assert_eq!(
+            period_status(&e, &s.mgr_b, s.site_a, d(1), d(9))
+                .await
+                .unwrap_err(),
+            HoursError::Forbidden
+        );
+        assert_eq!(
+            period_status(&e, &s.hr, s.site_a, d(9), d(1))
+                .await
+                .unwrap_err(),
+            HoursError::Invalid("range")
         );
     }
 }

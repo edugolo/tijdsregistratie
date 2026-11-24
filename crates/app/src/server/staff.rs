@@ -356,6 +356,7 @@ fn site_row(site: &Site) -> SiteRowDto {
         break_minutes: u32::try_from(site.break_minutes).unwrap_or_default(),
         break_after_minutes: u32::try_from(site.break_after_minutes).unwrap_or_default(),
         active: site.active,
+        cost_centre: site.cost_centre.clone(),
     }
 }
 

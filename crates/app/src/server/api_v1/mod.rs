@@ -16,6 +16,8 @@
 pub mod auth;
 pub mod docs;
 pub mod error;
+pub mod exports;
+pub mod hours;
 pub mod keys;
 pub mod people;
 
@@ -39,7 +41,7 @@ Authenticate with an API key created under Instellingen > Integraties: \
 Scopes: `people:read`, `people:write`, `hours:read`, `export:read`. A key can also be \
 restricted to some sites. Each key is limited to 120 requests per minute (429, `Retry-After`). \
 Errors are `{ \"error\": \"code\" }` with the codes `unauthorized` (401), `forbidden` (403), \
-`not_found` (404), `rate_limited` (429), `invalid_request` (400) and `internal` (500). \
+`not_found` (404), `conflict` (409), `rate_limited` (429), `invalid_request` (400) and `internal` (500). \
 Keys give access to personal data: treat them like passwords.";
 
 struct SecurityAddon;
@@ -65,8 +67,18 @@ impl Modify for SecurityAddon {
 #[derive(OpenApi)]
 #[openapi(
     info(title = "Tijdsregistratie API", version = "1.0.0", description = DESCRIPTION),
-    tags((name = "people", description = "People of the organisation")),
-    components(schemas(error::ErrorBody, people::PersonDto)),
+    tags(
+        (name = "people", description = "People of the organisation"),
+        (name = "hours", description = "Hours and period validation"),
+        (name = "export", description = "Payroll export files"),
+    ),
+    components(schemas(
+        error::ErrorBody,
+        people::PersonDto,
+        people::PersonUpsert,
+        people::WritableRole,
+        exports::BasisParam,
+    )),
     modifiers(&SecurityAddon),
 )]
 struct ApiDoc;
@@ -78,6 +90,10 @@ async fn not_found() -> impl IntoResponse {
 fn build_parts() -> (Router, utoipa::openapi::OpenApi) {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(people::list_people))
+        .routes(routes!(people::put_person))
+        .routes(routes!(hours::get_hours))
+        .routes(routes!(hours::get_periods))
+        .routes(routes!(exports::get_export))
         .split_for_parts()
 }
 

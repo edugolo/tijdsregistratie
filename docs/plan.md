@@ -300,12 +300,22 @@ Security-relevant tasks (T2, T4, T5, T8) get an independent review before merge.
 | 5 | Project name and branding | first public push |
 | 6 | People without a smartphone: kiosk mode later or out of scope | later |
 
-## 14. Payroll export and integrations (decided 2026-11-24, not built yet)
+## 14. Payroll export and integrations (decided 2026-11-24; server side built, screens and connectors to do)
 
 Depends on Uren (hours overview), corrections and validation. The backend of these exists
 (`server::hours`, `api::hours`: overview, day detail, corrections, period validation, contract
 minutes, payroll number, site cost centre; schema in §9); the screens and the export are still to do.
 
+- **Built (server)**: `server::export` + `api::export` (HR/admin only; custom profiles admin only; managers
+  have no export for now), tables `export_profile` and `export_batch` (append-only, no file and no
+  personal data stored; regenerating from the same inputs gives the same checksum, `export_verify`),
+  API v1 `GET /hours`, `GET /periods`, `GET /exports/{profile}`, `PUT /people/{external_id}`
+  (see `docs/api.md`). Rules: only days covered by an active period validation of the person's site
+  are exported (otherwise `Blocked` with the unvalidated stretches per site, no partial export);
+  people with hours but no payroll number block the export and are listed by name in the staff UI
+  (the API only answers `409`); the person key is the payroll number, `site_code` the site's cost
+  centre; a person at several selected sites counts for the first (by site id); the time basis can
+  override the profile's.
 - **Neutral export model**: per person per day from validated periods: payroll/contract number
   (encrypted), site code (cost centre), date, start, stop, break, worked minutes, contract minutes,
   registered-vs-contract mode, later absence codes.

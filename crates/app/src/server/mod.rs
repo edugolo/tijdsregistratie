@@ -4,6 +4,7 @@ pub mod api_v1;
 pub mod auth;
 pub mod clock;
 pub mod config;
+pub mod export;
 pub mod geocode;
 pub mod hours;
 pub mod passkey;

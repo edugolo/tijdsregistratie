@@ -116,3 +116,13 @@ What to ask Acerta:
 3. The looncodes for presence and each absence type used by this employer.
 4. Whether begin/end times are accepted or only date + looncode + hours.
 5. Access to the REST API for prestaties, if available.
+
+## Custom profiles and batches in the app
+
+Admins can copy a shipped profile, edit its TOML (validated with the same rules before saving, all
+problems listed) and deactivate it; HR and admins use profiles for exports. Custom profiles live in
+the `export_profile` table; deactivating one keeps its history. Every export is recorded as a batch
+(profile, period, sites, time basis, row count, SHA-256, who or which API key) without the file or
+any personal data. A file's "generated at" stamp is the end of the period, so regenerating a batch
+gives the same bytes; `export_verify` compares the checksum (it differs when the profile was edited,
+a period was reopened or the hours changed).

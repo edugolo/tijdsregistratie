@@ -5,6 +5,8 @@ pub mod audit;
 pub mod contract;
 pub mod correction;
 pub mod enrollment;
+pub mod export_batch;
+pub mod export_profile;
 pub mod passkey;
 pub mod person;
 pub mod role;

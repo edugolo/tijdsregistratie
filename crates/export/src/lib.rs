@@ -44,6 +44,14 @@ pub struct ExportOutput {
     pub row_count: usize,
 }
 
+/// Lower-case hex SHA-256 of `bytes`.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// Render `rows` with `profile`. Output is deterministic: rows are ordered by person key, date,
 /// kind and site regardless of input order.
 pub fn render(
@@ -67,15 +75,48 @@ pub fn render(
             "xlsx",
         ),
     };
-    let sha256 = Sha256::digest(&bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let sha256 = sha256_hex(&bytes);
     Ok(ExportOutput {
         bytes,
         sha256,
         content_type,
         extension,
+        row_count: table.rows.len(),
+    })
+}
+
+/// The first rows of an export as display text, for a preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preview {
+    pub headers: Vec<String>,
+    /// At most the requested number of rows, in output order.
+    pub rows: Vec<Vec<String>>,
+    /// Total number of output rows.
+    pub row_count: usize,
+}
+
+/// Build the table of `render` without serialising it and return the first `limit` rows as text
+/// (dates, durations and the decimal sign as the profile formats them).
+pub fn preview(
+    profile: &Profile,
+    rows: &[ExportRow],
+    period: &ExportPeriod,
+    limit: usize,
+) -> Result<Preview, ExportError> {
+    let table = table::build(profile, rows, period)?;
+    let shown = table
+        .rows
+        .iter()
+        .take(limit)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.to_text(profile.decimal_separator))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Preview {
+        headers: table.headers,
+        rows: shown,
         row_count: table.rows.len(),
     })
 }

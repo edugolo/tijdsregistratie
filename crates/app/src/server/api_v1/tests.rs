@@ -662,3 +662,739 @@ async fn only_admins_manage_keys_and_input_is_validated(pool: PgPool) {
         .unwrap();
     assert_eq!(n, 0);
 }
+
+// --- hours, periods, exports and the people upsert ---
+
+async fn send(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    raw: &str,
+    body: Option<Value>,
+) -> Response {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("authorization", format!("Bearer {raw}"));
+    let body = match body {
+        Some(v) => {
+            req = req.header("content-type", "application/json");
+            Body::from(v.to_string())
+        }
+        None => Body::empty(),
+    };
+    app.clone().oneshot(req.body(body).unwrap()).await.unwrap()
+}
+
+fn at(day: u32, h: u32) -> chrono::DateTime<Utc> {
+    use chrono::TimeZone;
+    Utc.with_ymd_and_hms(2026, 3, day, h, 0, 0).unwrap()
+}
+
+fn date(day: u32) -> chrono::NaiveDate {
+    chrono::NaiveDate::from_ymd_opt(2026, 3, day).unwrap()
+}
+
+/// Anna (site A, payroll `P001`) worked Monday 2 March 08:00-16:30 local. Site A is validated for
+/// 1-7 March, site B is not.
+async fn hours_fixture(pool: &PgPool) -> Fixture {
+    use domain::{EventKind, ZoneStatus};
+    use store::repo::time_event::{self, NewEvent};
+    let f = fixture(pool, "on").await;
+    person::set_payroll_number(pool, &f.state.keys, &f.state.blind, f.anna, Some("P001"))
+        .await
+        .unwrap();
+    for (kind, t) in [(EventKind::Start, at(2, 7)), (EventKind::Stop, at(2, 15))] {
+        time_event::append(
+            pool,
+            &f.state.keys,
+            NewEvent {
+                person_id: f.anna,
+                kind,
+                server_ts: if kind == EventKind::Stop {
+                    t + Duration::minutes(30)
+                } else {
+                    t
+                },
+                client_ts: None,
+                site_id: Some(f.site_a),
+                location: None,
+                zone_status: ZoneStatus::InZone,
+                source: "personal",
+            },
+        )
+        .await
+        .unwrap();
+    }
+    validate(pool, f.site_a, &f).await;
+    f
+}
+
+async fn validate(pool: &PgPool, site: Uuid, f: &Fixture) {
+    let mut conn = pool.acquire().await.unwrap();
+    store::repo::validation::validate(&mut conn, site, date(1), date(7), f.admin)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn hours_are_scoped_site_restricted_and_hide_names(pool: PgPool) {
+    let f = hours_fixture(&pool).await;
+    let app = router(&f, 100);
+    let q = "from=2026-03-02&to=2026-03-02";
+    let read = key(&pool, &[ApiScope::HoursRead], None).await;
+    let res = bearer(&app, &format!("/api/v1/hours?{q}"), &read.raw).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json(res).await;
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    let anna = &body[0];
+    assert_eq!(anna["person_id"], f.anna.to_string());
+    assert_eq!(anna["payroll_number"], "P001");
+    assert!(anna.get("name").is_none(), "no names through the hours API");
+    let day = &anna["days"][0];
+    assert_eq!(day["date"], "2026-03-02");
+    assert_eq!(day["start"], "2026-03-02T07:00:00Z");
+    assert_eq!(day["stop"], "2026-03-02T15:30:00Z");
+    assert_eq!(
+        (
+            day["break_minutes"].as_u64(),
+            day["worked_minutes"].as_u64()
+        ),
+        (Some(30), Some(480))
+    );
+    assert_eq!(
+        (day["validated"].as_bool(), day["corrected"].as_bool()),
+        (Some(true), Some(false))
+    );
+
+    // Scope, range and parameters.
+    let people_only = key(&pool, &[ApiScope::PeopleRead], None).await;
+    let res = bearer(&app, &format!("/api/v1/hours?{q}"), &people_only.raw).await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    for bad in [
+        "from=2026-03-05&to=2026-03-02",
+        "from=2026-01-01&to=2026-06-01",
+        "from=nope&to=2026-03-02",
+        "to=2026-03-02",
+    ] {
+        let res = bearer(&app, &format!("/api/v1/hours?{bad}"), &read.raw).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad}");
+        assert_eq!(json(res).await["error"], "invalid_request");
+    }
+
+    // A key restricted to site B sees nothing of site A and may not ask for it.
+    let b_only = key(&pool, &[ApiScope::HoursRead], Some(&[f.site_b])).await;
+    let res = bearer(&app, &format!("/api/v1/hours?{q}"), &b_only.raw).await;
+    assert_eq!(json(res).await, serde_json::json!([]));
+    let res = bearer(
+        &app,
+        &format!("/api/v1/hours?{q}&site={}", f.site_a),
+        &b_only.raw,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let a_only = key(&pool, &[ApiScope::HoursRead], Some(&[f.site_a])).await;
+    let res = bearer(
+        &app,
+        &format!("/api/v1/hours?{q}&site={}", f.site_a),
+        &a_only.raw,
+    )
+    .await;
+    assert_eq!(json(res).await.as_array().unwrap().len(), 1);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn periods_show_validation_per_site(pool: PgPool) {
+    let f = hours_fixture(&pool).await;
+    let app = router(&f, 100);
+    let q = "from=2026-03-01&to=2026-03-10";
+    let read = key(&pool, &[ApiScope::HoursRead], None).await;
+    let res = bearer(&app, &format!("/api/v1/periods?{q}"), &read.raw).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json(res).await;
+    let sites = body.as_array().unwrap();
+    assert_eq!(sites.len(), 2);
+    let (a, b) = (&sites[0], &sites[1]);
+    assert_eq!(
+        (a["site_name"].as_str(), b["site_name"].as_str()),
+        (Some("School A"), Some("School B"))
+    );
+    assert_eq!(a["site_id"], f.site_a.to_string());
+    assert_eq!(a["fully_validated"], false);
+    assert_eq!(a["validated"][0]["from"], "2026-03-01");
+    assert_eq!(a["validated"][0]["to"], "2026-03-07");
+    assert_eq!(
+        a["unvalidated"],
+        serde_json::json!([{ "from": "2026-03-08", "to": "2026-03-10" }])
+    );
+    assert_eq!(b["validated"], serde_json::json!([]));
+    assert_eq!(
+        b["unvalidated"],
+        serde_json::json!([{ "from": "2026-03-01", "to": "2026-03-10" }])
+    );
+    let res = bearer(
+        &app,
+        "/api/v1/periods?from=2026-03-01&to=2026-03-07",
+        &read.raw,
+    )
+    .await;
+    assert_eq!(json(res).await[0]["fully_validated"], true);
+
+    // Scope and site restriction.
+    let wrong = key(&pool, &[ApiScope::ExportRead], None).await;
+    let res = bearer(&app, &format!("/api/v1/periods?{q}"), &wrong.raw).await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let b_only = key(&pool, &[ApiScope::HoursRead], Some(&[f.site_b])).await;
+    let res = bearer(&app, &format!("/api/v1/periods?{q}"), &b_only.raw).await;
+    let body = json(res).await;
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(body[0]["site_id"], f.site_b.to_string());
+    let res = bearer(
+        &app,
+        &format!("/api/v1/periods?{q}&site={}", f.site_a),
+        &b_only.raw,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let res = bearer(
+        &app,
+        &format!("/api/v1/periods?{q}&site={}", Uuid::new_v4()),
+        &read.raw,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = bearer(
+        &app,
+        "/api/v1/periods?from=2026-03-09&to=2026-03-01",
+        &read.raw,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn export_endpoint_matches_the_server_function_and_records_a_batch(pool: PgPool) {
+    use crate::api::export::TimeBasisDto;
+    use crate::server::export::{Selection, file};
+    use crate::server::staff::StaffEnv;
+    let f = hours_fixture(&pool).await;
+    let app = router(&f, 100);
+    let q = "from=2026-03-01&to=2026-03-07";
+    let k = key(&pool, &[ApiScope::ExportRead], None).await;
+
+    // Site B is not validated: nothing is produced, nothing recorded.
+    let res = bearer(&app, &format!("/api/v1/exports/generic-csv?{q}"), &k.raw).await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert_eq!(json(res).await["error"], "conflict");
+    let batches = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM export_batch")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(batches().await, 0);
+
+    validate(&pool, f.site_b, &f).await;
+    let res = bearer(&app, &format!("/api/v1/exports/generic-csv?{q}"), &k.raw).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let headers = res.headers().clone();
+    assert_eq!(headers["content-type"], "text/csv; charset=utf-8");
+    assert_eq!(
+        headers["content-disposition"],
+        "attachment; filename=\"export-generic-csv-2026-03-01-2026-03-07.csv\""
+    );
+    assert_eq!(headers["cache-control"], "no-store");
+    let sha = headers["x-export-sha256"].to_str().unwrap().to_string();
+    let batch_id: Uuid = headers["x-export-batch"].to_str().unwrap().parse().unwrap();
+    let body = text(res).await;
+    assert!(
+        body.contains("P001;Anna Voorbeeld;;2026-03-02;08:00;16:30;30;8,00;0,00;WORK;registered"),
+        "{body}"
+    );
+    assert_eq!(export::sha256_hex(body.as_bytes()), sha);
+
+    // The browser function produces the same bytes for the same inputs.
+    let env = StaffEnv::new(&f.state);
+    let sites = [f.site_a, f.site_b];
+    let sel = Selection {
+        from: date(1),
+        to: date(7),
+        site_ids: &sites,
+        basis: None,
+    };
+    let via_fn = file(&env, &admin_scope(&f), "generic-csv", &sel, Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(via_fn.sha256, sha);
+    let contract = Selection {
+        basis: Some(TimeBasisDto::Contract),
+        ..sel
+    };
+    let other = file(&env, &admin_scope(&f), "generic-csv", &contract, Utc::now())
+        .await
+        .unwrap();
+    assert_ne!(other.sha256, sha, "the basis changes the output");
+
+    // The API batch has no creator but the key in the audit log.
+    let row: (Option<Uuid>, Option<Uuid>, String) =
+        sqlx::query_as("SELECT created_by, api_key_id, sha256 FROM export_batch WHERE id = $1")
+            .bind(batch_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row, (None, Some(k.key.id), sha.clone()));
+    let fields: Vec<String> = sqlx::query_scalar(
+        "SELECT changed_fields::text FROM audit_log WHERE action = 'export.created' AND entity_id = $1",
+    )
+    .bind(batch_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(fields.len(), 1);
+    assert!(fields[0].contains(&format!("api_key:{}", k.key.id)) && !fields[0].contains("Anna"));
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT actor_id FROM audit_log WHERE action = 'export.created' AND entity_id = $1"
+        )
+        .bind(batch_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        None
+    );
+
+    // Other profiles, basis, parameters, scope, site restriction.
+    let res = bearer(
+        &app,
+        &format!("/api/v1/exports/generic-xlsx?{q}&basis=contract"),
+        &k.raw,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        res.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .contains("spreadsheetml")
+    );
+    let res = bearer(&app, &format!("/api/v1/exports/nope?{q}"), &k.raw).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    for bad in [
+        "basis=bogus&from=2026-03-01&to=2026-03-07",
+        "from=2026-03-07&to=2026-03-01",
+    ] {
+        let res = bearer(&app, &format!("/api/v1/exports/generic-csv?{bad}"), &k.raw).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let hours_only = key(&pool, &[ApiScope::HoursRead], None).await;
+    let res = bearer(
+        &app,
+        &format!("/api/v1/exports/generic-csv?{q}"),
+        &hours_only.raw,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let a_only = key(&pool, &[ApiScope::ExportRead], Some(&[f.site_a])).await;
+    let res = bearer(
+        &app,
+        &format!("/api/v1/exports/generic-csv?{q}&site={}", f.site_b),
+        &a_only.raw,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    // Without `site` a restricted key exports its own sites only.
+    let res = bearer(
+        &app,
+        &format!("/api/v1/exports/generic-csv?{q}"),
+        &a_only.raw,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let sites: Vec<Uuid> =
+        sqlx::query_scalar("SELECT site_ids[1] FROM export_batch WHERE api_key_id = $1")
+            .bind(a_only.key.id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(sites, vec![f.site_a]);
+    // A person without payroll number blocks the export without naming anyone.
+    person::set_payroll_number(&pool, &f.state.keys, &f.state.blind, f.anna, None)
+        .await
+        .unwrap();
+    let res = bearer(&app, &format!("/api/v1/exports/generic-csv?{q}"), &k.raw).await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert!(!text(res).await.contains("Anna"));
+}
+
+fn upsert_body(name: &str, role: &str, sites: &[Uuid], active: bool) -> Value {
+    serde_json::json!({ "name": name, "role": role, "site_ids": sites, "active": active })
+}
+
+async fn audit_actions_of(pool: &PgPool, prefix: &str) -> Vec<String> {
+    sqlx::query_scalar("SELECT action FROM audit_log WHERE action LIKE $1 ORDER BY at, id")
+        .bind(format!("{prefix}%"))
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn put_person_creates_then_updates_by_payroll_number(pool: PgPool) {
+    let f = fixture(&pool, "on").await;
+    let app = router(&f, 100);
+    let k = key(&pool, &[ApiScope::PeopleWrite, ApiScope::PeopleRead], None).await;
+    let people_before: i64 = sqlx::query_scalar("SELECT count(*) FROM person")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let res = send(
+        &app,
+        "PUT",
+        "/api/v1/people/EXT-1",
+        &k.raw,
+        Some(upsert_body("Dora Nieuw", "employee", &[f.site_a], true)),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let created = json(res).await;
+    assert_eq!(created["name"], "Dora Nieuw");
+    assert_eq!(created["roles"], serde_json::json!(["employee"]));
+    assert_eq!(created["sites"], serde_json::json!([f.site_a]));
+    assert_eq!(
+        (
+            created["active"].as_bool(),
+            created["device_linked"].as_bool()
+        ),
+        (Some(true), Some(false))
+    );
+    let id: Uuid = created["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        person::find_by_payroll_number(&pool, &f.state.blind, "ext-1")
+            .await
+            .unwrap(),
+        Some(id),
+        "the payroll number is the external id (case-insensitive)"
+    );
+
+    // The same id updates: name, role, sites, active.
+    let res = send(
+        &app,
+        "PUT",
+        "/api/v1/people/EXT-1",
+        &k.raw,
+        Some(upsert_body(
+            "Dora Nieuw-Jansen",
+            "manager",
+            &[f.site_a, f.site_b],
+            false,
+        )),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let updated = json(res).await;
+    assert_eq!(updated["id"], id.to_string());
+    assert_eq!(updated["name"], "Dora Nieuw-Jansen");
+    assert_eq!(updated["active"], false);
+    assert_eq!(updated["roles"], serde_json::json!(["manager"]));
+    let mut sites: Vec<String> = updated["sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_string())
+        .collect();
+    sites.sort();
+    let mut want = vec![f.site_a.to_string(), f.site_b.to_string()];
+    want.sort();
+    assert_eq!(sites, want);
+    assert!(!person::is_active(&pool, id).await.unwrap());
+    let people_after: i64 = sqlx::query_scalar("SELECT count(*) FROM person")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        people_after,
+        people_before + 1,
+        "an update never creates a person"
+    );
+
+    // Back to a single employee site; an identical repeat changes and audits nothing.
+    let body = upsert_body("Dora Nieuw-Jansen", "employee", &[f.site_b], true);
+    let res = send(
+        &app,
+        "PUT",
+        "/api/v1/people/EXT-1",
+        &k.raw,
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let now = json(res).await;
+    assert_eq!(
+        (
+            now["roles"].clone(),
+            now["sites"].clone(),
+            now["active"].clone()
+        ),
+        (
+            serde_json::json!(["employee"]),
+            serde_json::json!([f.site_b]),
+            serde_json::json!(true)
+        )
+    );
+    let updates = audit_actions_of(&pool, "person.updated").await.len();
+    let res = send(&app, "PUT", "/api/v1/people/EXT-1", &k.raw, Some(body)).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        audit_actions_of(&pool, "person.updated").await.len(),
+        updates
+    );
+
+    // Audit: ids and field names, no values; the key is named.
+    assert_eq!(
+        audit_actions_of(&pool, "person.created").await,
+        ["person.created"]
+    );
+    let dump: String = sqlx::query_scalar("SELECT string_agg(a::text, ' ') FROM audit_log a WHERE action LIKE 'person.%' OR action = 'role.changed'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(dump.contains(&format!("api_key:{}", k.key.id)));
+    assert!(!dump.contains("Dora") && !dump.contains("EXT-1"));
+    assert_eq!(
+        audit_actions_of(&pool, "role.changed").await.len(),
+        2,
+        "manager and back to employee"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn put_person_never_touches_admins_or_creates_privileged_roles(pool: PgPool) {
+    let f = fixture(&pool, "on").await;
+    let app = router(&f, 100);
+    let k = key(&pool, &[ApiScope::PeopleWrite], None).await;
+    person::set_payroll_number(&pool, &f.state.keys, &f.state.blind, f.admin, Some("ADM-1"))
+        .await
+        .unwrap();
+    let hr = person::create_person(&pool, &f.state.keys, &f.state.blind, "Hanna Hr", None)
+        .await
+        .unwrap()
+        .id;
+    role::assign(&pool, hr, Role::Hr, None, None).await.unwrap();
+    person::set_payroll_number(&pool, &f.state.keys, &f.state.blind, hr, Some("HR-1"))
+        .await
+        .unwrap();
+
+    for (ext, who) in [("ADM-1", f.admin), ("HR-1", hr)] {
+        let res = send(
+            &app,
+            "PUT",
+            &format!("/api/v1/people/{ext}"),
+            &k.raw,
+            Some(upsert_body("Hacked", "employee", &[f.site_a], false)),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{ext}");
+        assert!(person::is_active(&pool, who).await.unwrap());
+        let roles = role::roles_of(&pool, who).await.unwrap();
+        assert!(
+            roles
+                .iter()
+                .all(|r| matches!(r.role, Role::Admin | Role::Hr))
+                && roles.len() == 1
+        );
+    }
+    for r in ["admin", "hr", "owner"] {
+        let res = send(
+            &app,
+            "PUT",
+            "/api/v1/people/NEW-1",
+            &k.raw,
+            Some(upsert_body("Nina", r, &[f.site_a], true)),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{r}");
+    }
+    // Other invalid bodies: no sites, unknown site, empty name, extra field, bad payroll number.
+    for body in [
+        upsert_body("Nina", "employee", &[], true),
+        upsert_body("Nina", "employee", &[Uuid::new_v4()], true),
+        upsert_body("  ", "employee", &[f.site_a], true),
+        serde_json::json!({"name": "Nina", "role": "employee", "site_ids": [f.site_a], "active": true, "payroll_number": "X"}),
+        serde_json::json!({"name": "Nina"}),
+    ] {
+        let res = send(&app, "PUT", "/api/v1/people/NEW-1", &k.raw, Some(body)).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+    let too_long = "9".repeat(21);
+    let res = send(
+        &app,
+        "PUT",
+        &format!("/api/v1/people/{too_long}"),
+        &k.raw,
+        Some(upsert_body("Nina", "employee", &[f.site_a], true)),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        person::find_by_payroll_number(&pool, &f.state.blind, "NEW-1")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let privileged: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM role_assignment WHERE role IN ('admin', 'hr')")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(privileged, 2, "no admin or HR was created");
+
+    // Scope and authentication.
+    let read_only = key(&pool, &[ApiScope::PeopleRead], None).await;
+    let res = send(
+        &app,
+        "PUT",
+        "/api/v1/people/NEW-1",
+        &read_only.raw,
+        Some(upsert_body("Nina", "employee", &[f.site_a], true)),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let res = send(&app, "PUT", "/api/v1/people/NEW-1", "tr_live_nope", None).await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn put_person_with_a_site_restricted_key_stays_within_its_sites(pool: PgPool) {
+    let f = fixture(&pool, "on").await;
+    let app = router(&f, 100);
+    let a_only = key(&pool, &[ApiScope::PeopleWrite], Some(&[f.site_a])).await;
+    // Carla works at A and B: a key for A alone may not change her.
+    person::set_payroll_number(&pool, &f.state.keys, &f.state.blind, f.carla, Some("C-1"))
+        .await
+        .unwrap();
+    person::set_payroll_number(&pool, &f.state.keys, &f.state.blind, f.anna, Some("A-1"))
+        .await
+        .unwrap();
+
+    let res = send(
+        &app,
+        "PUT",
+        "/api/v1/people/NEW-2",
+        &a_only.raw,
+        Some(upsert_body("Nina", "employee", &[f.site_b], true)),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let res = send(
+        &app,
+        "PUT",
+        "/api/v1/people/NEW-2",
+        &a_only.raw,
+        Some(upsert_body("Nina", "employee", &[f.site_a, f.site_b], true)),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    assert!(
+        person::find_by_payroll_number(&pool, &f.state.blind, "NEW-2")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let res = send(
+        &app,
+        "PUT",
+        "/api/v1/people/C-1",
+        &a_only.raw,
+        Some(upsert_body(
+            "Carla Voorbeeld",
+            "employee",
+            &[f.site_a],
+            true,
+        )),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    assert_eq!(role::employee_sites(&pool, f.carla).await.unwrap().len(), 2);
+    // Within its site the key can create and update.
+    let res = send(
+        &app,
+        "PUT",
+        "/api/v1/people/NEW-2",
+        &a_only.raw,
+        Some(upsert_body("Nina", "employee", &[f.site_a], true)),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let res = send(
+        &app,
+        "PUT",
+        "/api/v1/people/A-1",
+        &a_only.raw,
+        Some(upsert_body(
+            "Anna Voorbeeld-Peeters",
+            "manager",
+            &[f.site_a],
+            true,
+        )),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(json(res).await["name"], "Anna Voorbeeld-Peeters");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn openapi_lists_hours_periods_exports_and_the_people_upsert(pool: PgPool) {
+    let f = fixture(&pool, "on").await;
+    let app = router(&f, 100);
+    let spec = json(get(&app, "/api/v1/openapi.json", &[]).await).await;
+    let scope = |path: &str, method: &str| {
+        spec["paths"][path][method]["security"][0]["bearer"][0]
+            .as_str()
+            .map(str::to_string)
+    };
+    assert_eq!(scope("/api/v1/hours", "get").as_deref(), Some("hours:read"));
+    assert_eq!(
+        scope("/api/v1/periods", "get").as_deref(),
+        Some("hours:read")
+    );
+    assert_eq!(
+        scope("/api/v1/exports/{profile}", "get").as_deref(),
+        Some("export:read")
+    );
+    assert_eq!(
+        scope("/api/v1/people/{external_id}", "put").as_deref(),
+        Some("people:write")
+    );
+    assert_eq!(
+        scope("/api/v1/people", "get").as_deref(),
+        Some("people:read")
+    );
+    let export = &spec["paths"]["/api/v1/exports/{profile}"]["get"];
+    assert!(export["responses"]["200"]["content"]["text/csv"].is_object());
+    assert!(export["responses"]["409"].is_object());
+    let params: Vec<&str> = export["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(params, ["profile", "from", "to", "site", "basis"]);
+    let put = &spec["paths"]["/api/v1/people/{external_id}"]["put"];
+    assert!(put["requestBody"].is_object());
+    assert!(put["responses"]["201"].is_object() && put["responses"]["200"].is_object());
+    for schema in [
+        "PersonUpsert",
+        "WritableRole",
+        "PersonHoursDto",
+        "HoursDayDto",
+        "SitePeriodsDto",
+        "BasisParam",
+    ] {
+        assert!(
+            spec["components"]["schemas"][schema].is_object(),
+            "{schema}"
+        );
+    }
+}

@@ -118,6 +118,8 @@ pub struct SiteRowDto {
     pub break_minutes: u32,
     pub break_after_minutes: u32,
     pub active: bool,
+    /// Payroll cost centre, set by admins.
+    pub cost_centre: Option<String>,
 }
 
 /// Validated on the server again. `id` is `None` for a new site.

@@ -3,9 +3,6 @@
 //! Timestamps are unix milliseconds, dates are local dates in the organisation time zone. The
 //! logic lives in `crate::server::hours`.
 
-// The client bundle has no caller yet: the hours screens land in a later task. Remove this then.
-#![allow(dead_code)]
-
 use chrono::NaiveDate;
 use dioxus::prelude::*;
 use domain::{EventKind, ZoneStatus};
@@ -101,7 +98,7 @@ pub struct CorrectionDto {
 }
 
 /// An event after corrections. `key` is what `correct` takes as `event_id`.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct EffectiveEventDto {
     pub key: Uuid,
     pub kind: EventKind,
@@ -254,4 +251,47 @@ pub async fn set_site_cost_centre(
     let state = app_state().await?;
     let env = staff::StaffEnv::new(&state);
     Ok(logic::set_site_cost_centre(&env, &scope, site_id, cost_centre.as_deref()).await?)
+}
+
+/// Contract and payroll number of one person (HR and admins).
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct ContractDto {
+    /// Monday first; all zero without a contract.
+    pub minutes_per_weekday: [u32; 7],
+    pub payroll_number: Option<String>,
+}
+
+/// An active validation of a site that overlaps the asked period.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ValidationDto {
+    pub from: NaiveDate,
+    pub to: NaiveDate,
+    pub validated_by_name: String,
+    /// Unix milliseconds.
+    pub validated_at: i64,
+}
+
+/// HR and admins. The contract minutes and the decrypted payroll number of a person.
+#[post("/api/hours/contract/get")]
+pub async fn person_contract(person_id: Uuid) -> Result<ContractDto, ServerFnError> {
+    use crate::server::{app_state, auth, hours as logic, staff};
+    let scope = auth::require_staff().await?;
+    let state = app_state().await?;
+    let env = staff::StaffEnv::new(&state);
+    Ok(logic::person_contract(&env, &scope, person_id).await?)
+}
+
+/// Active validations of a site that overlap `[from, to]` (at most 366 days), oldest first.
+/// Managers of the site, HR and admins.
+#[post("/api/hours/period-status")]
+pub async fn period_status(
+    site_id: Uuid,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<Vec<ValidationDto>, ServerFnError> {
+    use crate::server::{app_state, auth, hours as logic, staff};
+    let scope = auth::require_staff().await?;
+    let state = app_state().await?;
+    let env = staff::StaffEnv::new(&state);
+    Ok(logic::period_status(&env, &scope, site_id, from, to).await?)
 }

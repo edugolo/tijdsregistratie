@@ -98,6 +98,27 @@ pub async fn create_person<'e>(
     row.decrypt(keys)
 }
 
+/// Changes the display name (encrypted, with its blind index). Returns false if the person does
+/// not exist.
+pub async fn rename<'e>(
+    db: impl PgExecutor<'e>,
+    keys: &DataKeys,
+    blind: &BlindIndexKey,
+    id: Uuid,
+    display_name: &str,
+) -> Result<bool> {
+    let enc = seal_str(keys, TABLE, NAME_COLUMN, id, display_name)?;
+    let index = blind.index(&normalize_name(display_name)).to_vec();
+    let done =
+        sqlx::query("UPDATE person SET display_name_enc = $2, name_index = $3 WHERE id = $1")
+            .bind(id)
+            .bind(enc)
+            .bind(index)
+            .execute(db)
+            .await?;
+    Ok(done.rows_affected() > 0)
+}
+
 pub async fn get_person<'e>(
     db: impl PgExecutor<'e>,
     keys: &DataKeys,

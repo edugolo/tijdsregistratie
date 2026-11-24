@@ -12,6 +12,9 @@ pub enum ApiError {
     Unauthorized,
     Forbidden,
     NotFound,
+    /// The request is valid but the state of the data forbids it (an export of unvalidated
+    /// days, a payroll number that belongs to someone with a role that the API cannot change).
+    Conflict,
     RateLimited,
     InvalidRequest,
     Internal,
@@ -20,8 +23,8 @@ pub enum ApiError {
 /// Error body of every non-2xx response.
 #[derive(Serialize, ToSchema)]
 pub struct ErrorBody {
-    /// Stable code: `unauthorized`, `forbidden`, `not_found`, `rate_limited`, `invalid_request`
-    /// or `internal`.
+    /// Stable code: `unauthorized`, `forbidden`, `not_found`, `conflict`, `rate_limited`,
+    /// `invalid_request` or `internal`.
     #[schema(example = "forbidden")]
     pub error: String,
 }
@@ -32,6 +35,7 @@ impl ApiError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
+            Self::Conflict => StatusCode::CONFLICT,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::InvalidRequest => StatusCode::BAD_REQUEST,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
@@ -43,10 +47,31 @@ impl ApiError {
             Self::Unauthorized => "unauthorized",
             Self::Forbidden => "forbidden",
             Self::NotFound => "not_found",
+            Self::Conflict => "conflict",
             Self::RateLimited => "rate_limited",
             Self::InvalidRequest => "invalid_request",
             Self::Internal => "internal",
         }
+    }
+}
+
+impl From<crate::server::export::ExportError> for ApiError {
+    fn from(e: crate::server::export::ExportError) -> Self {
+        use crate::server::export::ExportError as E;
+        match e {
+            E::Forbidden => Self::Forbidden,
+            E::NotFound => Self::NotFound,
+            E::Invalid(_) => Self::InvalidRequest,
+            // Nothing is produced; GET /periods says which sites and days are not validated.
+            E::Blocked(_) | E::ProfileInvalid(_) => Self::Conflict,
+            E::Internal => Self::Internal,
+        }
+    }
+}
+
+impl From<crate::server::hours::HoursError> for ApiError {
+    fn from(e: crate::server::hours::HoursError) -> Self {
+        crate::server::export::ExportError::from(e).into()
     }
 }
 
