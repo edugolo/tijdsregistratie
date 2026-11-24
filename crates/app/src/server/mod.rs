@@ -8,6 +8,7 @@ pub mod session;
 pub mod setup;
 pub mod staff;
 pub mod state;
+pub mod theme;
 
 use axum::Extension;
 use dioxus::fullstack::FullstackContext;
@@ -130,7 +131,9 @@ pub async fn build_router(app: fn() -> dioxus::prelude::Element) -> anyhow::Resu
     let session_layer = session::layer(pool.clone(), &config).await?;
     let guard = auth::http::HttpGuard::new(&config);
     let state = AppState::new(pool, config, keys, blind)?;
-    let router = dioxus::server::router(app).layer(Extension(state));
+    let router = dioxus::server::router(app)
+        .route("/theme.css", axum::routing::get(theme::theme_css))
+        .layer(Extension(state));
     let router = auth::http::with_session(router, session_layer, guard.clone());
     Ok(auth::http::protect(router, guard))
 }

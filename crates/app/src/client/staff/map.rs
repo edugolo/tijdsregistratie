@@ -4,89 +4,69 @@ use dioxus::prelude::ServerFnError;
 use uuid::Uuid;
 
 use super::enroll::EnrollState;
-use super::people::{PersonRow, Role, RoleAssignment, RoleRow};
 use super::sites::{SiteForm, SiteRow};
-use super::team::{SiteOption, TeamMember, TodayStatus};
-use crate::api::staff::SiteOption as SiteOptionDto;
 use crate::api::staff::{
-    EnrollStateDto, PersonRowDto, RoleDto, SiteFormDto, SiteRowDto, TeamMemberDto, TodayStatusDto,
+    EnrollStateDto, PersonRowDto, RoleDto, SiteFormDto, SiteRowDto, TodayStatusDto,
 };
 
-pub fn today_from_dto(dto: TodayStatusDto) -> TodayStatus {
-    match dto {
-        TodayStatusDto::NotStarted => TodayStatus::NotStarted,
-        TodayStatusDto::Started(t) => TodayStatus::Started(t),
-        TodayStatusDto::Stopped(t) => TodayStatus::Stopped(t),
-        TodayStatusDto::OutOfZone(t) => TodayStatus::OutOfZone(t),
-        TodayStatusDto::MissingStop { since } => TodayStatus::MissingStop(since),
-    }
-}
-
-pub fn member_from_dto(dto: TeamMemberDto) -> TeamMember {
-    TeamMember {
-        id: dto.id,
-        name: dto.name,
-        device_linked: dto.device_linked,
-        today: today_from_dto(dto.today),
-    }
-}
-
-pub fn site_option_from_dto(dto: SiteOptionDto) -> SiteOption {
-    SiteOption {
-        id: dto.id,
-        name: dto.name,
-    }
-}
-
-pub fn role_from_dto(dto: RoleDto) -> Role {
-    match dto {
-        RoleDto::Employee => Role::Employee,
-        RoleDto::Manager => Role::Manager,
-        RoleDto::Admin => Role::Admin,
-    }
-}
-
-pub fn role_to_dto(role: Role) -> RoleDto {
+/// Translation key of the label of a role.
+pub fn role_key(role: RoleDto) -> &'static str {
     match role {
-        Role::Employee => RoleDto::Employee,
-        Role::Manager => RoleDto::Manager,
-        Role::Admin => RoleDto::Admin,
+        RoleDto::Employee => "role.employee",
+        RoleDto::Manager => "role.manager",
+        RoleDto::Admin => "role.admin",
     }
 }
 
-/// Role rows carry no id of their own; derive a stable one from the person and the row position.
-pub fn role_row_id(person: Uuid, index: usize) -> Uuid {
-    Uuid::from_u128(person.as_u128() ^ (index as u128 + 1))
+/// The single role shown for a person: the highest one, employee when they have none.
+pub fn highest_role(person: &PersonRowDto) -> RoleDto {
+    [RoleDto::Admin, RoleDto::Manager]
+        .into_iter()
+        .find(|wanted| person.roles.iter().any(|r| r.role == *wanted))
+        .unwrap_or(RoleDto::Employee)
 }
 
-pub fn person_from_dto(dto: PersonRowDto) -> PersonRow {
-    let person = dto.id;
-    PersonRow {
-        id: person,
-        name: dto.name,
-        active: dto.active,
-        roles: dto
-            .roles
-            .into_iter()
-            .enumerate()
-            .map(|(index, r)| RoleRow {
-                id: role_row_id(person, index),
-                role: role_from_dto(r.role),
-                site_name: r.site_name,
-            })
-            .collect(),
+/// Ids of the schools a person works or manages at, without duplicates.
+pub fn person_sites(person: &PersonRowDto) -> Vec<Uuid> {
+    let mut sites: Vec<Uuid> = person.roles.iter().filter_map(|r| r.site_id).collect();
+    sites.sort();
+    sites.dedup();
+    sites
+}
+
+/// "BS De Linde, BS De Wilg": the distinct school names of a person.
+pub fn school_names(person: &PersonRowDto) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    for name in person.roles.iter().filter_map(|r| r.site_name.as_deref()) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
     }
+    names.join(", ")
 }
 
-/// Finds the person, role and site behind a role row id.
-pub fn find_role(people: &[PersonRowDto], role_row: Uuid) -> Option<(Uuid, RoleDto, Option<Uuid>)> {
-    people.iter().find_map(|p| {
-        p.roles
-            .iter()
-            .enumerate()
-            .find(|(index, _)| role_row_id(p.id, *index) == role_row)
-            .map(|(_, r)| (p.id, r.role, r.site_id))
-    })
+/// Case-insensitive "contains" on the name; an empty query matches everyone.
+pub fn matches_query(name: &str, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    query.is_empty() || name.to_lowercase().contains(&query)
+}
+
+/// `current` with `site` added or removed, in a stable order.
+pub fn toggle_site(current: &[Uuid], site: Uuid, on: bool) -> Vec<Uuid> {
+    let mut sites: Vec<Uuid> = current.iter().copied().filter(|s| *s != site).collect();
+    if on {
+        sites.push(site);
+    }
+    sites.sort();
+    sites
+}
+
+/// The time of a start from today, for "sinds 07:42".
+pub fn started_at(status: &TodayStatusDto) -> Option<&str> {
+    match status {
+        TodayStatusDto::Started(time) => Some(time),
+        _ => None,
+    }
 }
 
 pub fn site_from_dto(dto: SiteRowDto) -> SiteRow {
@@ -114,10 +94,6 @@ pub fn site_form_to_dto(form: SiteForm) -> SiteFormDto {
         break_minutes: form.break_minutes,
         break_after_minutes: form.break_after_minutes,
     }
-}
-
-pub fn assignment_args(a: &RoleAssignment) -> (Uuid, RoleDto, Option<Uuid>) {
-    (a.person, role_to_dto(a.role), a.site)
 }
 
 pub fn enroll_state_from_dto(dto: EnrollStateDto) -> EnrollState {
@@ -148,104 +124,75 @@ pub fn is_auth_error(error: &ServerFnError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::staff::RoleRowDto;
 
     fn id(n: u128) -> Uuid {
         Uuid::from_u128(n)
     }
 
-    #[test]
-    fn today_status_maps_all_variants() {
-        assert_eq!(
-            today_from_dto(TodayStatusDto::NotStarted),
-            TodayStatus::NotStarted
-        );
-        assert_eq!(
-            today_from_dto(TodayStatusDto::Started("07:42".into())),
-            TodayStatus::Started("07:42".into())
-        );
-        assert_eq!(
-            today_from_dto(TodayStatusDto::Stopped("15:30".into())),
-            TodayStatus::Stopped("15:30".into())
-        );
-        assert_eq!(
-            today_from_dto(TodayStatusDto::OutOfZone("07:50".into())),
-            TodayStatus::OutOfZone("07:50".into())
-        );
-        assert_eq!(
-            today_from_dto(TodayStatusDto::MissingStop {
-                since: "di 10/03 07:42".into()
-            }),
-            TodayStatus::MissingStop("di 10/03 07:42".into())
-        );
-    }
-
-    #[test]
-    fn member_keeps_device_flag_and_status() {
-        let m = member_from_dto(TeamMemberDto {
-            id: id(1),
-            name: "Fatima".into(),
-            active: true,
-            device_linked: true,
-            today: TodayStatusDto::Started("07:42".into()),
-        });
-        assert_eq!(m.id, id(1));
-        assert_eq!(m.name, "Fatima");
-        assert!(m.device_linked);
-        assert_eq!(m.today, TodayStatus::Started("07:42".into()));
-    }
-
-    #[test]
-    fn roles_round_trip() {
-        for dto in [RoleDto::Employee, RoleDto::Manager, RoleDto::Admin] {
-            assert_eq!(role_to_dto(role_from_dto(dto)), dto);
-        }
-    }
-
-    fn person_dto() -> PersonRowDto {
+    fn person(roles: Vec<(RoleDto, Option<u128>, Option<&str>)>) -> PersonRowDto {
         PersonRowDto {
             id: id(0xAB00),
             name: "Els".into(),
             active: true,
-            roles: vec![
-                crate::api::staff::RoleRowDto {
-                    role: RoleDto::Manager,
-                    site_id: Some(id(7)),
-                    site_name: Some("Linde".into()),
-                },
-                crate::api::staff::RoleRowDto {
-                    role: RoleDto::Admin,
-                    site_id: None,
-                    site_name: None,
-                },
-            ],
+            device_linked: false,
+            can_manage: true,
+            roles: roles
+                .into_iter()
+                .map(|(role, site, name)| RoleRowDto {
+                    role,
+                    site_id: site.map(id),
+                    site_name: name.map(str::to_string),
+                })
+                .collect(),
         }
     }
 
     #[test]
-    fn person_roles_get_distinct_stable_ids() {
-        let row = person_from_dto(person_dto());
-        assert_eq!(row.roles.len(), 2);
-        assert_ne!(row.roles[0].id, row.roles[1].id);
-        assert_eq!(row.roles[0].id, role_row_id(id(0xAB00), 0));
-        assert_eq!(row.roles[0].role, Role::Manager);
-        assert_eq!(row.roles[0].site_name.as_deref(), Some("Linde"));
-        assert_eq!(row.roles[1].site_name, None);
+    fn highest_role_prefers_admin_then_manager() {
+        let both = person(vec![
+            (RoleDto::Employee, Some(1), Some("Linde")),
+            (RoleDto::Manager, Some(2), Some("Wilg")),
+        ]);
+        assert_eq!(highest_role(&both), RoleDto::Manager);
+        let admin = person(vec![(RoleDto::Admin, None, None)]);
+        assert_eq!(highest_role(&admin), RoleDto::Admin);
+        assert_eq!(highest_role(&person(vec![])), RoleDto::Employee);
     }
 
     #[test]
-    fn role_rows_of_different_people_do_not_collide() {
-        assert_ne!(role_row_id(id(0x1000), 0), role_row_id(id(0x2000), 0));
+    fn sites_and_names_are_distinct() {
+        let p = person(vec![
+            (RoleDto::Employee, Some(2), Some("Wilg")),
+            (RoleDto::Manager, Some(2), Some("Wilg")),
+            (RoleDto::Employee, Some(1), Some("Linde")),
+            (RoleDto::Admin, None, None),
+        ]);
+        assert_eq!(person_sites(&p), vec![id(1), id(2)]);
+        assert_eq!(school_names(&p), "Wilg, Linde");
     }
 
     #[test]
-    fn find_role_resolves_row_id() {
-        let people = vec![person_dto()];
-        let row = role_row_id(id(0xAB00), 0);
+    fn search_ignores_case_and_blank_queries() {
+        assert!(matches_query("Fatima El Amrani", "  amr"));
+        assert!(matches_query("Fatima", ""));
+        assert!(!matches_query("Fatima", "jan"));
+    }
+
+    #[test]
+    fn toggling_a_site_adds_and_removes() {
+        assert_eq!(toggle_site(&[id(2)], id(1), true), vec![id(1), id(2)]);
+        assert_eq!(toggle_site(&[id(1), id(2)], id(1), false), vec![id(2)]);
+        assert_eq!(toggle_site(&[id(1)], id(1), true), vec![id(1)]);
+    }
+
+    #[test]
+    fn only_a_start_has_a_start_time() {
         assert_eq!(
-            find_role(&people, row),
-            Some((id(0xAB00), RoleDto::Manager, Some(id(7))))
+            started_at(&TodayStatusDto::Started("07:42".into())),
+            Some("07:42")
         );
-        assert_eq!(find_role(&people, id(99)), None);
+        assert_eq!(started_at(&TodayStatusDto::Stopped("15:30".into())), None);
     }
 
     #[test]
@@ -280,16 +227,6 @@ mod tests {
         });
         assert!(!row.active);
         assert_eq!(row.radius_m, 100);
-    }
-
-    #[test]
-    fn assignment_maps_to_server_args() {
-        let a = RoleAssignment {
-            person: id(1),
-            role: Role::Manager,
-            site: Some(id(2)),
-        };
-        assert_eq!(assignment_args(&a), (id(1), RoleDto::Manager, Some(id(2))));
     }
 
     #[test]

@@ -45,6 +45,26 @@ pub struct TeamMemberDto {
     pub today: TodayStatusDto,
 }
 
+/// One person on the "Vandaag" page.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct TodayRowDto {
+    pub id: Uuid,
+    pub name: String,
+    pub today: TodayStatusDto,
+}
+
+/// Counters and lists of the "Vandaag" page.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct TodayOverviewDto {
+    pub working: u32,
+    pub not_started: u32,
+    pub out_of_zone: u32,
+    pub not_stopped: u32,
+    /// Not stopped, out of the zone, then not started; each group sorted by name.
+    pub attention: Vec<TodayRowDto>,
+    pub working_rows: Vec<TodayRowDto>,
+}
+
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct EnrollmentDto {
     /// Rendered SVG markup of the QR code.
@@ -108,6 +128,9 @@ pub struct PersonRowDto {
     pub id: Uuid,
     pub name: String,
     pub active: bool,
+    pub device_linked: bool,
+    /// Whether the caller may run identity actions (device, deactivate, sites) on this person.
+    pub can_manage: bool,
     pub roles: Vec<RoleRowDto>,
 }
 
@@ -119,13 +142,43 @@ pub async fn staff_context() -> Result<StaffContext, ServerFnError> {
     Ok(staff::staff_context(&staff::StaffEnv::new(&state), &scope).await?)
 }
 
-#[post("/api/staff/team")]
-pub async fn team(site_id: Uuid) -> Result<Vec<TeamMemberDto>, ServerFnError> {
+/// `site_id` `None` covers all sites in the caller's scope.
+#[post("/api/staff/today")]
+pub async fn today_overview(site_id: Option<Uuid>) -> Result<TodayOverviewDto, ServerFnError> {
     use crate::server::{app_state, auth, staff};
-    let scope = auth::require_manager_of(site_id).await?;
+    let scope = auth::require_staff().await?;
     let state = app_state().await?;
     let env = staff::StaffEnv::new(&state);
-    Ok(staff::team(&env, &scope, site_id, chrono::Utc::now()).await?)
+    Ok(staff::today_overview(&env, &scope, site_id, chrono::Utc::now()).await?)
+}
+
+/// Everyone in the caller's scope, optionally limited to one site.
+#[post("/api/staff/people")]
+pub async fn people(site_filter: Option<Uuid>) -> Result<Vec<PersonRowDto>, ServerFnError> {
+    use crate::server::{app_state, auth, staff};
+    let scope = auth::require_staff().await?;
+    let state = app_state().await?;
+    Ok(staff::people(&staff::StaffEnv::new(&state), &scope, site_filter).await?)
+}
+
+/// Admin only.
+#[post("/api/admin/people/role")]
+pub async fn set_person_role(person_id: Uuid, role: RoleDto) -> Result<(), ServerFnError> {
+    use crate::server::{app_state, auth, staff};
+    let scope = auth::require_admin().await?;
+    let state = app_state().await?;
+    let env = staff::StaffEnv::new(&state);
+    Ok(staff::set_person_role(&env, &scope, person_id, role).await?)
+}
+
+/// Admins for any sites, managers for sites and employees in their own scope.
+#[post("/api/staff/people/sites")]
+pub async fn set_person_sites(person_id: Uuid, site_ids: Vec<Uuid>) -> Result<(), ServerFnError> {
+    use crate::server::{app_state, auth, staff};
+    let scope = auth::require_staff().await?;
+    let state = app_state().await?;
+    let env = staff::StaffEnv::new(&state);
+    Ok(staff::set_person_sites(&env, &scope, person_id, site_ids).await?)
 }
 
 #[post("/api/staff/members/add")]
@@ -196,46 +249,4 @@ pub async fn set_site_active(site_id: Uuid, active: bool) -> Result<(), ServerFn
     let state = app_state().await?;
     let env = staff::StaffEnv::new(&state);
     Ok(staff::set_site_active(&env, &scope, site_id, active).await?)
-}
-
-#[post("/api/admin/people")]
-pub async fn list_people() -> Result<Vec<PersonRowDto>, ServerFnError> {
-    use crate::server::{app_state, auth, staff};
-    let scope = auth::require_admin().await?;
-    let state = app_state().await?;
-    Ok(staff::list_people(&staff::StaffEnv::new(&state), &scope).await?)
-}
-
-#[post("/api/admin/people/add")]
-pub async fn add_person(name: String) -> Result<PersonRowDto, ServerFnError> {
-    use crate::server::{app_state, auth, staff};
-    let scope = auth::require_admin().await?;
-    let state = app_state().await?;
-    Ok(staff::add_person(&staff::StaffEnv::new(&state), &scope, &name).await?)
-}
-
-#[post("/api/admin/roles/assign")]
-pub async fn assign_role(
-    person_id: Uuid,
-    role: RoleDto,
-    site_id: Option<Uuid>,
-) -> Result<(), ServerFnError> {
-    use crate::server::{app_state, auth, staff};
-    let scope = auth::require_admin().await?;
-    let state = app_state().await?;
-    let env = staff::StaffEnv::new(&state);
-    Ok(staff::assign_role(&env, &scope, person_id, role, site_id).await?)
-}
-
-#[post("/api/admin/roles/revoke")]
-pub async fn revoke_role(
-    person_id: Uuid,
-    role: RoleDto,
-    site_id: Option<Uuid>,
-) -> Result<(), ServerFnError> {
-    use crate::server::{app_state, auth, staff};
-    let scope = auth::require_admin().await?;
-    let state = app_state().await?;
-    let env = staff::StaffEnv::new(&state);
-    Ok(staff::revoke_role(&env, &scope, person_id, role, site_id).await?)
 }

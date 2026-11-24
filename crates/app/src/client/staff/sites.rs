@@ -150,7 +150,7 @@ pub fn SitesPage(
     rsx! {
         section { class: "st-page",
             div { class: "st-page-head",
-                h1 { {t("sites.title")} }
+                h2 { {t("sites.title")} }
                 button {
                     class: "st-btn",
                     r#type: "button",

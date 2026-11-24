@@ -16,8 +16,8 @@ use dioxus::prelude::*;
 use crate::api::setup::setup_required;
 use employee::{EnrollPage, HomePage, LegacyCode, LegacyEnrollPage, LoginPage};
 use preview::{PreviewAll, PreviewOne, ScreenId};
-use setup::{OrgSettingsPage, SetupPage};
-use staff::pages::{StaffPeoplePage, StaffSitesPage, StaffTeamPage};
+use setup::SetupPage;
+use staff::{StaffLayout, StaffPeoplePage, StaffSettingsPage, StaffTodayPage};
 
 #[derive(Clone, Routable, PartialEq)]
 #[rustfmt::skip]
@@ -31,14 +31,17 @@ enum Route {
         LegacyEnrollPage { code: LegacyCode },
         #[route("/aanmelden")]
         LoginPage {},
-        #[route("/beheer")]
-        StaffTeamPage {},
-        #[route("/beheer/scholen")]
-        StaffSitesPage {},
-        #[route("/beheer/personen")]
-        StaffPeoplePage {},
-        #[route("/beheer/organisatie")]
-        OrgSettingsPage {},
+        #[layout(StaffLayout)]
+            #[route("/beheer")]
+            StaffTodayPage {},
+            #[route("/beheer/mensen?:open")]
+            StaffPeoplePage { open: String },
+            #[route("/beheer/instellingen")]
+            StaffSettingsPage {},
+        #[end_layout]
+        #[redirect("/beheer/scholen", || Route::StaffSettingsPage {})]
+        #[redirect("/beheer/organisatie", || Route::StaffSettingsPage {})]
+        #[redirect("/beheer/personen", || Route::StaffPeoplePage { open: String::new() })]
         #[route("/setup")]
         SetupPage {},
         #[route("/preview")]
@@ -48,22 +51,19 @@ enum Route {
 }
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
+/// Colour roles for the organisation brand colour, served by the app itself.
+const THEME_CSS: &str = "/theme.css";
 
 #[component]
 pub fn App() -> Element {
     use_hook(employee::init_install_prompt);
-    let branding = employee::provide_branding();
-    let style = employee::brand_style(
-        branding
-            .read()
-            .as_ref()
-            .and_then(Option::as_ref)
-            .map(|b| b.brand_color.as_str()),
-    );
+    employee::provide_branding();
+    use_hook(components::apply_stored_appearance);
     rsx! {
+        document::Stylesheet { href: THEME_CSS }
         document::Stylesheet { href: MAIN_CSS }
         pwa::PwaHead {}
-        div { style, Router::<Route> {} }
+        Router::<Route> {}
     }
 }
 

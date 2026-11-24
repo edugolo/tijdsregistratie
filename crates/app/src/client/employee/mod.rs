@@ -7,7 +7,7 @@ mod home;
 mod logic;
 mod login;
 
-pub use branding::{brand_style, provide_branding, use_org_name};
+pub use branding::{provide_branding, use_org_name};
 pub use enroll::{EnrollPage, LegacyCode, LegacyEnrollPage};
 pub use env::init_install_prompt;
 pub use home::HomePage;
@@ -22,6 +22,6 @@ use crate::client::Route;
 fn go(nav: Navigator, destination: Destination) {
     match destination {
         Destination::Home => nav.replace(Route::HomePage {}),
-        Destination::Staff => nav.replace(Route::StaffTeamPage {}),
+        Destination::Staff => nav.replace(Route::StaffTodayPage {}),
     };
 }

@@ -21,7 +21,8 @@ pub fn PwaHead() -> Element {
         document::Link { rel: "icon", href: "/favicon.ico", sizes: "48x48" }
         document::Link { rel: "icon", href: "/icon.svg", r#type: "image/svg+xml", sizes: "any" }
         document::Link { rel: "apple-touch-icon", href: "/apple-touch-icon.png" }
-        document::Meta { name: "theme-color", content: "#1e3a8a" }
+        // Static fallback (light surface of the default brand): the real colours come from /theme.css.
+        document::Meta { name: "theme-color", content: "#faf8ff" }
         document::Meta { name: "apple-mobile-web-app-capable", content: "yes" }
         document::Meta { name: "mobile-web-app-capable", content: "yes" }
         document::Meta { name: "apple-mobile-web-app-title", content: "Tijd" }

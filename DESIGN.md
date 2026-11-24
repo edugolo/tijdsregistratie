@@ -61,22 +61,42 @@ The organisation name and logo in the mockups are placeholders; branding is conf
 
 ## 4. Visual language
 
-Colours are tokens; the brand colour is configurable per deployment. Status colours are fixed.
+Colours are Material 3 roles, generated from one seed: the organisation's brand colour
+(default `#1e3a8a`, configurable in the settings). Nothing in the CSS hard-codes a colour.
 
-| Token | Default | Use |
-|---|---|---|
-| `--brand` | `#1e3a8a` | primary buttons, header logo |
-| `--ink` | `#0f172a` | main text |
-| `--sub` | `#64748b` | secondary text |
-| `--bg` | `#f8fafc` | app background |
-| `--surface` | `#ffffff` | cards |
-| `--line` | `#e2e8f0` | borders, dividers |
-| `--start` | `#16a34a` | START button, "in zone", "gekoppeld" |
-| `--stop` | `#dc2626` | STOP button |
-| `--warn` | `#d97706` | out of zone, no location, no device |
+**Seed to scheme.** The server turns the seed into a full scheme with the Material `SchemeFidelity`
+variant at standard contrast and serves it as `/theme.css` (crate `crates/theme`). Fidelity keeps the
+seed recognisable as the primary container; the other roles are derived tones of the same hue. The
+sheet defines custom properties `--md-<role>` for light on `:root`, and the dark set both under
+`@media (prefers-color-scheme: dark)` and under `:root[data-theme="dark"]`. `data-theme="light"`
+forces light. The reference values for the default seed are in `docs/design/m3-scheme.json`.
+
+| Role (`--md-…`) | Use |
+|---|---|
+| `primary`, `on-primary` | primary buttons, header logo, focus ring |
+| `primary-container`, `on-primary-container` | brand accents |
+| `secondary-container`, `on-secondary-container` | selected states, icon tiles |
+| `tertiary-container`, `on-tertiary-container` | complementary accent |
+| `error`, `on-error`, `error-container`, `on-error-container` | failures, destructive actions |
+| `surface`, `surface-container-lowest` … `-highest` | app background and card levels |
+| `on-surface`, `on-surface-variant` | main and secondary text |
+| `outline`, `outline-variant` | borders, dividers |
+| `inverse-surface`, `inverse-on-surface` | snackbars, preview frames |
+| `ok`, `ok-container`, `on-ok-container` | in zone, "gekoppeld" |
+| `warn`, `warn-container`, `on-warn-container` | out of zone, no location, no device |
+| `start`, `on-start` / `stop`, `on-stop` | the START and STOP circle |
+
+Status roles (ok, warn, start, stop) start from fixed greens, ambers and reds and are harmonised
+towards the seed hue, with the same tone rules as the other roles (container 90/30, on-container
+10/90, solid 40/70). Text always uses the matching `on-*` role of its background.
+
+**Light, dark, system.** The default follows the system. Each device can pick Systeem, Licht or
+Donker (component `AppearancePicker`); the choice is kept in `localStorage` (`tr-theme`) and applied
+as `data-theme` on `<html>` by the app on start, so a device that overrides its system setting can
+flash briefly on load.
 
 - Status is never conveyed by colour alone: always an icon and a word as well.
-- Dark mode follows the system setting; status colours keep at least 4.5:1 contrast on their background.
+- Status colours keep at least 4.5:1 contrast on their container in light and dark.
 - Typography: system font stack. Body 16 px minimum on employee screens; titles 20–24 px; the main
   action label 24 px bold.
 - Icons: Lucide, 2 px stroke.

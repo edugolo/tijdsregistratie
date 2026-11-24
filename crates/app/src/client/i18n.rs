@@ -7,6 +7,11 @@ pub fn t(key: &str) -> &str {
         "common.loading" => "Even laden...",
         "nav.staff" => "Beheer",
 
+        "appearance.title" => "Weergave",
+        "appearance.system" => "Systeem",
+        "appearance.light" => "Licht",
+        "appearance.dark" => "Donker",
+
         "action.start" => "START",
         "action.stop" => "STOP",
         "action.start_label" => "Start je dag",

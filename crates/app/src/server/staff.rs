@@ -19,7 +19,7 @@ use uuid::Uuid;
 use super::AppState;
 use crate::api::staff::{
     EnrollStateDto, EnrollmentDto, PersonRowDto, RoleDto, RoleRowDto, SiteFormDto, SiteOption,
-    SiteRowDto, StaffContext, TeamMemberDto, TodayStatusDto,
+    SiteRowDto, StaffContext, TeamMemberDto, TodayOverviewDto, TodayRowDto, TodayStatusDto,
 };
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -214,6 +214,20 @@ fn check_site(scope: &StaffScope, site_id: Uuid) -> Result<()> {
         .ok_or(StaffError::Forbidden)
 }
 
+/// Pure part of the person check for managers: a plain employee (no manager or admin role) whose
+/// employee sites are ALL managed by the scope. People who also work at another site are
+/// admin-only. Admins always pass.
+fn may_manage(scope: &StaffScope, roles: &[role::RoleAssignment]) -> bool {
+    if scope.is_admin {
+        return true;
+    }
+    if roles.iter().any(|r| r.role != Role::Employee) {
+        return false;
+    }
+    let sites: Vec<Uuid> = roles.iter().filter_map(|r| r.site_id).collect();
+    role::scope_covers_all_sites(scope, &sites)
+}
+
 /// Person scope: admins may act on anyone who exists. Managers only on plain employees whose
 /// employee sites are ALL managed by them (never on a manager or admin, and not on people who also
 /// work at another site: those are admin-only). Unknown people look the same as out-of-scope ones
@@ -225,15 +239,10 @@ async fn check_person(env: &StaffEnv<'_>, scope: &StaffScope, person_id: Uuid) -
             .map(|_| ())
             .ok_or(StaffError::NotFound);
     }
-    let sites = role::employee_sites(env.pool, person_id).await?;
-    if !role::scope_covers_all_sites(scope, &sites) {
-        return Err(StaffError::Forbidden);
-    }
     let roles = role::roles_of(env.pool, person_id).await?;
-    if roles.iter().any(|r| r.role != Role::Employee) {
-        return Err(StaffError::Forbidden);
-    }
-    Ok(())
+    may_manage(scope, &roles)
+        .then_some(())
+        .ok_or(StaffError::Forbidden)
 }
 
 /// Starts the transaction in which a mutation and its audit row are committed together.
@@ -302,14 +311,6 @@ fn role_dto(role: Role) -> RoleDto {
     }
 }
 
-fn role_from_dto(role: RoleDto) -> Role {
-    match role {
-        RoleDto::Employee => Role::Employee,
-        RoleDto::Manager => Role::Manager,
-        RoleDto::Admin => Role::Admin,
-    }
-}
-
 // --- manager and admin ---
 
 pub async fn staff_context(env: &StaffEnv<'_>, scope: &StaffScope) -> Result<StaffContext> {
@@ -345,36 +346,93 @@ fn member_dto(p: &person::Person, device_linked: bool, today: TodayStatusDto) ->
     }
 }
 
-pub async fn team(
+/// Today's status per person, in the order of `people`.
+async fn statuses(
     env: &StaffEnv<'_>,
-    scope: &StaffScope,
-    site_id: Uuid,
+    people: &[person::Person],
     now: DateTime<Utc>,
-) -> Result<Vec<TeamMemberDto>> {
-    check_site(scope, site_id)?;
-    let people = person::list_people_for_sites(env.pool, env.keys, &[site_id]).await?;
+) -> Result<Vec<TodayStatusDto>> {
     let ids: Vec<Uuid> = people.iter().map(|p| p.id).collect();
     let tz = settings::get_settings(env.pool).await?.timezone;
     let (from, to) = day_bounds(now, tz);
     let events = time_event::events_between(env.pool, &ids, from, to).await?;
     let previous = time_event::last_events_before(env.pool, &ids, from).await?;
-    let mut members = Vec::with_capacity(people.len());
-    for p in &people {
-        let mine: Vec<EventRow> = events
+    Ok(people
+        .iter()
+        .map(|p| {
+            let mine: Vec<EventRow> = events
+                .iter()
+                .filter(|e| e.person_id == p.id)
+                .cloned()
+                .collect();
+            if mine.is_empty() {
+                missing_stop(previous.iter().find(|e| e.person_id == p.id), tz)
+                    .unwrap_or(TodayStatusDto::NotStarted)
+            } else {
+                today_status(&mine, tz)
+            }
+        })
+        .collect())
+}
+
+/// The "Vandaag" overview for one site, or for all sites in scope when `site_id` is `None`.
+/// Counts cover active employees: working (started in the zone), not started, started outside
+/// the zone, and not stopped (a start from an earlier day). People who already stopped are in
+/// no counter. `attention` lists everyone who needs a look, `working_rows` those at work.
+pub async fn today_overview(
+    env: &StaffEnv<'_>,
+    scope: &StaffScope,
+    site_id: Option<Uuid>,
+    now: DateTime<Utc>,
+) -> Result<TodayOverviewDto> {
+    let site_ids = match site_id {
+        Some(id) => {
+            check_site(scope, id)?;
+            vec![id]
+        }
+        None if scope.is_admin => site::list_sites(env.pool, env.keys, true)
+            .await?
             .iter()
-            .filter(|e| e.person_id == p.id)
-            .cloned()
-            .collect();
-        let linked = passkey::count_active(env.pool, p.id).await? > 0;
-        let today = if mine.is_empty() {
-            missing_stop(previous.iter().find(|e| e.person_id == p.id), tz)
-                .unwrap_or(TodayStatusDto::NotStarted)
-        } else {
-            today_status(&mine, tz)
+            .map(|s| s.id)
+            .collect(),
+        None => scope.site_ids.clone(),
+    };
+    let people: Vec<person::Person> = person::list_people_for_sites(env.pool, env.keys, &site_ids)
+        .await?
+        .into_iter()
+        .filter(|p| p.active)
+        .collect();
+    let statuses = statuses(env, &people, now).await?;
+    let mut overview = TodayOverviewDto::default();
+    let mut attention = [Vec::new(), Vec::new(), Vec::new()];
+    for (p, today) in people.iter().zip(statuses) {
+        let row = TodayRowDto {
+            id: p.id,
+            name: p.display_name.clone(),
+            today: today.clone(),
         };
-        members.push(member_dto(p, linked, today));
+        match today {
+            TodayStatusDto::Started(_) => {
+                overview.working += 1;
+                overview.working_rows.push(row);
+            }
+            TodayStatusDto::Stopped(_) => {}
+            TodayStatusDto::MissingStop { .. } => {
+                overview.not_stopped += 1;
+                attention[0].push(row);
+            }
+            TodayStatusDto::OutOfZone(_) => {
+                overview.out_of_zone += 1;
+                attention[1].push(row);
+            }
+            TodayStatusDto::NotStarted => {
+                overview.not_started += 1;
+                attention[2].push(row);
+            }
+        }
     }
-    Ok(members)
+    overview.attention = attention.into_iter().flatten().collect();
+    Ok(overview)
 }
 
 pub async fn add_member(
@@ -592,28 +650,6 @@ pub async fn set_site_active(
     commit(tx).await
 }
 
-async fn person_row(
-    env: &StaffEnv<'_>,
-    p: &person::Person,
-    site_names: &HashMap<Uuid, String>,
-) -> Result<PersonRowDto> {
-    let roles = role::roles_of(env.pool, p.id)
-        .await?
-        .into_iter()
-        .map(|r| RoleRowDto {
-            role: role_dto(r.role),
-            site_id: r.site_id,
-            site_name: r.site_id.and_then(|id| site_names.get(&id).cloned()),
-        })
-        .collect();
-    Ok(PersonRowDto {
-        id: p.id,
-        name: p.display_name.clone(),
-        active: p.active,
-        roles,
-    })
-}
-
 async fn site_names(env: &StaffEnv<'_>) -> Result<HashMap<Uuid, String>> {
     Ok(site::list_sites(env.pool, env.keys, false)
         .await?
@@ -622,113 +658,167 @@ async fn site_names(env: &StaffEnv<'_>) -> Result<HashMap<Uuid, String>> {
         .collect())
 }
 
-pub async fn list_people(env: &StaffEnv<'_>, scope: &StaffScope) -> Result<Vec<PersonRowDto>> {
-    require_admin(scope)?;
+/// Everyone in scope, optionally limited to one site. Admins see all people; managers see the
+/// people with any role at one of their sites. `can_manage` tells whether the caller may run
+/// identity actions on that person (the server checks again on every action).
+pub async fn people(
+    env: &StaffEnv<'_>,
+    scope: &StaffScope,
+    site_filter: Option<Uuid>,
+) -> Result<Vec<PersonRowDto>> {
+    if let Some(id) = site_filter {
+        check_site(scope, id)?;
+    }
     let names = site_names(env).await?;
     let mut rows = Vec::new();
     for p in person::list_all_people(env.pool, env.keys).await? {
-        rows.push(person_row(env, &p, &names).await?);
+        let roles = role::roles_of(env.pool, p.id).await?;
+        let at = |site: Uuid| roles.iter().any(|r| r.site_id == Some(site));
+        if !scope.is_admin && !scope.site_ids.iter().any(|s| at(*s)) {
+            continue;
+        }
+        if site_filter.is_some_and(|id| !at(id)) {
+            continue;
+        }
+        rows.push(PersonRowDto {
+            id: p.id,
+            name: p.display_name.clone(),
+            active: p.active,
+            device_linked: passkey::count_active(env.pool, p.id).await? > 0,
+            can_manage: may_manage(scope, &roles),
+            roles: roles
+                .iter()
+                .map(|r| RoleRowDto {
+                    role: role_dto(r.role),
+                    site_id: r.site_id,
+                    site_name: r.site_id.and_then(|id| names.get(&id).cloned()),
+                })
+                .collect(),
+        });
     }
     Ok(rows)
 }
 
-pub async fn add_person(
-    env: &StaffEnv<'_>,
-    scope: &StaffScope,
-    name: &str,
-) -> Result<PersonRowDto> {
-    require_admin(scope)?;
-    let name = validate_name(name)?;
-    let mut tx = begin(env).await?;
-    let p =
-        person::create_person(&mut *tx, env.keys, env.blind, &name, Some(scope.person_id)).await?;
-    audit(
-        &mut *tx,
-        scope,
-        "person.created",
-        "person",
-        p.id,
-        &["display_name"],
-    )
-    .await?;
-    commit(tx).await?;
-    person_row(env, &p, &HashMap::new()).await
-}
-
-/// Admin is organisation-wide (no site); employee and manager need an existing site.
-async fn check_role_target(env: &StaffEnv<'_>, role: RoleDto, site_id: Option<Uuid>) -> Result<()> {
-    match (role, site_id) {
-        (RoleDto::Admin, None) => Ok(()),
-        (RoleDto::Admin, Some(_)) | (_, None) => Err(StaffError::Invalid("site")),
-        (_, Some(id)) => site::get_site(env.pool, env.keys, id)
-            .await?
-            .map(|_| ())
-            .ok_or(StaffError::NotFound),
-    }
-}
-
-pub async fn assign_role(
+/// Sets the single role of a person (admin only). The sites of the person stay: switching to
+/// employee or manager turns every site role into that role, admin only adds the
+/// organisation-wide role. A manager needs at least one site.
+pub async fn set_person_role(
     env: &StaffEnv<'_>,
     scope: &StaffScope,
     person_id: Uuid,
-    role: RoleDto,
-    site_id: Option<Uuid>,
+    new: RoleDto,
 ) -> Result<()> {
     require_admin(scope)?;
-    check_role_target(env, role, site_id).await?;
     check_person(env, scope, person_id).await?;
+    if new != RoleDto::Admin && person_id == scope.person_id {
+        return Err(StaffError::Invalid("self"));
+    }
+    let current = role::roles_of(env.pool, person_id).await?;
+    let mut sites: Vec<Uuid> = current
+        .iter()
+        .filter(|r| r.role != Role::Admin)
+        .filter_map(|r| r.site_id)
+        .collect();
+    sites.sort();
+    sites.dedup();
+    if new == RoleDto::Manager && sites.is_empty() {
+        return Err(StaffError::Invalid("site"));
+    }
     let mut tx = begin(env).await?;
-    let changed = role::assign(
+    role::lock_admin_changes(&mut tx).await?;
+    let by = Some(scope.person_id);
+    match new {
+        RoleDto::Admin => {
+            role::assign(&mut *tx, person_id, Role::Admin, None, by).await?;
+        }
+        RoleDto::Employee | RoleDto::Manager => {
+            keep_one_working_admin(&mut tx, person_id).await?;
+            let (keep, drop) = if new == RoleDto::Manager {
+                (Role::Manager, Role::Employee)
+            } else {
+                (Role::Employee, Role::Manager)
+            };
+            role::revoke(&mut *tx, person_id, Role::Admin, None).await?;
+            for site in &sites {
+                role::revoke(&mut *tx, person_id, drop, Some(*site)).await?;
+                role::assign(&mut *tx, person_id, keep, Some(*site), by).await?;
+            }
+        }
+    }
+    audit(
         &mut *tx,
+        scope,
+        "role.changed",
+        "person",
         person_id,
-        role_from_dto(role),
-        site_id,
-        Some(scope.person_id),
+        &["role"],
     )
     .await?;
+    commit(tx).await
+}
+
+/// Replaces the schools of a person. Admins may set any existing sites; managers only sites they
+/// manage, on employees they may manage, and never an empty set (that would hide the person
+/// from them). New schools get the person's current site role (manager if they have one,
+/// otherwise employee).
+pub async fn set_person_sites(
+    env: &StaffEnv<'_>,
+    scope: &StaffScope,
+    person_id: Uuid,
+    site_ids: Vec<Uuid>,
+) -> Result<()> {
+    let mut wanted = site_ids;
+    wanted.sort();
+    wanted.dedup();
+    for id in &wanted {
+        check_site(scope, *id)?;
+        site::get_site(env.pool, env.keys, *id)
+            .await?
+            .ok_or(StaffError::NotFound)?;
+    }
+    check_person(env, scope, person_id).await?;
+    if !scope.is_admin && wanted.is_empty() {
+        return Err(StaffError::Invalid("site"));
+    }
+    let current = role::roles_of(env.pool, person_id).await?;
+    let kind = if current.iter().any(|r| r.role == Role::Manager) {
+        Role::Manager
+    } else {
+        Role::Employee
+    };
+    let mut tx = begin(env).await?;
+    let mut changed = false;
+    for r in current.iter().filter(|r| r.role != Role::Admin) {
+        if let Some(site) = r.site_id.filter(|s| !wanted.contains(s)) {
+            changed |= role::revoke(&mut *tx, person_id, r.role, Some(site)).await?;
+        }
+    }
+    for site in &wanted {
+        let has = current
+            .iter()
+            .any(|r| r.role != Role::Admin && r.site_id == Some(*site));
+        if !has {
+            changed |= role::assign(
+                &mut *tx,
+                person_id,
+                kind,
+                Some(*site),
+                Some(scope.person_id),
+            )
+            .await?;
+        }
+    }
     if changed {
         audit(
             &mut *tx,
             scope,
-            "role.assigned",
+            "person.sites_changed",
             "person",
             person_id,
-            &["role", "site_id"],
+            &["site_id"],
         )
         .await?;
     }
-    commit(tx).await
-}
-
-pub async fn revoke_role(
-    env: &StaffEnv<'_>,
-    scope: &StaffScope,
-    person_id: Uuid,
-    role: RoleDto,
-    site_id: Option<Uuid>,
-) -> Result<()> {
-    require_admin(scope)?;
-    // The admin role is organisation-wide, so an admin's own admin role is always their last.
-    if role == RoleDto::Admin && person_id == scope.person_id {
-        return Err(StaffError::Invalid("last admin"));
-    }
-    let mut tx = begin(env).await?;
-    if role == RoleDto::Admin {
-        role::lock_admin_changes(&mut tx).await?;
-        keep_one_working_admin(&mut tx, person_id).await?;
-    }
-    if !role::revoke(&mut *tx, person_id, role_from_dto(role), site_id).await? {
-        return Err(StaffError::NotFound);
-    }
-    audit(
-        &mut *tx,
-        scope,
-        "role.revoked",
-        "person",
-        person_id,
-        &["role", "site_id"],
-    )
-    .await?;
     commit(tx).await
 }
 
@@ -995,26 +1085,32 @@ mod tests {
         let s = seed(&pool, &k).await;
         let e = env(&pool, &k);
         assert_eq!(
-            team(&e, &s.mgr_a, s.site_b, Utc::now()).await.unwrap_err(),
+            today_overview(&e, &s.mgr_a, Some(s.site_b), Utc::now())
+                .await
+                .unwrap_err(),
             StaffError::Forbidden
         );
     }
 
     #[sqlx::test(migrations = "../../migrations")]
-    async fn team_lists_members_with_status(pool: PgPool) {
+    async fn today_overview_counts_and_lists(pool: PgPool) {
         let k = keys();
         let s = seed(&pool, &k).await;
         let e = env(&pool, &k);
-        let members = team(&e, &s.mgr_a, s.site_a, Utc::now()).await.unwrap();
-        assert_eq!(members.len(), 1);
-        assert_eq!(members[0].id, s.emp_a);
-        assert_eq!(members[0].name, "Eva Employee");
-        assert!(members[0].active);
-        assert!(!members[0].device_linked);
-        assert_eq!(members[0].today, TodayStatusDto::NotStarted);
+        let o = today_overview(&e, &s.mgr_a, Some(s.site_a), Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            (o.working, o.not_started, o.out_of_zone, o.not_stopped),
+            (0, 1, 0, 0)
+        );
+        assert_eq!(o.attention.len(), 1);
+        assert_eq!(o.attention[0].id, s.emp_a);
+        assert_eq!(o.attention[0].name, "Eva Employee");
+        assert_eq!(o.attention[0].today, TodayStatusDto::NotStarted);
+        assert!(o.working_rows.is_empty());
         sqlx::query(
-            "INSERT INTO time_event (id, person_id, kind, server_ts, zone_status, site_id) \
-             VALUES ($1, $2, 'start', now(), 'out_of_zone', $3)",
+            "INSERT INTO time_event (id, person_id, kind, server_ts, zone_status, site_id)              VALUES ($1, $2, 'start', now(), 'out_of_zone', $3)",
         )
         .bind(Uuid::new_v4())
         .bind(s.emp_a)
@@ -1022,8 +1118,92 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let members = team(&e, &s.admin, s.site_a, Utc::now()).await.unwrap();
-        assert!(matches!(members[0].today, TodayStatusDto::OutOfZone(_)));
+        let o = today_overview(&e, &s.admin, Some(s.site_a), Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            (o.working, o.not_started, o.out_of_zone, o.not_stopped),
+            (0, 0, 1, 0)
+        );
+        assert!(matches!(o.attention[0].today, TodayStatusDto::OutOfZone(_)));
+        // A start in the zone counts as working and is listed under "working".
+        sqlx::query(
+            "INSERT INTO time_event (id, person_id, kind, server_ts, zone_status, site_id)              VALUES ($1, $2, 'start', now(), 'in_zone', $3)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(s.emp_b)
+        .bind(s.site_b)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let o = today_overview(&e, &s.admin, None, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            (o.working, o.not_started, o.out_of_zone, o.not_stopped),
+            (1, 0, 1, 0)
+        );
+        assert_eq!(o.working_rows[0].id, s.emp_b);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn today_overview_none_is_limited_to_the_scope(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        // The manager of school A never sees the employee of school B, the admin sees both.
+        let o = today_overview(&e, &s.mgr_a, None, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            o.attention.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![s.emp_a]
+        );
+        let o = today_overview(&e, &s.admin, None, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(o.not_started, 2);
+        // Deactivated people are not counted.
+        set_person_active(&e, &s.admin, s.emp_b, false)
+            .await
+            .unwrap();
+        let o = today_overview(&e, &s.admin, None, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(o.not_started, 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn people_are_scoped_and_flag_what_may_be_managed(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let both = two_site_employee(&pool, &k, &s).await;
+        passkey::insert(&pool, s.emp_a, b"emp-a", serde_json::json!({}))
+            .await
+            .unwrap();
+        // Admin: everyone, optionally by site.
+        let all = people(&e, &s.admin, None).await.unwrap();
+        assert_eq!(all.len(), 5);
+        let in_b = people(&e, &s.admin, Some(s.site_b)).await.unwrap();
+        let mut ids: Vec<_> = in_b.iter().map(|p| p.id).collect();
+        ids.sort();
+        let mut want = vec![s.emp_b, both];
+        want.sort();
+        assert_eq!(ids, want);
+        // Manager of A: the people of A, read-only for managers and for people of other sites too.
+        let mine = people(&e, &s.mgr_a, None).await.unwrap();
+        let row = |id| mine.iter().find(|p| p.id == id).unwrap();
+        assert_eq!(mine.len(), 3);
+        assert!(!mine.iter().any(|p| p.id == s.emp_b));
+        assert!(row(s.emp_a).can_manage && row(s.emp_a).device_linked);
+        assert!(!row(both).can_manage);
+        assert!(!row(s.mgr_a_id).can_manage);
+        assert!(all.iter().all(|p| p.can_manage));
+        assert_eq!(
+            people(&e, &s.mgr_a, Some(s.site_b)).await.unwrap_err(),
+            StaffError::Forbidden
+        );
     }
 
     #[sqlx::test(migrations = "../../migrations")]
@@ -1219,19 +1399,8 @@ mod tests {
             set_site_active(&e, m, s.site_a, false).await.unwrap_err(),
             StaffError::Forbidden
         );
-        assert_eq!(list_people(&e, m).await.unwrap_err(), StaffError::Forbidden);
         assert_eq!(
-            add_person(&e, m, "X").await.unwrap_err(),
-            StaffError::Forbidden
-        );
-        assert_eq!(
-            assign_role(&e, m, s.emp_a, RoleDto::Admin, None)
-                .await
-                .unwrap_err(),
-            StaffError::Forbidden
-        );
-        assert_eq!(
-            revoke_role(&e, m, s.emp_a, RoleDto::Employee, Some(s.site_a))
+            set_person_role(&e, m, s.emp_a, RoleDto::Admin)
                 .await
                 .unwrap_err(),
             StaffError::Forbidden
@@ -1279,74 +1448,138 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../../migrations")]
-    async fn people_and_roles(pool: PgPool) {
+    async fn role_changes_keep_the_sites_and_are_audited(pool: PgPool) {
         let k = keys();
         let s = seed(&pool, &k).await;
         let e = env(&pool, &k);
-        let p = add_person(&e, &s.admin, "Piet Nieuw").await.unwrap();
-        assert!(p.roles.is_empty());
-        assign_role(&e, &s.admin, p.id, RoleDto::Manager, Some(s.site_b))
+        let p = add_member(&e, &s.admin, s.site_b, "Piet Nieuw")
+            .await
+            .unwrap()
+            .id;
+        let roles = || async { role::roles_of(&pool, p).await.unwrap() };
+        let at_b = |r: Role| role::RoleAssignment {
+            role: r,
+            site_id: Some(s.site_b),
+        };
+        set_person_role(&e, &s.admin, p, RoleDto::Manager)
             .await
             .unwrap();
-        // Validation: admin has no site, site roles need an existing site.
+        assert_eq!(roles().await, vec![at_b(Role::Manager)]);
+        set_person_role(&e, &s.admin, p, RoleDto::Employee)
+            .await
+            .unwrap();
+        assert_eq!(roles().await, vec![at_b(Role::Employee)]);
+        set_person_role(&e, &s.admin, p, RoleDto::Admin)
+            .await
+            .unwrap();
+        assert!(role::is_admin(&pool, p).await.unwrap());
+        set_person_role(&e, &s.admin, p, RoleDto::Employee)
+            .await
+            .unwrap();
+        assert!(!role::is_admin(&pool, p).await.unwrap());
+        assert_eq!(roles().await, vec![at_b(Role::Employee)]);
+        // A manager needs a school; unknown people are not found.
+        let nobody = mk_person(&pool, &k, "Zonder School").await;
         assert!(matches!(
-            assign_role(&e, &s.admin, p.id, RoleDto::Admin, Some(s.site_b)).await,
-            Err(StaffError::Invalid(_))
-        ));
-        assert!(matches!(
-            assign_role(&e, &s.admin, p.id, RoleDto::Manager, None).await,
+            set_person_role(&e, &s.admin, nobody, RoleDto::Manager).await,
             Err(StaffError::Invalid(_))
         ));
         assert_eq!(
-            assign_role(&e, &s.admin, p.id, RoleDto::Manager, Some(Uuid::new_v4()))
-                .await
-                .unwrap_err(),
-            StaffError::NotFound
-        );
-        let people = list_people(&e, &s.admin).await.unwrap();
-        assert_eq!(people.len(), 5);
-        let row = people.iter().find(|r| r.id == p.id).unwrap();
-        assert_eq!(row.roles.len(), 1);
-        assert_eq!(row.roles[0].role, RoleDto::Manager);
-        assert_eq!(row.roles[0].site_id, Some(s.site_b));
-        assert_eq!(row.roles[0].site_name.as_deref(), Some("School B"));
-        revoke_role(&e, &s.admin, p.id, RoleDto::Manager, Some(s.site_b))
-            .await
-            .unwrap();
-        assert_eq!(
-            revoke_role(&e, &s.admin, p.id, RoleDto::Manager, Some(s.site_b))
-                .await
-                .unwrap_err(),
-            StaffError::NotFound
+            set_person_role(&e, &s.admin, Uuid::new_v4(), RoleDto::Admin).await,
+            Err(StaffError::NotFound)
         );
         assert_eq!(
             audit_actions(&pool).await,
-            vec!["person.created", "role.assigned", "role.revoked"]
+            vec![
+                "person.created",
+                "role.changed",
+                "role.changed",
+                "role.changed",
+                "role.changed"
+            ]
         );
     }
 
     #[sqlx::test(migrations = "../../migrations")]
-    async fn admin_cannot_revoke_own_admin_role(pool: PgPool) {
+    async fn admin_cannot_change_own_role(pool: PgPool) {
         let k = keys();
         let s = seed(&pool, &k).await;
         let e = env(&pool, &k);
         assert!(matches!(
-            revoke_role(&e, &s.admin, s.admin.person_id, RoleDto::Admin, None).await,
+            set_person_role(&e, &s.admin, s.admin.person_id, RoleDto::Employee).await,
             Err(StaffError::Invalid(_))
         ));
         assert!(role::is_admin(&pool, s.admin.person_id).await.unwrap());
-        // Another admin can be revoked by this admin.
-        assign_role(&e, &s.admin, s.emp_a, RoleDto::Admin, None)
+        // Another admin can be demoted by this admin.
+        set_person_role(&e, &s.admin, s.emp_a, RoleDto::Admin)
             .await
             .unwrap();
-        revoke_role(&e, &s.admin, s.emp_a, RoleDto::Admin, None)
+        set_person_role(&e, &s.admin, s.emp_a, RoleDto::Employee)
             .await
             .unwrap();
         assert!(!role::is_admin(&pool, s.emp_a).await.unwrap());
     }
 
     #[sqlx::test(migrations = "../../migrations")]
-    async fn team_shows_a_forgotten_stop_from_an_earlier_day(pool: PgPool) {
+    async fn sites_of_a_person_are_replaced_within_scope(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let sites = || async { role::employee_sites(&pool, s.emp_a).await.unwrap() };
+        // The manager of A may add only sites they manage and may not empty the list.
+        assert_eq!(
+            set_person_sites(&e, &s.mgr_a, s.emp_a, vec![s.site_a, s.site_b]).await,
+            Err(StaffError::Forbidden)
+        );
+        assert!(matches!(
+            set_person_sites(&e, &s.mgr_a, s.emp_a, vec![]).await,
+            Err(StaffError::Invalid(_))
+        ));
+        assert_eq!(
+            set_person_sites(&e, &s.mgr_a, s.emp_b, vec![s.site_a]).await,
+            Err(StaffError::Forbidden)
+        );
+        assert_eq!(sites().await, vec![s.site_a]);
+        assert!(audit_actions(&pool).await.is_empty());
+        // Admin: add, then move, then unknown site.
+        set_person_sites(&e, &s.admin, s.emp_a, vec![s.site_a, s.site_b, s.site_b])
+            .await
+            .unwrap();
+        let mut both = vec![s.site_a, s.site_b];
+        both.sort();
+        assert_eq!(sites().await, both);
+        set_person_sites(&e, &s.admin, s.emp_a, vec![s.site_b])
+            .await
+            .unwrap();
+        assert_eq!(sites().await, vec![s.site_b]);
+        assert_eq!(
+            set_person_sites(&e, &s.admin, s.emp_a, vec![Uuid::new_v4()]).await,
+            Err(StaffError::NotFound)
+        );
+        // Unchanged sets write no audit row.
+        set_person_sites(&e, &s.admin, s.emp_a, vec![s.site_b])
+            .await
+            .unwrap();
+        assert_eq!(
+            audit_actions(&pool).await,
+            vec!["person.sites_changed", "person.sites_changed"]
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn manager_sites_stay_manager_roles(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        set_person_sites(&e, &s.admin, s.mgr_a_id, vec![s.site_a, s.site_b])
+            .await
+            .unwrap();
+        let managed = role::managed_sites(&pool, s.mgr_a_id).await.unwrap();
+        assert_eq!(managed.len(), 2);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn overview_shows_a_forgotten_stop_from_an_earlier_day(pool: PgPool) {
         let k = keys();
         let s = seed(&pool, &k).await;
         let e = env(&pool, &k);
@@ -1377,8 +1610,17 @@ mod tests {
             .await
             .unwrap();
         let today = yesterday + Duration::days(1);
-        let members = team(&e, &s.mgr_a, s.site_a, today).await.unwrap();
-        let status = |id| members.iter().find(|m| m.id == id).unwrap().today.clone();
+        let o = today_overview(&e, &s.mgr_a, Some(s.site_a), today)
+            .await
+            .unwrap();
+        let status = |id| {
+            o.attention
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap()
+                .today
+                .clone()
+        };
         assert_eq!(
             status(s.emp_a),
             TodayStatusDto::MissingStop {
@@ -1387,11 +1629,15 @@ mod tests {
         );
         assert_eq!(status(s.mgr_a_id), TodayStatusDto::NotStarted);
         // Same day it is simply a started day.
-        let same = team(&e, &s.mgr_a, s.site_a, yesterday + Duration::hours(1))
+        let same = today_overview(&e, &s.mgr_a, Some(s.site_a), yesterday + Duration::hours(1))
             .await
             .unwrap();
         assert_eq!(
-            same.iter().find(|m| m.id == s.emp_a).unwrap().today,
+            same.working_rows
+                .iter()
+                .find(|m| m.id == s.emp_a)
+                .unwrap()
+                .today,
             TodayStatusDto::Started("07:42".into())
         );
     }
@@ -1432,8 +1678,10 @@ mod tests {
         assert!(person::is_active(&pool, both).await.unwrap());
         assert!(audit_actions(&pool).await.is_empty());
         // Listing in the team of the own site is unchanged.
-        let team = team(&e, &s.mgr_a, s.site_a, ts(9, 0)).await.unwrap();
-        assert!(team.iter().any(|m| m.id == both));
+        let o = today_overview(&e, &s.mgr_a, Some(s.site_a), ts(9, 0))
+            .await
+            .unwrap();
+        assert!(o.attention.iter().any(|m| m.id == both));
     }
 
     #[sqlx::test(migrations = "../../migrations")]
@@ -1489,7 +1737,7 @@ mod tests {
         let target = a.working.person_id;
         // `keyless` is an admin but cannot sign in, so `working` is the only usable admin.
         assert!(matches!(
-            revoke_role(&e, &a.keyless, target, RoleDto::Admin, None).await,
+            set_person_role(&e, &a.keyless, target, RoleDto::Employee).await,
             Err(StaffError::Invalid(_))
         ));
         assert!(matches!(
@@ -1533,7 +1781,7 @@ mod tests {
             Err(StaffError::Invalid(_))
         ));
         assert!(matches!(
-            revoke_role(&e, &a.keyless, a.working.person_id, RoleDto::Admin, None).await,
+            set_person_role(&e, &a.keyless, a.working.person_id, RoleDto::Employee).await,
             Ok(())
         ));
     }
@@ -1588,9 +1836,9 @@ mod tests {
         );
         assert_eq!(passkey::count_active(&pool, s.emp_a).await.unwrap(), 1);
 
-        fail_audit_of(&pool, "role.revoked").await;
+        fail_audit_of(&pool, "role.changed").await;
         assert_eq!(
-            revoke_role(&e, &s.admin, other_admin, RoleDto::Admin, None).await,
+            set_person_role(&e, &s.admin, other_admin, RoleDto::Employee).await,
             Err(StaffError::Internal)
         );
         assert!(role::is_admin(&pool, other_admin).await.unwrap());
@@ -1622,10 +1870,6 @@ mod tests {
         assert_eq!(count("site").await, sites);
 
         fail_audit_of(&pool, "person.created").await;
-        assert_eq!(
-            add_person(&e, &s.admin, "Nina Nieuw").await,
-            Err(StaffError::Internal)
-        );
         assert_eq!(
             add_member(&e, &s.admin, s.site_a, "Nick Nieuw").await,
             Err(StaffError::Internal)
@@ -1695,7 +1939,7 @@ mod tests {
             revoke_devices(&e, a, b),
             start_enrollment(&e, a, s.emp_b),
             save_site(&e, a, form("School D")),
-            async { add_person(&e, a, "Nina Nieuw").await.map(|_| ()) },
+            async { add_member(&e, a, s.site_a, "Nina Nieuw").await.map(|_| ()) },
         );
         let (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10) = results;
         assert_eq!(r1, Ok(()));

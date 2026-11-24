@@ -3,32 +3,62 @@
 /// Look up a UI string by key. Unknown keys return the key itself so gaps are visible.
 pub fn t(key: &str) -> &str {
     match key {
-        "staff.nav.team" => "Mijn team",
-        "staff.nav.sites" => "Scholen",
-        "staff.nav.people" => "Personen",
-        "staff.nav.org" => "Organisatie",
+        "staff.nav.today" => "Vandaag",
+        "staff.nav.people" => "Mensen",
+        "staff.nav.settings" => "Instellingen",
         "staff.nav.label" => "Hoofdmenu",
         "staff.logout" => "Afmelden",
-        "staff.loading" => "Even geduld.",
         "staff.err.generic" => "Er ging iets mis. Probeer het opnieuw.",
+        "staff.confirm" => "Zeker?",
+        "staff.confirm_yes" => "Ja",
+        "staff.confirm_no" => "Nee",
 
-        "team.title" => "Mijn team",
-        "team.site" => "School",
-        "team.no_sites" => "Je bent nog aan geen enkele school gekoppeld.",
-        "team.empty" => "Nog geen medewerkers op deze school.",
-        "team.add.title" => "Medewerker toevoegen",
-        "team.add.name" => "Naam van de medewerker",
-        "team.add.submit" => "Toevoegen",
-        "team.link_device" => "Koppel toestel",
-        "team.revoke_device" => "Toestel intrekken",
-        "team.deactivate" => "Deactiveren",
-        "team.confirm" => "Zeker?",
-        "team.confirm_yes" => "Ja",
-        "team.confirm_no" => "Nee",
+        "today.title" => "Vandaag",
+        "today.site" => "School",
+        "today.all_sites" => "Alle scholen",
+        "today.working" => "Aan het werk",
+        "today.not_started" => "Nog niet gestart",
+        "today.out_of_zone" => "Niet op school",
+        "today.not_stopped" => "Niet gestopt",
+        "today.attention" => "Aandacht nodig",
+        "today.attention_empty" => "Alles in orde, er is niets dat aandacht vraagt.",
+        "today.working_empty" => "Er is nog niemand aan het werk.",
+        "today.view" => "Bekijk",
+        "today.show_less" => "Minder tonen",
+
+        "people.title" => "Mensen",
+        "people.search" => "Zoek op naam",
+        "people.add" => "Persoon toevoegen",
+        "people.add.name" => "Naam",
+        "people.add.site" => "School",
+        "people.add.submit" => "Toevoegen",
+        "people.add.cancel" => "Annuleren",
+        "people.empty" => "Niemand gevonden.",
+        "people.no_sites" => "Je bent nog aan geen enkele school gekoppeld.",
+        "people.all_sites" => "Alle scholen",
+        "people.filter" => "Filter op school",
+
+        "panel.close" => "Sluiten",
+        "panel.device" => "Toestel",
+        "panel.link" => "Toestel koppelen",
+        "panel.revoke" => "Toestel intrekken",
+        "panel.role" => "Rol",
+        "panel.sites" => "Scholen",
+        "panel.admin_sites" => "Beheerders zien alle scholen.",
+        "panel.role_admin_only" => "Alleen een beheerder wijzigt de rol.",
+        "panel.read_only" => "Alleen een beheerder wijzigt deze persoon.",
+        "panel.deactivate" => "Deactiveren",
+        "panel.activate" => "Activeren",
+
+        "settings.title" => "Instellingen",
+        "settings.nav.label" => "Onderdelen van de instellingen",
+        "settings.org" => "Organisatie",
+        "settings.sites" => "Scholen",
+        "settings.appearance" => "Weergave",
 
         "chip.linked" => "Gekoppeld",
         "chip.no_device" => "Geen toestel",
-        "chip.not_started" => "Niet gestart",
+        "chip.not_started" => "Nog niet gestart",
         "chip.started" => "Gestart",
         "chip.stopped" => "Gestopt",
         "chip.out_of_zone" => "Niet op school",
@@ -69,18 +99,6 @@ pub fn t(key: &str) -> &str {
         "sites.err.break_minutes" => "Geef een aantal minuten tussen 0 en 240.",
         "sites.err.break_after" => "Geef een aantal minuten tussen 0 en 720.",
 
-        "people.title" => "Personen en rollen",
-        "people.add.title" => "Persoon toevoegen",
-        "people.add.name" => "Naam van de persoon",
-        "people.add.submit" => "Toevoegen",
-        "people.assign.title" => "Rol toevoegen",
-        "people.assign.role" => "Rol",
-        "people.assign.site" => "School",
-        "people.assign.submit" => "Toewijzen",
-        "people.revoke" => "Rol intrekken",
-        "people.link_device" => "Koppel toestel",
-        "people.no_roles" => "Nog geen rollen.",
-        "people.all_sites" => "Alle scholen",
         "role.employee" => "Medewerker",
         "role.manager" => "Verantwoordelijke",
         "role.admin" => "Beheerder",
@@ -88,13 +106,28 @@ pub fn t(key: &str) -> &str {
     }
 }
 
-/// "6 medewerkers" / "1 medewerker".
-pub fn members_count(n: usize) -> String {
+/// "Aan het werk (12)".
+pub fn working_title(n: usize) -> String {
+    format!("{} ({n})", t("today.working"))
+}
+
+/// "+ 9 anderen" / "+ 1 andere".
+pub fn more_label(n: usize) -> String {
     if n == 1 {
-        "1 medewerker".to_string()
+        "+ 1 andere".to_string()
     } else {
-        format!("{n} medewerkers")
+        format!("+ {n} anderen")
     }
+}
+
+/// "sinds 07:42".
+pub fn since_label(time: &str) -> String {
+    format!("sinds {time}")
+}
+
+/// "Nog geen toestel. Laat Ahmed de QR-code scannen."
+pub fn no_device_hint(name: &str) -> String {
+    format!("Nog geen toestel. Laat {name} de QR-code scannen.")
 }
 
 /// "Gestart om 07:42" style label for a status chip.
@@ -123,7 +156,7 @@ mod tests {
 
     #[test]
     fn known_key_is_translated() {
-        assert_eq!(t("team.title"), "Mijn team");
+        assert_eq!(t("staff.nav.people"), "Mensen");
     }
 
     #[test]
@@ -132,9 +165,10 @@ mod tests {
     }
 
     #[test]
-    fn count_is_pluralised() {
-        assert_eq!(members_count(1), "1 medewerker");
-        assert_eq!(members_count(6), "6 medewerkers");
+    fn counts_are_pluralised() {
+        assert_eq!(working_title(12), "Aan het werk (12)");
+        assert_eq!(more_label(1), "+ 1 andere");
+        assert_eq!(more_label(9), "+ 9 anderen");
     }
 
     #[test]

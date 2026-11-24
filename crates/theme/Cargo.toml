@@ -1,0 +1,14 @@
+[package]
+name = "theme"
+description = "Material 3 colour scheme generation from a brand seed colour"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+material-colors = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 
+use super::AppearancePicker;
 use crate::client::i18n::t;
 
 /// Context flag set by pages whose person may open the staff screens: shows a small "Beheer"
@@ -19,6 +20,10 @@ pub fn AppHeader(org_name: String, person_name: Option<String>) -> Element {
                 }
                 if staff_link {
                     Link { class: "staff-link", to: "/beheer", {t("nav.staff")} }
+                }
+                details { class: "header-menu",
+                    summary { class: "header-menu-toggle", {t("appearance.title")} }
+                    div { class: "header-menu-panel", AppearancePicker {} }
                 }
             }
         }

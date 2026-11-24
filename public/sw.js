@@ -1,5 +1,5 @@
 /* Tijdsregistratie service worker. Bump CACHE_VERSION to invalidate all caches. */
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const CACHE = `tijdsregistratie-${CACHE_VERSION}`;
 const SHELL = [
   "/",
@@ -83,8 +83,9 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
-  // Never cache API / server function traffic or the service worker itself.
-  if (url.pathname.startsWith("/api/") || url.pathname === "/sw.js") return;
+  // Never cache API / server function traffic, the service worker itself or the generated theme
+  // (it changes with the organisation's brand colour).
+  if (url.pathname.startsWith("/api/") || url.pathname === "/sw.js" || url.pathname === "/theme.css") return;
 
   if (request.mode === "navigate") {
     event.respondWith(networkFirstNavigation(request));

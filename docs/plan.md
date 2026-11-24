@@ -89,6 +89,7 @@ site); optional OIDC login for managers (identity only, roles stay in the app).
 | Encryption | RustCrypto `chacha20poly1305` (XChaCha20-Poly1305) + `hmac`/`sha2` for blind indexes |
 | Location | browser Geolocation API via `web-sys`; zone check on the server |
 | PWA | hand-written `manifest.webmanifest` + service worker in `public/` |
+| Theme | Material 3 `SchemeFidelity` from the brand colour (`crates/theme`, crate `material-colors`), served as `/theme.css`; light/dark/system per device (DESIGN.md section 4) |
 
 Exact versions are pinned in `Cargo.toml`.
 
@@ -208,6 +209,7 @@ Encrypted columns marked 🔒.
 Cargo.toml            workspace
 crates/domain/        pure logic: zone calc, day totals, break deduction (no IO)
 crates/crypto/        field encryption, Encrypted<T>, key loading and rotation
+crates/theme/         Material 3 colour roles and CSS from a seed colour (no IO)
 crates/app/           Dioxus fullstack app (features: web, server)
   src/client/         screens, components, PWA glue, geolocation, WebAuthn glue
   src/server/         server functions, passkey auth, sessions, roles, repository (sqlx), audit

@@ -1,4 +1,4 @@
-//! Clock and sleep for the enrollment panel. Browser-only; inert on the server, where effects
+//! Clock, date label and sleep for the staff pages. Browser-only; inert on the server, where effects
 //! never run.
 
 /// Milliseconds since the unix epoch, from the browser clock.
@@ -25,4 +25,21 @@ pub async fn sleep_ms(ms: i32) {
 #[cfg(not(feature = "web"))]
 pub async fn sleep_ms(_ms: i32) {
     std::future::pending::<()>().await;
+}
+
+/// Today's date as "dinsdag 24 november", from the browser clock.
+#[cfg(feature = "web")]
+pub fn today_label() -> String {
+    let options = js_sys::Object::new();
+    for (key, value) in [("weekday", "long"), ("day", "numeric"), ("month", "long")] {
+        let _ = js_sys::Reflect::set(&options, &key.into(), &value.into());
+    }
+    js_sys::Date::new_0()
+        .to_locale_date_string("nl-BE", &options)
+        .into()
+}
+
+#[cfg(not(feature = "web"))]
+pub fn today_label() -> String {
+    String::new()
 }

@@ -34,14 +34,19 @@ async function countEvents(): Promise<number> {
   }
 }
 
-/** The team row of one person on the manager page. */
+/** The row of one person on the Vandaag or Mensen page. */
 function row(page: Page, name: string) {
   return page.getByRole('listitem').filter({ hasText: name });
 }
 
-async function openTeam(page: Page) {
+async function openToday(page: Page) {
   await page.goto('/beheer');
-  await expect(page.getByRole('heading', { name: 'Mijn team' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Vandaag', exact: true })).toBeVisible();
+}
+
+async function openPeople(page: Page) {
+  await page.goto('/beheer/mensen');
+  await expect(page.getByRole('heading', { name: 'Mensen', exact: true })).toBeVisible();
 }
 
 /** Adds an employee, links a device through the QR link and walks the employee onboarding. */
@@ -51,12 +56,15 @@ async function enrollEmployee(
   geolocation: { latitude: number; longitude: number; accuracy: number } | undefined,
 ): Promise<Device> {
   const page = admin.page;
-  await openTeam(page);
-  await page.getByLabel('Naam van de medewerker').fill(fullName);
-  await page.getByRole('button', { name: 'Toevoegen' }).click();
+  await openPeople(page);
+  await page.getByRole('button', { name: 'Persoon toevoegen' }).click();
+  await page.getByLabel('Naam', { exact: true }).fill(fullName);
+  await page.getByRole('button', { name: 'Toevoegen', exact: true }).click();
   const personRow = row(page, fullName);
   await expect(personRow).toBeVisible();
-  await personRow.getByRole('button', { name: 'Koppel toestel' }).click();
+  // The row opens the detail panel, which holds "Toestel koppelen".
+  await personRow.getByRole('button').click();
+  await page.getByRole('button', { name: 'Toestel koppelen' }).click();
 
   const qr = page.getByRole('img', { name: 'QR-code om het toestel te koppelen' });
   await expect(qr).toBeVisible();
@@ -153,7 +161,7 @@ test('2. admin adds Fatima, links her phone through the enrollment link', async 
   async function page2Overview() {
     await admin.page.getByRole('link', { name: 'Naar het overzicht' }).click();
     await expect(admin.page).toHaveURL(/\/beheer$/);
-    await expect(admin.page.getByRole('heading', { name: 'Mijn team' })).toBeVisible();
+    await expect(admin.page.getByRole('heading', { name: 'Vandaag', exact: true })).toBeVisible();
   }
 });
 
@@ -168,8 +176,8 @@ test('3. employee in the zone: one START event, then STOP gives the day summary'
   await page.waitForTimeout(1500);
   expect(await countEvents()).toBe(before + 1);
 
-  await openTeam(admin.page);
-  await expect(row(admin.page, 'Fatima Test').getByText(/Gestart/)).toBeVisible();
+  await openToday(admin.page);
+  await expect(row(admin.page, 'Fatima Test').getByText('Gestart', { exact: true })).toBeVisible();
 
   await page.getByRole('button', { name: 'Stop je dag' }).click();
   await expect(page.getByRole('heading', { name: /Gestopt om \d{2}:\d{2}/ })).toBeVisible();
@@ -178,8 +186,9 @@ test('3. employee in the zone: one START event, then STOP gives the day summary'
   expect(await countEvents()).toBe(before + 2);
   expect(cspViolations(fatima)).toEqual([]);
 
-  await openTeam(admin.page);
-  await expect(row(admin.page, 'Fatima Test').getByText(/Gestopt/)).toBeVisible();
+  // Someone who stopped is in no list of Vandaag.
+  await openToday(admin.page);
+  await expect(row(admin.page, 'Fatima Test')).toHaveCount(0);
 });
 
 test('4. employee out of the zone: start is kept and flagged', async ({ browser }) => {
@@ -190,7 +199,7 @@ test('4. employee out of the zone: start is kept and flagged', async ({ browser 
   await expect(jonas.page.getByText(/We hebben je start toch bewaard om/)).toBeVisible();
   await shot(jonas.page, '09-employee-out-of-zone');
 
-  await openTeam(admin.page);
+  await openToday(admin.page);
   await expect(row(admin.page, 'Jonas Test').getByText(/Niet op school/)).toBeVisible();
   await shot(admin.page, '10-admin-team-out-of-zone');
 });
@@ -220,10 +229,10 @@ test('6. login with the passkey after the session is gone', async () => {
 
 test('7. revoking the devices ends the session and the old passkey stops working', async () => {
   const { page } = fatima;
-  await openTeam(admin.page);
-  const personRow = row(admin.page, 'Fatima Test');
-  await personRow.getByRole('button', { name: 'Toestel intrekken' }).click();
-  await personRow.getByRole('button', { name: 'Ja' }).click();
+  await openPeople(admin.page);
+  await row(admin.page, 'Fatima Test').getByRole('button').click();
+  await admin.page.getByRole('button', { name: 'Toestel intrekken' }).click();
+  await admin.page.getByRole('button', { name: 'Ja', exact: true }).click();
   await expect(row(admin.page, 'Fatima Test').getByText('Geen toestel')).toBeVisible();
 
   // The employee's next request ends on the login screen.
