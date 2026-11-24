@@ -2,10 +2,14 @@
 //!
 //! This crate performs no IO, no database access and never reads the clock; callers pass time in.
 
+pub mod correction;
 pub mod day;
 pub mod geo;
 pub mod zone;
 
+pub use correction::{
+    Correction, EffectiveEvent, apply_corrections, contract_minutes_on, deviation_minutes,
+};
 pub use day::{Anomaly, BreakRule, DaySummary, Event, EventKind, next_action, summarize_day};
 pub use geo::{GeoPoint, haversine_m};
 pub use zone::{Fix, SiteZone, ZoneConfig, ZoneResult, ZoneStatus, classify};
