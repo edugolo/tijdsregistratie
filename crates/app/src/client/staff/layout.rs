@@ -5,12 +5,13 @@
 use dioxus::prelude::*;
 
 use super::flow::SIGN_IN;
-use super::i18n::t;
 use super::load::{Skeleton, use_loaded};
 use crate::api::auth::logout;
 use crate::api::staff::{StaffContext, staff_context};
 use crate::client::Route;
 use crate::client::employee::use_org_name;
+use crate::client::i18n::LANGUAGE_LOADER;
+use i18n_embed_fl::fl;
 
 const STAFF_CSS: Asset = asset!("/assets/staff.css");
 
@@ -22,11 +23,11 @@ pub enum StaffNav {
 }
 
 impl StaffNav {
-    fn label_key(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::Today => "staff.nav.today",
-            Self::People => "staff.nav.people",
-            Self::Settings => "staff.nav.settings",
+            Self::Today => fl!(LANGUAGE_LOADER, "staff-nav-today"),
+            Self::People => fl!(LANGUAGE_LOADER, "staff-nav-people"),
+            Self::Settings => fl!(LANGUAGE_LOADER, "staff-nav-settings"),
         }
     }
 
@@ -87,14 +88,14 @@ pub fn StaffLayout() -> Element {
                     span { class: "st-brand-mark", aria_hidden: "true", "{initial}" }
                     span { class: "st-brand-name", "{org_name}" }
                 }
-                nav { class: "st-nav", aria_label: t("staff.nav.label"),
+                nav { class: "st-nav", aria_label: fl!(LANGUAGE_LOADER, "staff-nav-label"),
                     for item in items {
                         Link {
-                            key: "{item.label_key()}",
+                            key: "{item.label()}",
                             to: item.path(),
                             class: if Some(item) == active { "st-tab st-tab-active" } else { "st-tab" },
                             "aria-current": if Some(item) == active { "page" } else { "false" },
-                            {t(item.label_key())}
+                            {item.label()}
                         }
                     }
                 }
@@ -110,7 +111,7 @@ pub fn StaffLayout() -> Element {
                                 navigator().replace(SIGN_IN);
                             });
                         },
-                        {t("staff.logout")}
+                        {fl!(LANGUAGE_LOADER, "staff-logout")}
                     }
                 }
             }
@@ -120,7 +121,7 @@ pub fn StaffLayout() -> Element {
                         ContextScope { ctx, Outlet::<Route> {} }
                     },
                     None if context.failed() => rsx! {
-                        p { class: "st-sub st-page", role: "alert", {t("staff.err.generic")} }
+                        p { class: "st-sub st-page", role: "alert", {fl!(LANGUAGE_LOADER, "staff-err-generic")} }
                     },
                     None => rsx! { Skeleton { rows: 6 } },
                 }

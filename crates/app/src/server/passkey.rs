@@ -39,8 +39,9 @@ use store::repo::{audit, enrollment, passkey};
 const REGISTRATION_KEY: &str = "ceremony.registration";
 const LOGIN_KEY: &str = "ceremony.login";
 
-const MSG_TOKEN: &str = "Deze code werkt niet meer.";
-const MSG_LOGIN: &str = "Aanmelden is niet gelukt.";
+/// Stable codes; the client translates them through `i18n/nl-BE/app.ftl`.
+const MSG_TOKEN: &str = "token-invalid";
+const MSG_LOGIN: &str = "login-failed";
 
 /// Failure of a ceremony step. The client only ever sees the generic message of the variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -850,9 +851,9 @@ mod tests {
     #[test]
     fn errors_are_generic() {
         for (e, code, msg) in [
-            (AuthError::Token, 400, "Deze code werkt niet meer."),
-            (AuthError::Login, 401, "Aanmelden is niet gelukt."),
-            (AuthError::Internal, 500, "Aanmelden is niet gelukt."),
+            (AuthError::Token, 400, "token-invalid"),
+            (AuthError::Login, 401, "login-failed"),
+            (AuthError::Internal, 500, "login-failed"),
         ] {
             match ServerFnError::from(e) {
                 ServerFnError::ServerError {

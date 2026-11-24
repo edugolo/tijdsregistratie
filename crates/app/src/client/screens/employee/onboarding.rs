@@ -1,7 +1,8 @@
 use dioxus::prelude::*;
 
 use crate::client::components::{Icon, NoticeCard, PrimaryButton, Screen, SecondaryButton};
-use crate::client::i18n::t;
+use crate::client::i18n::LANGUAGE_LOADER;
+use i18n_embed_fl::fl;
 
 /// E1: opened from the QR code. Android gets an install button, iPhone in Safari the steps.
 /// Continuing without installing is always possible.
@@ -15,23 +16,27 @@ pub fn Welcome(
     on_show_steps: EventHandler<()>,
     on_continue: EventHandler<()>,
 ) -> Element {
-    let title = format!("{} {}", t("welcome.title"), person_name);
+    let title = fl!(
+        LANGUAGE_LOADER,
+        "welcome-title",
+        name = person_name.as_str()
+    );
     rsx! {
         Screen { org_name,
             div { class: "icon-tile", Icon { name: "smartphone", size: 36 } }
             h1 { {title} }
-            p { class: "text-sub", {t("welcome.body")} }
+            p { class: "text-sub", {fl!(LANGUAGE_LOADER, "welcome-body")} }
             div { class: "spacer" }
             div { class: "actions",
                 if can_prompt_install {
-                    PrimaryButton { label: t("welcome.install"), onclick: move |_| on_install.call(()) }
-                    SecondaryButton { label: t("welcome.continue"), onclick: move |_| on_continue.call(()) }
+                    PrimaryButton { label: fl!(LANGUAGE_LOADER, "welcome-install"), onclick: move |_| on_install.call(()) }
+                    SecondaryButton { label: fl!(LANGUAGE_LOADER, "welcome-continue"), onclick: move |_| on_continue.call(()) }
                 } else if ios_steps {
-                    PrimaryButton { label: t("welcome.show_steps"), onclick: move |_| on_show_steps.call(()) }
-                    SecondaryButton { label: t("welcome.continue"), onclick: move |_| on_continue.call(()) }
-                    p { class: "text-sub text-small", {t("welcome.hint")} }
+                    PrimaryButton { label: fl!(LANGUAGE_LOADER, "welcome-show-steps"), onclick: move |_| on_show_steps.call(()) }
+                    SecondaryButton { label: fl!(LANGUAGE_LOADER, "welcome-continue"), onclick: move |_| on_continue.call(()) }
+                    p { class: "text-sub text-small", {fl!(LANGUAGE_LOADER, "welcome-hint")} }
                 } else {
-                    PrimaryButton { label: t("welcome.continue"), onclick: move |_| on_continue.call(()) }
+                    PrimaryButton { label: fl!(LANGUAGE_LOADER, "welcome-continue"), onclick: move |_| on_continue.call(()) }
                 }
             }
         }
@@ -43,30 +48,30 @@ pub fn Welcome(
 pub fn IosInstall(org_name: String, on_done: EventHandler<()>) -> Element {
     rsx! {
         Screen { org_name,
-            h1 { {t("ios.title")} }
+            h1 { {fl!(LANGUAGE_LOADER, "ios-title")} }
             ol { class: "steps",
                 li {
-                    {t("ios.step1_before")}
+                    {fl!(LANGUAGE_LOADER, "ios-step1-before")}
                     " "
-                    b { {t("ios.step1_bold")} }
+                    b { {fl!(LANGUAGE_LOADER, "ios-step1-bold")} }
                     " "
                     Icon { name: "share", size: 16 }
                 }
                 li {
-                    {t("ios.step2_before")}
+                    {fl!(LANGUAGE_LOADER, "ios-step2-before")}
                     " "
-                    b { {t("ios.step2_bold")} }
+                    b { {fl!(LANGUAGE_LOADER, "ios-step2-bold")} }
                 }
                 li {
-                    {t("ios.step3_before")}
+                    {fl!(LANGUAGE_LOADER, "ios-step3-before")}
                     " "
-                    b { {t("ios.step3_bold")} }
+                    b { {fl!(LANGUAGE_LOADER, "ios-step3-bold")} }
                 }
             }
-            div { class: "notice-card text-small", {t("ios.after")} }
+            div { class: "notice-card text-small", {fl!(LANGUAGE_LOADER, "ios-after")} }
             div { class: "spacer" }
             div { class: "actions",
-                SecondaryButton { label: t("ios.done"), onclick: move |_| on_done.call(()) }
+                SecondaryButton { label: fl!(LANGUAGE_LOADER, "ios-done"), onclick: move |_| on_done.call(()) }
             }
         }
     }
@@ -81,15 +86,15 @@ pub fn CreateKey(
     on_create_key: EventHandler<()>,
 ) -> Element {
     let label = if error.is_some() {
-        t("error.retry")
+        fl!(LANGUAGE_LOADER, "error-retry")
     } else {
-        t("key.create")
+        fl!(LANGUAGE_LOADER, "key-create")
     };
     rsx! {
         Screen { org_name,
             div { class: "icon-tile", Icon { name: "fingerprint", size: 36 } }
-            h1 { {t("key.title")} }
-            p { class: "text-sub", {t("key.body")} }
+            h1 { {fl!(LANGUAGE_LOADER, "key-title")} }
+            p { class: "text-sub", {fl!(LANGUAGE_LOADER, "key-body")} }
             if let Some(error) = error {
                 NoticeCard { icon: "alert-triangle", {error} }
             }
@@ -107,17 +112,17 @@ pub fn LocationExplain(org_name: String, on_continue: EventHandler<()>) -> Eleme
     rsx! {
         Screen { org_name,
             div { class: "icon-tile ok", Icon { name: "map-pin", size: 36 } }
-            h1 { {t("location.title")} }
-            p { class: "text-sub", {t("location.body")} }
+            h1 { {fl!(LANGUAGE_LOADER, "location-title")} }
+            p { class: "text-sub", {fl!(LANGUAGE_LOADER, "location-body")} }
             p { class: "text-sub",
-                b { class: "text-strong", {t("location.promise")} }
+                b { class: "text-strong", {fl!(LANGUAGE_LOADER, "location-promise")} }
                 " "
-                {t("location.promise_rest")}
+                {fl!(LANGUAGE_LOADER, "location-promise-rest")}
             }
             div { class: "spacer" }
             div { class: "actions",
-                PrimaryButton { label: t("location.ok"), onclick: move |_| on_continue.call(()) }
-                p { class: "text-sub text-small", {t("location.hint")} }
+                PrimaryButton { label: fl!(LANGUAGE_LOADER, "location-ok"), onclick: move |_| on_continue.call(()) }
+                p { class: "text-sub text-small", {fl!(LANGUAGE_LOADER, "location-hint")} }
             }
         }
     }
@@ -132,22 +137,22 @@ pub fn Login(
     on_login: EventHandler<()>,
 ) -> Element {
     let label = if error.is_some() {
-        t("error.retry")
+        fl!(LANGUAGE_LOADER, "error-retry")
     } else {
-        t("login.button")
+        fl!(LANGUAGE_LOADER, "login-button")
     };
     rsx! {
         Screen { org_name,
             div { class: "icon-tile", Icon { name: "scan-face", size: 36 } }
-            h1 { {t("login.title")} }
-            p { class: "text-sub", {t("login.body")} }
+            h1 { {fl!(LANGUAGE_LOADER, "login-title")} }
+            p { class: "text-sub", {fl!(LANGUAGE_LOADER, "login-body")} }
             if let Some(error) = error {
                 NoticeCard { icon: "alert-triangle", {error} }
             }
             div { class: "spacer" }
             div { class: "actions",
                 PrimaryButton { label, disabled: busy, onclick: move |_| on_login.call(()) }
-                p { class: "text-sub text-small", {t("login.new_phone")} }
+                p { class: "text-sub text-small", {fl!(LANGUAGE_LOADER, "login-new-phone")} }
             }
         }
     }
@@ -159,8 +164,8 @@ pub fn InvalidCode(org_name: String) -> Element {
     rsx! {
         Screen { org_name,
             div { class: "icon-tile warn", Icon { name: "alert-triangle", size: 36 } }
-            h1 { {t("code.invalid_title")} }
-            p { class: "text-sub", {t("code.invalid_body")} }
+            h1 { {fl!(LANGUAGE_LOADER, "code-invalid-title")} }
+            p { class: "text-sub", {fl!(LANGUAGE_LOADER, "code-invalid-body")} }
         }
     }
 }

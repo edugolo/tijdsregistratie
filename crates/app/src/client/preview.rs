@@ -3,11 +3,12 @@
 use dioxus::prelude::*;
 
 use super::components::{StatusChip, Tone};
-use super::i18n::{format_time, t};
 use super::screens::employee::{
     CreateKey, Home, IosInstall, LocationExplain, Login, Message, OutOfZone, Stopped, Welcome,
     Working,
 };
+use crate::client::i18n::{LANGUAGE_LOADER, format_time};
+use i18n_embed_fl::fl;
 
 const ORG: &str = "Voorbeeld tijd";
 const PERSON: &str = "Fatima";
@@ -110,9 +111,9 @@ pub fn PreviewAll() -> Element {
     rsx! {
         div { class: "preview",
             div { class: "preview-chips",
-                StatusChip { tone: Tone::Ok, icon: "check", label: t("chip.paired").to_string() }
-                StatusChip { tone: Tone::Warn, icon: "alert-triangle", label: t("chip.no_device").to_string() }
-                StatusChip { tone: Tone::Neutral, icon: "smartphone", label: t("chip.not_started").to_string() }
+                StatusChip { tone: Tone::Ok, icon: "check", label: fl!(LANGUAGE_LOADER, "chip-paired") }
+                StatusChip { tone: Tone::Warn, icon: "alert-triangle", label: fl!(LANGUAGE_LOADER, "chip-no-device") }
+                StatusChip { tone: Tone::Neutral, icon: "smartphone", label: fl!(LANGUAGE_LOADER, "chip-not-started") }
             }
             h2 { "Employee screens" }
             div { class: "preview-grid",

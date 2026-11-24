@@ -3,7 +3,6 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use super::i18n::{missing_stop_label, more_label, since_label, status_at, t, working_title};
 use super::icons::{Icon, IconKind};
 use super::load::{Skeleton, use_loaded};
 use super::map::started_at;
@@ -11,6 +10,8 @@ use super::timing::today_label;
 use crate::api::staff::{
     StaffContext, TodayOverviewDto, TodayRowDto, TodayStatusDto, today_overview,
 };
+use crate::client::i18n::LANGUAGE_LOADER;
+use i18n_embed_fl::fl;
 
 /// People shown under "Aan het werk" before "+ n anderen".
 const WORKING_PREVIEW: usize = 3;
@@ -21,26 +22,28 @@ fn status_chip(status: &TodayStatusDto) -> (&'static str, IconKind, String) {
         TodayStatusDto::NotStarted => (
             "st-chip-neutral",
             IconKind::Circle,
-            t("chip.not_started").to_string(),
+            fl!(LANGUAGE_LOADER, "chip-not-started"),
         ),
         TodayStatusDto::Started(time) => (
             "st-chip-ok",
             IconKind::Play,
-            status_at("chip.started", time),
+            fl!(LANGUAGE_LOADER, "chip-started-at", time = time.as_str()),
         ),
         TodayStatusDto::Stopped(time) => (
             "st-chip-neutral",
             IconKind::Stop,
-            status_at("chip.stopped", time),
+            fl!(LANGUAGE_LOADER, "chip-stopped-at", time = time.as_str()),
         ),
         TodayStatusDto::OutOfZone(time) => (
             "st-chip-warn",
             IconKind::Alert,
-            status_at("chip.out_of_zone", time),
+            fl!(LANGUAGE_LOADER, "chip-out-of-zone-at", time = time.as_str()),
         ),
-        TodayStatusDto::MissingStop { since } => {
-            ("st-chip-error", IconKind::Alert, missing_stop_label(since))
-        }
+        TodayStatusDto::MissingStop { since } => (
+            "st-chip-error",
+            IconKind::Alert,
+            fl!(LANGUAGE_LOADER, "chip-missing-stop", since = since.as_str()),
+        ),
     }
 }
 
@@ -56,16 +59,16 @@ pub fn StaffTodayPage() -> Element {
         section { class: "st-page",
             div { class: "st-page-head",
                 div {
-                    h1 { {t("today.title")} }
+                    h1 { {fl!(LANGUAGE_LOADER, "today-title")} }
                     p { class: "st-sub", "{date}" }
                 }
                 if ctx.sites.len() > 1 {
                     label { class: "st-field st-field-compact",
-                        span { class: "st-visually-hidden", {t("today.site")} }
+                        span { class: "st-visually-hidden", {fl!(LANGUAGE_LOADER, "today-site")} }
                         select {
                             class: "st-input",
                             onchange: move |e| selected.set(Uuid::parse_str(&e.value()).ok()),
-                            option { value: "", selected: selected().is_none(), {t("today.all_sites")} }
+                            option { value: "", selected: selected().is_none(), {fl!(LANGUAGE_LOADER, "today-all-sites")} }
                             for site in ctx.sites.iter() {
                                 option {
                                     key: "{site.id}",
@@ -81,7 +84,7 @@ pub fn StaffTodayPage() -> Element {
             match overview.get() {
                 Some(data) => rsx! { TodayBody { data } },
                 None if overview.failed() => rsx! {
-                    p { class: "st-sub", role: "alert", {t("staff.err.generic")} }
+                    p { class: "st-sub", role: "alert", {fl!(LANGUAGE_LOADER, "staff-err-generic")} }
                 },
                 None => rsx! { Skeleton { rows: 6 } },
             }
@@ -100,14 +103,14 @@ fn TodayBody(data: TodayOverviewDto) -> Element {
     let shown = data.working_rows.len() - hidden;
     rsx! {
         div { class: "st-stats",
-            Stat { value: data.working, label: t("today.working"), tone: "ok" }
-            Stat { value: data.not_started, label: t("today.not_started"), tone: "neutral" }
-            Stat { value: data.out_of_zone, label: t("today.out_of_zone"), tone: "warn" }
-            Stat { value: data.not_stopped, label: t("today.not_stopped"), tone: "error" }
+            Stat { value: data.working, label: fl!(LANGUAGE_LOADER, "today-working"), tone: "ok" }
+            Stat { value: data.not_started, label: fl!(LANGUAGE_LOADER, "today-not-started"), tone: "neutral" }
+            Stat { value: data.out_of_zone, label: fl!(LANGUAGE_LOADER, "today-out-of-zone"), tone: "warn" }
+            Stat { value: data.not_stopped, label: fl!(LANGUAGE_LOADER, "today-not-stopped"), tone: "error" }
         }
-        h2 { {t("today.attention")} }
+        h2 { {fl!(LANGUAGE_LOADER, "today-attention")} }
         if data.attention.is_empty() {
-            p { class: "st-sub", {t("today.attention_empty")} }
+            p { class: "st-sub", {fl!(LANGUAGE_LOADER, "today-attention-empty")} }
         } else {
             ul { class: "st-list st-card",
                 for row in data.attention {
@@ -115,9 +118,9 @@ fn TodayBody(data: TodayOverviewDto) -> Element {
                 }
             }
         }
-        h2 { {working_title(data.working_rows.len())} }
+        h2 { {fl!(LANGUAGE_LOADER, "today-working-title", count = data.working_rows.len())} }
         if data.working_rows.is_empty() {
-            p { class: "st-sub", {t("today.working_empty")} }
+            p { class: "st-sub", {fl!(LANGUAGE_LOADER, "today-working-empty")} }
         } else {
             ul { class: "st-list st-card",
                 for row in data.working_rows.into_iter().take(shown) {
@@ -129,14 +132,14 @@ fn TodayBody(data: TodayOverviewDto) -> Element {
                     class: "st-btn st-btn-text",
                     r#type: "button",
                     onclick: move |_| expanded.set(true),
-                    {more_label(hidden)}
+                    {fl!(LANGUAGE_LOADER, "more-others", count = hidden)}
                 }
             } else if expanded() {
                 button {
                     class: "st-btn st-btn-text",
                     r#type: "button",
                     onclick: move |_| expanded.set(false),
-                    {t("today.show_less")}
+                    {fl!(LANGUAGE_LOADER, "today-show-less")}
                 }
             }
         }
@@ -144,7 +147,7 @@ fn TodayBody(data: TodayOverviewDto) -> Element {
 }
 
 #[component]
-fn Stat(value: u32, label: &'static str, tone: &'static str) -> Element {
+fn Stat(value: u32, label: String, tone: &'static str) -> Element {
     rsx! {
         div { class: "st-stat st-stat-{tone}",
             span { class: "st-stat-value", "{value}" }
@@ -156,10 +159,10 @@ fn Stat(value: u32, label: &'static str, tone: &'static str) -> Element {
 #[component]
 fn TodayRow(row: TodayRowDto, attention: bool) -> Element {
     let (class, icon, mut label) = status_chip(&row.today);
-    let since = started_at(&row.today).map(since_label);
+    let since = started_at(&row.today).map(|time| fl!(LANGUAGE_LOADER, "today-since", time = time));
     if since.is_some() {
         // The time is already in "sinds 07:42" below the name.
-        label = t("chip.started").to_string();
+        label = fl!(LANGUAGE_LOADER, "chip-started");
     }
     rsx! {
         li { class: "st-row",
@@ -177,7 +180,7 @@ fn TodayRow(row: TodayRowDto, attention: bool) -> Element {
                 Link {
                     class: "st-btn st-btn-text",
                     to: format!("/beheer/mensen?open={}", row.id),
-                    {t("today.view")}
+                    {fl!(LANGUAGE_LOADER, "today-view")}
                 }
             }
         }

@@ -1,7 +1,8 @@
 use dioxus::prelude::*;
 
 use super::AppearancePicker;
-use crate::client::i18n::t;
+use crate::client::i18n::LANGUAGE_LOADER;
+use i18n_embed_fl::fl;
 
 /// Context flag set by pages whose person may open the staff screens: shows a small "Beheer"
 /// link in the header.
@@ -19,10 +20,10 @@ pub fn AppHeader(org_name: String, person_name: Option<String>) -> Element {
                     span { {person} }
                 }
                 if staff_link {
-                    Link { class: "staff-link", to: "/beheer", {t("nav.staff")} }
+                    Link { class: "staff-link", to: "/beheer", {fl!(LANGUAGE_LOADER, "nav-staff")} }
                 }
                 details { class: "header-menu",
-                    summary { class: "header-menu-toggle", {t("appearance.title")} }
+                    summary { class: "header-menu-toggle", {fl!(LANGUAGE_LOADER, "appearance-title")} }
                     div { class: "header-menu-panel", AppearancePicker {} }
                 }
             }

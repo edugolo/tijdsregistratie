@@ -1,33 +1,35 @@
-/* First-run wizard and organisation settings. Tokens fall back to the DESIGN.md defaults. */
+/* First-run wizard and organisation settings. Colours are the --md-* roles from /theme.css. */
 .su-page {
   min-height: 100vh; display: flex; justify-content: center; align-items: flex-start;
-  padding: 16px; background: var(--bg, #f8fafc); color: var(--ink, #0f172a);
+  padding: 16px; background: var(--md-surface); color: var(--md-on-surface);
   font-family: var(--font, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
 }
-.su-page *, .su-form * { box-sizing: border-box; }
+.su-page *, .su-form *, .su-preview * { box-sizing: border-box; }
 .su-card {
   width: 100%; max-width: 560px; display: flex; flex-direction: column; gap: 16px;
-  background: var(--surface, #fff); border: 1px solid var(--line, #e2e8f0);
-  border-radius: var(--radius, 12px); padding: 24px;
+  background: var(--md-surface-container-lowest); border: 1px solid var(--md-outline-variant);
+  border-radius: 16px; padding: 24px;
 }
 .su-card h1 { margin: 0; font-size: 24px; }
 .su-card p { margin: 0; }
-.su-progress { color: var(--sub, #64748b); font-size: 14px; font-weight: 600; }
-.su-bar { height: 6px; border-radius: 3px; background: var(--line, #e2e8f0); overflow: hidden; }
-.su-bar-fill { height: 100%; background: var(--brand, #1e3a8a); transition: width .2s; }
+.su-progress { color: var(--md-on-surface-variant); font-size: 14px; font-weight: 600; }
+.su-bar { height: 6px; border-radius: 3px; background: var(--md-surface-container-highest); overflow: hidden; }
+.su-bar-fill { height: 100%; background: var(--md-primary); transition: width .2s; }
 .su-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
 
-.su-form { display: flex; flex-direction: column; gap: 16px; max-width: 560px; }
+.su-form { display: flex; flex-direction: column; gap: 16px; }
 .su-field { display: flex; flex-direction: column; gap: 4px; }
 .su-label { font-size: 14px; font-weight: 600; }
-.su-hint { font-size: 13px; color: var(--sub, #64748b); }
+.su-hint { font-size: 13px; color: var(--md-on-surface-variant); }
 .su-input {
   min-height: 48px; padding: 0 12px; width: 100%; font: inherit;
-  border: 1.5px solid var(--line, #cbd5e1); border-radius: 12px;
-  background: var(--surface, #fff); color: var(--ink, #0f172a);
+  border: 1.5px solid var(--md-outline); border-radius: 12px;
+  background: var(--md-surface-container-lowest); color: var(--md-on-surface);
 }
-.su-input:focus-visible, .su-swatch:focus-visible, .su-check input:focus-visible {
-  outline: 3px solid var(--brand, #1e3a8a); outline-offset: 2px;
+.su-input[aria-invalid="true"] { border-color: var(--md-error); }
+.su-input:focus-visible, .su-swatch:focus-visible, .su-check input:focus-visible,
+.su-custom input:focus-visible {
+  outline: 3px solid var(--md-primary); outline-offset: 2px;
 }
 .su-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
 .su-swatches { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
@@ -35,27 +37,66 @@
   width: 44px; height: 44px; border-radius: 50%; border: 2px solid transparent; color: #fff;
   display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
 }
-.su-swatch[aria-checked="true"] { border-color: var(--ink, #0f172a); box-shadow: 0 0 0 2px var(--surface, #fff) inset; }
-.su-custom { display: inline-flex; align-items: center; gap: 8px; }
-.su-custom input { width: 44px; height: 44px; padding: 0; border: 0; background: none; cursor: pointer; }
+.su-swatch[aria-checked="true"] {
+  border-color: var(--md-on-surface); box-shadow: 0 0 0 2px var(--md-surface-container-lowest) inset;
+}
+.su-custom { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; margin-top: 4px; }
+.su-custom-well, .su-custom-hex { display: flex; flex-direction: column; gap: 4px; }
+.su-custom-hex .su-input { width: 140px; font-family: ui-monospace, monospace; }
+.su-custom input[type="color"] { width: 56px; height: 48px; padding: 0; border: 0; background: none; cursor: pointer; }
 .su-check { display: flex; align-items: center; gap: 12px; min-height: 48px; }
 .su-check input { width: 24px; height: 24px; flex: none; }
 .su-locate { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
 .su-locate .btn { width: auto; }
 .su-key { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; padding: 8px 0; }
-.su-key .icon { color: var(--brand, #1e3a8a); }
+.su-key .icon { color: var(--md-primary); }
 .su-next { display: flex; flex-direction: column; gap: 12px; }
 .su-next .btn { text-decoration: none; }
 .su-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .su-actions .btn { flex: 1 1 140px; width: auto; }
 .su-error {
-  display: flex; align-items: flex-start; gap: 6px; font-size: 14px; font-weight: 600;
-  color: var(--warn-fg, #92400e); background: var(--warn-bg, #fef3c7);
+  display: flex; align-items: flex-start; gap: 6px; font-size: 14px; font-weight: 600; margin: 0;
+  color: var(--md-on-error-container); background: var(--md-error-container);
   padding: 10px 12px; border-radius: 12px;
 }
 .su-error .icon { flex: none; margin-top: 2px; }
-.su-saved { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--ok-fg, #166534); }
+.su-saved { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--md-on-ok-container); background: var(--md-ok-container); padding: 4px 10px; border-radius: 8px; }
 
+/* Live preview: two mini phones; the roles are set inline on .su-phone, so they show the
+   scheme of the chosen colour, not the saved one. */
+.su-preview { display: flex; flex-direction: column; gap: 8px; }
+.su-phones { display: flex; gap: 16px; flex-wrap: wrap; }
+.su-phone-wrap { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.su-phone {
+  width: 150px; min-height: 250px; padding: 12px; display: flex; flex-direction: column;
+  align-items: center; gap: 12px; border-radius: 20px; border: 2px solid var(--md-outline-variant);
+  background: var(--md-surface); color: var(--md-on-surface);
+}
+.su-phone-name { align-self: flex-start; font-size: 12px; font-weight: 700; color: var(--md-primary);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.su-phone-start {
+  width: 84px; height: 84px; border-radius: 50%; margin: 10px 0 4px; display: grid; place-items: center;
+  background: var(--md-start); color: var(--md-on-start); font-weight: 800; font-size: 14px;
+}
+.su-phone-btn {
+  width: 100%; padding: 8px 0; border-radius: 10px; text-align: center; font-size: 12px; font-weight: 600;
+  background: var(--md-primary); color: var(--md-on-primary);
+}
+.su-phone-chip {
+  display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 8px;
+  font-size: 11px; font-weight: 600; background: var(--md-ok-container); color: var(--md-on-ok-container);
+}
+
+/* Organisation section inside Instellingen: form and preview side by side on desktop. */
+.su-org { display: flex; flex-direction: column; gap: 16px; }
+.su-org h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.su-org-grid { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 24px; align-items: start; }
+.su-org-preview { position: sticky; top: 80px; }
+
+@media (max-width: 900px) {
+  .su-org-grid { grid-template-columns: minmax(0, 1fr); }
+  .su-org-preview { position: static; }
+}
 @media (max-width: 480px) {
   .su-page { padding: 0; }
   .su-card { border-radius: 0; border-left: 0; border-right: 0; padding: 16px; }

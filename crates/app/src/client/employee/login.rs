@@ -34,7 +34,7 @@ pub fn LoginPage() -> Element {
             match sign_in().await {
                 Ok(me) => go(nav, destination_for(&me)),
                 Err(e) => {
-                    error.set(Some(passkey_message(e).to_string()));
+                    error.set(Some(passkey_message(e)));
                     busy.set(false);
                 }
             }

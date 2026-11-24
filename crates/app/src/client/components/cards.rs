@@ -1,7 +1,8 @@
 use dioxus::prelude::*;
 
 use super::Icon;
-use crate::client::i18n::{format_duration, t};
+use crate::client::i18n::{LANGUAGE_LOADER, format_duration};
+use i18n_embed_fl::fl;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
@@ -47,19 +48,19 @@ pub fn DaySummaryCard(
     rsx! {
         dl { class: "summary-card",
             div {
-                dt { {t("stopped.started")} }
+                dt { {fl!(LANGUAGE_LOADER, "stopped-started")} }
                 dd { {started} }
             }
             div {
-                dt { {t("stopped.stopped")} }
+                dt { {fl!(LANGUAGE_LOADER, "stopped-stopped")} }
                 dd { {stopped} }
             }
             div {
-                dt { {t("stopped.break")} }
+                dt { {fl!(LANGUAGE_LOADER, "stopped-break")} }
                 dd { {format_duration(break_minutes)} }
             }
             div {
-                dt { {t("stopped.worked")} }
+                dt { {fl!(LANGUAGE_LOADER, "stopped-worked")} }
                 dd { {format_duration(worked_minutes)} }
             }
         }

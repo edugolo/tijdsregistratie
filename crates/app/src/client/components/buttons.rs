@@ -1,7 +1,8 @@
 use dioxus::prelude::*;
 
 use super::Icon;
-use crate::client::i18n::t;
+use crate::client::i18n::LANGUAGE_LOADER;
+use i18n_embed_fl::fl;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ActionKind {
@@ -19,12 +20,20 @@ pub fn MainActionButton(
     let (class, label, aria) = match kind {
         ActionKind::Start => (
             "main-action start",
-            t("action.start"),
-            t("action.start_label"),
+            fl!(LANGUAGE_LOADER, "action-start"),
+            fl!(LANGUAGE_LOADER, "action-start-label"),
         ),
-        ActionKind::Stop => ("main-action stop", t("action.stop"), t("action.stop_label")),
+        ActionKind::Stop => (
+            "main-action stop",
+            fl!(LANGUAGE_LOADER, "action-stop"),
+            fl!(LANGUAGE_LOADER, "action-stop-label"),
+        ),
     };
-    let aria = if busy { t("action.busy_label") } else { aria };
+    let aria = if busy {
+        fl!(LANGUAGE_LOADER, "action-busy-label")
+    } else {
+        aria
+    };
     rsx! {
         button {
             class,

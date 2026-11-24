@@ -1,6 +1,8 @@
 //! Pure mapping between the server DTOs and the presentational staff types.
 
+use crate::client::i18n::LANGUAGE_LOADER;
 use dioxus::prelude::ServerFnError;
+use i18n_embed_fl::fl;
 use uuid::Uuid;
 
 use super::enroll::EnrollState;
@@ -9,12 +11,12 @@ use crate::api::staff::{
     EnrollStateDto, PersonRowDto, RoleDto, SiteFormDto, SiteRowDto, TodayStatusDto,
 };
 
-/// Translation key of the label of a role.
-pub fn role_key(role: RoleDto) -> &'static str {
+/// Translated label of a role.
+pub fn role_label(role: RoleDto) -> String {
     match role {
-        RoleDto::Employee => "role.employee",
-        RoleDto::Manager => "role.manager",
-        RoleDto::Admin => "role.admin",
+        RoleDto::Employee => fl!(LANGUAGE_LOADER, "role-employee"),
+        RoleDto::Manager => fl!(LANGUAGE_LOADER, "role-manager"),
+        RoleDto::Admin => fl!(LANGUAGE_LOADER, "role-admin"),
     }
 }
 

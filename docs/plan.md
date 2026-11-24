@@ -93,6 +93,8 @@ site); optional OIDC login for managers (identity only, roles stay in the app).
 
 Exact versions are pinned in `Cargo.toml`.
 
+i18n: i18n-embed + `fl!`. Messages live in `crates/app/i18n/<locale>/app.ftl`; add a language by adding `i18n/<locale>/app.ftl`. nl-BE is the fallback.
+
 ## 4. Identity and roles
 
 ### 4.1 One login method for everyone: passkeys

@@ -4,6 +4,7 @@
 //! registers the admin's passkey with the returned token; it can be retried until the token
 //! expires. Setup mode ends on the server as soon as the passkey exists.
 
+mod color;
 mod form;
 mod i18n;
 mod org;
@@ -16,9 +17,8 @@ use crate::api::setup::{
     OrgSettingsInput, SetupInput, check_name, check_setup_code, complete_setup,
 };
 use crate::client::components::{Icon, PrimaryButton, SecondaryButton};
-use form::{
-    ColorPicker, DEFAULT_COLOR, FormError, SiteFields, TextField, TimezoneSelect, format_coordinate,
-};
+use color::{ColorPicker, ThemePreview};
+use form::{DEFAULT_COLOR, FormError, SiteFields, TextField, TimezoneSelect, format_coordinate};
 use i18n::{field_error, progress, t};
 use platform::{LocateFailure, PasskeyFailure};
 
@@ -348,6 +348,7 @@ fn Welcome(w: Wizard) -> Element {
     rsx! {
         p { {t("setup.s1.body")} }
         ol { class: "su-steps",
+            li { {t("setup.s1.step_code")} }
             li { {t("setup.s1.step_org")} }
             li { {t("setup.s1.step_school")} }
             li { {t("setup.s1.step_you")} }
@@ -377,6 +378,7 @@ fn OrgStep(w: Wizard) -> Element {
             hint: t("setup.s2.short_hint").to_string(),
         }
         ColorPicker { value: w.color }
+        ThemePreview { color: w.color, short_name: w.short_name }
         TimezoneSelect { value: w.timezone }
     }
 }

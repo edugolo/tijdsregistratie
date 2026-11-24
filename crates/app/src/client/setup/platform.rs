@@ -56,3 +56,21 @@ pub async fn create_passkey(
 ) -> Result<RegisterPublicKeyCredential, PasskeyFailure> {
     Err(PasskeyFailure::Unsupported)
 }
+
+/// Makes the browser fetch `/theme.css` again, so saved brand colours apply without a reload.
+/// The query string changes the URL; the server ignores it.
+#[cfg(feature = "web")]
+pub fn reload_theme() {
+    let link = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.query_selector("link[href^=\"/theme.css\"]").ok())
+        .flatten();
+    if let Some(link) = link {
+        let stamp = js_sys::Date::now();
+        // Setting an attribute only fails for invalid names; this one is fixed.
+        let _ = link.set_attribute("href", &format!("/theme.css?v={stamp}"));
+    }
+}
+
+#[cfg(not(feature = "web"))]
+pub fn reload_theme() {}

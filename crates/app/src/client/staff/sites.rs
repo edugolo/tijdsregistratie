@@ -3,8 +3,9 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use super::i18n::t;
 use super::icons::{Icon, IconKind};
+use crate::client::i18n::LANGUAGE_LOADER;
+use i18n_embed_fl::fl;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct SiteRow {
@@ -71,14 +72,14 @@ pub enum SiteField {
 }
 
 impl SiteField {
-    fn error_key(self) -> &'static str {
+    fn error(self) -> String {
         match self {
-            Self::Name => "sites.err.name",
-            Self::Lat => "sites.err.lat",
-            Self::Lng => "sites.err.lng",
-            Self::Radius => "sites.err.radius",
-            Self::BreakMinutes => "sites.err.break_minutes",
-            Self::BreakAfter => "sites.err.break_after",
+            Self::Name => fl!(LANGUAGE_LOADER, "sites-err-name"),
+            Self::Lat => fl!(LANGUAGE_LOADER, "sites-err-lat"),
+            Self::Lng => fl!(LANGUAGE_LOADER, "sites-err-lng"),
+            Self::Radius => fl!(LANGUAGE_LOADER, "sites-err-radius"),
+            Self::BreakMinutes => fl!(LANGUAGE_LOADER, "sites-err-break-minutes"),
+            Self::BreakAfter => fl!(LANGUAGE_LOADER, "sites-err-break-after"),
         }
     }
 }
@@ -150,13 +151,13 @@ pub fn SitesPage(
     rsx! {
         section { class: "st-page",
             div { class: "st-page-head",
-                h2 { {t("sites.title")} }
+                h2 { {fl!(LANGUAGE_LOADER, "sites-title")} }
                 button {
                     class: "st-btn",
                     r#type: "button",
                     onclick: move |_| editing.set(Some(RawSiteForm::default())),
                     Icon { kind: IconKind::Plus }
-                    {t("sites.add")}
+                    {fl!(LANGUAGE_LOADER, "sites-add")}
                 }
             }
             if let Some(raw) = editing() {
@@ -181,12 +182,12 @@ pub fn SitesPage(
                                 if site.active {
                                     span { class: "st-chip st-chip-ok",
                                         Icon { kind: IconKind::Check, size: 14 }
-                                        {t("chip.active")}
+                                        {fl!(LANGUAGE_LOADER, "chip-active")}
                                     }
                                 } else {
                                     span { class: "st-chip st-chip-neutral",
                                         Icon { kind: IconKind::Close, size: 14 }
-                                        {t("chip.inactive")}
+                                        {fl!(LANGUAGE_LOADER, "chip-inactive")}
                                     }
                                 }
                                 span { class: "st-sub", "{site.radius_m} m" }
@@ -199,7 +200,7 @@ pub fn SitesPage(
                                         let row = site.clone();
                                         move |_| editing.set(Some(RawSiteForm::from_row(&row)))
                                     },
-                                    {t("sites.edit")}
+                                    {fl!(LANGUAGE_LOADER, "sites-edit")}
                                 }
                                 button {
                                     class: "st-btn st-btn-ghost",
@@ -208,7 +209,7 @@ pub fn SitesPage(
                                         let id = site.id;
                                         move |_| on_toggle_active.call(id)
                                     },
-                                    if site.active { {t("sites.deactivate")} } else { {t("sites.activate")} }
+                                    if site.active { {fl!(LANGUAGE_LOADER, "sites-deactivate")} } else { {fl!(LANGUAGE_LOADER, "sites-activate")} }
                                 }
                             }
                         }
@@ -242,7 +243,7 @@ fn SiteFormCard(
                 }
             },
             label { class: "st-field",
-                span { {t("sites.form.name")} }
+                span { {fl!(LANGUAGE_LOADER, "sites-form-name")} }
                 input {
                     class: "st-input",
                     r#type: "text",
@@ -255,7 +256,7 @@ fn SiteFormCard(
                 }
             }
             label { class: "st-field",
-                span { {t("sites.form.address")} }
+                span { {fl!(LANGUAGE_LOADER, "sites-form-address")} }
                 input {
                     class: "st-input",
                     r#type: "text",
@@ -265,7 +266,7 @@ fn SiteFormCard(
             }
             div { class: "st-grid",
                 label { class: "st-field",
-                    span { {t("sites.form.lat")} }
+                    span { {fl!(LANGUAGE_LOADER, "sites-form-lat")} }
                     input {
                         class: "st-input",
                         r#type: "text",
@@ -279,7 +280,7 @@ fn SiteFormCard(
                     }
                 }
                 label { class: "st-field",
-                    span { {t("sites.form.lng")} }
+                    span { {fl!(LANGUAGE_LOADER, "sites-form-lng")} }
                     input {
                         class: "st-input",
                         r#type: "text",
@@ -293,7 +294,7 @@ fn SiteFormCard(
                     }
                 }
                 label { class: "st-field",
-                    span { {t("sites.form.radius")} }
+                    span { {fl!(LANGUAGE_LOADER, "sites-form-radius")} }
                     input {
                         class: "st-input",
                         r#type: "text",
@@ -307,7 +308,7 @@ fn SiteFormCard(
                     }
                 }
                 label { class: "st-field",
-                    span { {t("sites.form.break_minutes")} }
+                    span { {fl!(LANGUAGE_LOADER, "sites-form-break-minutes")} }
                     input {
                         class: "st-input",
                         r#type: "text",
@@ -321,7 +322,7 @@ fn SiteFormCard(
                     }
                 }
                 label { class: "st-field",
-                    span { {t("sites.form.break_after")} }
+                    span { {fl!(LANGUAGE_LOADER, "sites-form-break-after")} }
                     input {
                         class: "st-input",
                         r#type: "text",
@@ -336,12 +337,12 @@ fn SiteFormCard(
                 }
             }
             div { class: "st-inline",
-                button { class: "st-btn", r#type: "submit", {t("sites.form.save")} }
+                button { class: "st-btn", r#type: "submit", {fl!(LANGUAGE_LOADER, "sites-form-save")} }
                 button {
                     class: "st-btn st-btn-ghost",
                     r#type: "button",
                     onclick: move |_| on_cancel.call(()),
-                    {t("sites.form.cancel")}
+                    {fl!(LANGUAGE_LOADER, "sites-form-cancel")}
                 }
             }
         }
@@ -353,7 +354,7 @@ fn FieldError(field: SiteField) -> Element {
     rsx! {
         span { class: "st-error", role: "alert",
             Icon { kind: IconKind::Alert, size: 14 }
-            {t(field.error_key())}
+            {field.error()}
         }
     }
 }

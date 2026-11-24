@@ -137,42 +137,6 @@ pub fn TimezoneSelect(mut value: Signal<String>) -> Element {
     }
 }
 
-#[component]
-pub fn ColorPicker(mut value: Signal<String>) -> Element {
-    let current = value().to_ascii_lowercase();
-    rsx! {
-        div { class: "su-field",
-            span { class: "su-label", {t("setup.s2.color")} }
-            div { class: "su-swatches", role: "radiogroup", aria_label: t("setup.s2.color"),
-                for (hex, name) in SWATCHES {
-                    button {
-                        key: "{hex}",
-                        r#type: "button",
-                        class: "su-swatch",
-                        role: "radio",
-                        aria_checked: "{current == *hex}",
-                        aria_label: t(name),
-                        title: t(name),
-                        style: "background: {hex}",
-                        onclick: move |_| value.set((*hex).to_string()),
-                        if current == *hex {
-                            Icon { name: "check", size: 20 }
-                        }
-                    }
-                }
-                label { class: "su-custom",
-                    span { class: "su-hint", {t("setup.s2.color_custom")} }
-                    input {
-                        r#type: "color",
-                        value: "{current}",
-                        oninput: move |e| value.set(e.value()),
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Error line under a form; announces itself to screen readers.
 #[component]
 pub fn FormError(message: Option<String>) -> Element {

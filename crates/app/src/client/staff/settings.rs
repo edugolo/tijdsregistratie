@@ -3,13 +3,14 @@
 use dioxus::prelude::*;
 
 use super::flow::{ErrorNotice, report_error};
-use super::i18n::t;
 use super::load::{Skeleton, use_loaded};
 use super::map::{site_form_to_dto, site_from_dto};
 use super::sites::SitesPage;
 use crate::api::staff::{StaffContext, list_sites, save_site, set_site_active};
 use crate::client::components::AppearancePicker;
+use crate::client::i18n::LANGUAGE_LOADER;
 use crate::client::setup::OrgSettingsPage;
+use i18n_embed_fl::fl;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Section {
@@ -21,11 +22,11 @@ enum Section {
 impl Section {
     const ALL: [Self; 3] = [Self::Organisation, Self::Sites, Self::Appearance];
 
-    fn label_key(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::Organisation => "settings.org",
-            Self::Sites => "settings.sites",
-            Self::Appearance => "settings.appearance",
+            Self::Organisation => fl!(LANGUAGE_LOADER, "settings-org"),
+            Self::Sites => fl!(LANGUAGE_LOADER, "settings-sites"),
+            Self::Appearance => fl!(LANGUAGE_LOADER, "settings-appearance"),
         }
     }
 }
@@ -41,17 +42,17 @@ pub fn StaffSettingsPage() -> Element {
     }
     rsx! {
         section { class: "st-page",
-            h1 { {t("settings.title")} }
+            h1 { {fl!(LANGUAGE_LOADER, "settings-title")} }
             div { class: "st-settings",
-                nav { class: "st-settings-nav", aria_label: t("settings.nav.label"),
+                nav { class: "st-settings-nav", aria_label: fl!(LANGUAGE_LOADER, "settings-nav-label"),
                     for item in Section::ALL {
                         button {
-                            key: "{item.label_key()}",
+                            key: "{item.label()}",
                             r#type: "button",
                             class: if item == section() { "st-filter st-filter-active" } else { "st-filter" },
                             aria_current: if item == section() { "page" } else { "false" },
                             onclick: move |_| section.set(item),
-                            {t(item.label_key())}
+                            {item.label()}
                         }
                     }
                 }
@@ -60,7 +61,7 @@ pub fn StaffSettingsPage() -> Element {
                         Section::Organisation => rsx! { OrgSettingsPage {} },
                         Section::Sites => rsx! { SitesSection {} },
                         Section::Appearance => rsx! {
-                            h2 { {t("settings.appearance")} }
+                            h2 { {fl!(LANGUAGE_LOADER, "settings-appearance")} }
                             div { class: "st-card", AppearancePicker {} }
                         },
                     }
@@ -72,11 +73,11 @@ pub fn StaffSettingsPage() -> Element {
 
 #[component]
 fn SitesSection() -> Element {
-    let message = use_signal(|| None::<&'static str>);
+    let message = use_signal(|| None::<String>);
     let sites = use_loaded(list_sites);
     let Some(list) = sites.get() else {
         return if sites.failed() {
-            rsx! { p { class: "st-sub", role: "alert", {t("staff.err.generic")} } }
+            rsx! { p { class: "st-sub", role: "alert", {fl!(LANGUAGE_LOADER, "staff-err-generic")} } }
         } else {
             rsx! { Skeleton { rows: 4 } }
         };

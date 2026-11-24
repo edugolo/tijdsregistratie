@@ -4,7 +4,8 @@ use crate::client::components::{
     ActionKind, DaySummaryCard, Icon, MainActionButton, NoticeCard, PrimaryButton, Screen,
     SecondaryButton, StatusChip, Tone,
 };
-use crate::client::i18n::{break_rule_note, format_duration, t};
+use crate::client::i18n::{LANGUAGE_LOADER, break_rule_note, format_duration};
+use i18n_embed_fl::fl;
 
 /// A message from the manager, shown unobtrusively on the home screen.
 #[derive(Clone, PartialEq)]
@@ -21,8 +22,8 @@ fn Feedback(notice: Option<String>, failed: bool, on_retry: EventHandler<()>) ->
             NoticeCard { icon: "alert-triangle", {notice} }
         }
         if failed {
-            NoticeCard { icon: "alert-triangle", {t("error.network")} }
-            SecondaryButton { label: t("error.retry"), onclick: move |_| on_retry.call(()) }
+            NoticeCard { icon: "alert-triangle", {fl!(LANGUAGE_LOADER, "error-network")} }
+            SecondaryButton { label: fl!(LANGUAGE_LOADER, "error-retry"), onclick: move |_| on_retry.call(()) }
         }
     }
 }
@@ -41,17 +42,17 @@ pub fn Home(
 ) -> Element {
     rsx! {
         Screen { org_name, person_name: Some(person_name),
-            h1 { {t("home.greeting")} }
+            h1 { {fl!(LANGUAGE_LOADER, "home-greeting")} }
             if let Some(site_name) = site_name {
                 StatusChip { tone: Tone::Ok, icon: "map-pin", label: site_name }
             }
             MainActionButton { kind: ActionKind::Start, busy, onclick: move |_| on_start.call(()) }
-            p { class: "text-sub", {t("home.start_hint")} }
+            p { class: "text-sub", {fl!(LANGUAGE_LOADER, "home-start-hint")} }
             Feedback { notice, failed, on_retry: on_start }
             div { class: "spacer" }
             if let Some(message) = message {
                 NoticeCard { icon: "message-square",
-                    {format!("{} {}: {}", t("home.message_from"), message.from, message.text)}
+                    {fl!(LANGUAGE_LOADER, "home-message", from = message.from.as_str(), text = message.text.as_str())}
                 }
             }
         }
@@ -72,17 +73,21 @@ pub fn Working(
     busy: bool,
     on_stop: EventHandler<()>,
 ) -> Element {
-    let chip = format!("{} {}", t("chip.started_at"), started_time);
+    let chip = fl!(
+        LANGUAGE_LOADER,
+        "chip-started-at",
+        time = started_time.as_str()
+    );
     rsx! {
         Screen { org_name, person_name: Some(person_name),
             StatusChip { tone: Tone::Ok, icon: "check", label: chip }
             p { class: "text-sub",
-                {t("working.elapsed")}
+                {fl!(LANGUAGE_LOADER, "working-elapsed")}
                 " "
                 b { class: "text-strong", {format_duration(elapsed_minutes)} }
             }
             MainActionButton { kind: ActionKind::Stop, busy, onclick: move |_| on_stop.call(()) }
-            p { class: "text-sub", {t("working.stop_hint")} }
+            p { class: "text-sub", {fl!(LANGUAGE_LOADER, "working-stop-hint")} }
             Feedback { notice, failed, on_retry: on_stop }
             div { class: "spacer" }
             if let Some(note) = break_rule_note(break_rule_minutes, break_after_minutes) {
@@ -103,24 +108,28 @@ pub fn OutOfZone(
     on_ok: EventHandler<()>,
 ) -> Element {
     let title = if no_location {
-        t("zone.no_location_title")
+        fl!(LANGUAGE_LOADER, "zone-no-location-title")
     } else {
-        t("zone.title")
+        fl!(LANGUAGE_LOADER, "zone-title")
     };
     let saved = if stopped {
-        t("zone.saved_stop")
+        fl!(
+            LANGUAGE_LOADER,
+            "zone-saved-stop",
+            time = saved_time.as_str()
+        )
     } else {
-        t("zone.saved_at")
+        fl!(LANGUAGE_LOADER, "zone-saved-at", time = saved_time.as_str())
     };
     rsx! {
         Screen { org_name, person_name: Some(person_name),
             div { class: "icon-tile warn", Icon { name: "alert-triangle", size: 36 } }
             h1 { {title} }
-            p { class: "text-sub", {saved} " " {saved_time} "." }
-            p { class: "text-sub", {t("zone.manager")} }
+            p { class: "text-sub", {saved} }
+            p { class: "text-sub", {fl!(LANGUAGE_LOADER, "zone-manager")} }
             div { class: "spacer" }
             div { class: "actions",
-                PrimaryButton { label: t("action.ok"), onclick: move |_| on_ok.call(()) }
+                PrimaryButton { label: fl!(LANGUAGE_LOADER, "action-ok"), onclick: move |_| on_ok.call(()) }
             }
         }
     }
@@ -136,14 +145,14 @@ pub fn Stopped(
     break_minutes: u32,
     worked_minutes: u32,
 ) -> Element {
-    let title = format!("{} {}", t("stopped.title"), stopped);
+    let title = fl!(LANGUAGE_LOADER, "stopped-title", time = stopped.as_str());
     rsx! {
         Screen { org_name, person_name: Some(person_name),
             div { class: "icon-tile ok", Icon { name: "check", size: 36 } }
             h1 { {title} }
             DaySummaryCard { started, stopped, break_minutes, worked_minutes }
             div { class: "spacer" }
-            p { class: "text-sub", {t("stopped.bye")} }
+            p { class: "text-sub", {fl!(LANGUAGE_LOADER, "stopped-bye")} }
         }
     }
 }
@@ -154,7 +163,7 @@ pub fn Loading(org_name: String) -> Element {
     rsx! {
         Screen { org_name,
             Icon { name: "loader", size: 36 }
-            p { class: "text-sub", {t("common.loading")} }
+            p { class: "text-sub", {fl!(LANGUAGE_LOADER, "common-loading")} }
         }
     }
 }
@@ -165,10 +174,10 @@ pub fn LoadFailed(org_name: String, on_retry: EventHandler<()>) -> Element {
     rsx! {
         Screen { org_name,
             div { class: "icon-tile warn", Icon { name: "alert-triangle", size: 36 } }
-            p { class: "text-sub", {t("error.network")} }
+            p { class: "text-sub", {fl!(LANGUAGE_LOADER, "error-network")} }
             div { class: "spacer" }
             div { class: "actions",
-                PrimaryButton { label: t("error.retry"), onclick: move |_| on_retry.call(()) }
+                PrimaryButton { label: fl!(LANGUAGE_LOADER, "error-retry"), onclick: move |_| on_retry.call(()) }
             }
         }
     }

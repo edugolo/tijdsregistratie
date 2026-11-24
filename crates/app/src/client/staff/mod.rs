@@ -3,7 +3,6 @@
 
 pub mod enroll;
 mod flow;
-pub mod i18n;
 mod icons;
 pub mod layout;
 mod load;

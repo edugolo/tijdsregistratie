@@ -7,7 +7,8 @@
 
 use dioxus::prelude::*;
 
-use crate::client::i18n::t;
+use crate::client::i18n::LANGUAGE_LOADER;
+use i18n_embed_fl::fl;
 
 const STORAGE_KEY: &str = "tr-theme";
 
@@ -38,11 +39,11 @@ impl Appearance {
             .unwrap_or_default()
     }
 
-    fn label_key(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::System => "appearance.system",
-            Self::Light => "appearance.light",
-            Self::Dark => "appearance.dark",
+            Self::System => fl!(LANGUAGE_LOADER, "appearance-system"),
+            Self::Light => fl!(LANGUAGE_LOADER, "appearance-light"),
+            Self::Dark => fl!(LANGUAGE_LOADER, "appearance-dark"),
         }
     }
 
@@ -106,7 +107,7 @@ pub fn AppearancePicker() -> Element {
     let mut current = use_signal(Appearance::default);
     use_effect(move || current.set(stored()));
     rsx! {
-        div { class: "appearance", role: "radiogroup", "aria-label": t("appearance.title"),
+        div { class: "appearance", role: "radiogroup", "aria-label": fl!(LANGUAGE_LOADER, "appearance-title"),
             for option in Appearance::ALL {
                 button {
                     key: "{option.value()}",
@@ -119,7 +120,7 @@ pub fn AppearancePicker() -> Element {
                         apply(option);
                         current.set(option);
                     },
-                    {t(option.label_key())}
+                    {option.label()}
                 }
             }
         }

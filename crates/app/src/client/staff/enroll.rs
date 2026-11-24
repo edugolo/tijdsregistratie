@@ -2,8 +2,9 @@
 
 use dioxus::prelude::*;
 
-use super::i18n::{countdown_label, enroll_for, t};
 use super::icons::{Icon, IconKind};
+use crate::client::i18n::LANGUAGE_LOADER;
+use i18n_embed_fl::fl;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EnrollState {
@@ -35,22 +36,22 @@ pub fn EnrollPanel(
                         div {
                             class: "st-qr",
                             role: "img",
-                            aria_label: t("enroll.qr_label"),
+                            aria_label: fl!(LANGUAGE_LOADER, "enroll-qr-label"),
                             dangerous_inner_html: qr_svg,
                         }
                         div { class: "st-enroll-body",
                             h1 { "{person_name}" }
-                            p { class: "st-sub", {t("enroll.hint")} }
-                            p { class: "st-sub", {t("enroll.check")} }
+                            p { class: "st-sub", {fl!(LANGUAGE_LOADER, "enroll-hint")} }
+                            p { class: "st-sub", {fl!(LANGUAGE_LOADER, "enroll-check")} }
                             div { class: "st-inline",
                                 span { class: "st-chip st-chip-brand", role: "timer",
-                                    {countdown_label(&format_countdown(seconds_left))}
+                                    {fl!(LANGUAGE_LOADER, "enroll-countdown", time = format_countdown(seconds_left))}
                                 }
                                 button {
                                     class: "st-btn st-btn-ghost",
                                     r#type: "button",
                                     onclick: move |_| on_cancel.call(()),
-                                    {t("enroll.cancel")}
+                                    {fl!(LANGUAGE_LOADER, "enroll-cancel")}
                                 }
                             }
                         }
@@ -59,15 +60,15 @@ pub fn EnrollPanel(
                         div { class: "st-enroll-body st-center", role: "status",
                             span { class: "st-chip st-chip-ok st-chip-big",
                                 Icon { kind: IconKind::Check, size: 20 }
-                                {t("enroll.linked")}
+                                {fl!(LANGUAGE_LOADER, "enroll-linked")}
                             }
-                            h1 { {enroll_for(&person_name)} }
-                            p { class: "st-sub", {t("enroll.linked_hint")} }
+                            h1 { {fl!(LANGUAGE_LOADER, "enroll-for", name = person_name.as_str())} }
+                            p { class: "st-sub", {fl!(LANGUAGE_LOADER, "enroll-linked-hint")} }
                             button {
                                 class: "st-btn",
                                 r#type: "button",
                                 onclick: move |_| on_cancel.call(()),
-                                {t("enroll.close")}
+                                {fl!(LANGUAGE_LOADER, "enroll-close")}
                             }
                         }
                     },
@@ -76,20 +77,20 @@ pub fn EnrollPanel(
                             h1 { "{person_name}" }
                             div { class: "st-notice st-notice-warn",
                                 Icon { kind: IconKind::Alert, size: 20 }
-                                p { {t("enroll.expired")} }
+                                p { {fl!(LANGUAGE_LOADER, "enroll-expired")} }
                             }
                             div { class: "st-inline",
                                 button {
                                     class: "st-btn",
                                     r#type: "button",
                                     onclick: move |_| on_new_code.call(()),
-                                    {t("enroll.new_code")}
+                                    {fl!(LANGUAGE_LOADER, "enroll-new-code")}
                                 }
                                 button {
                                     class: "st-btn st-btn-ghost",
                                     r#type: "button",
                                     onclick: move |_| on_cancel.call(()),
-                                    {t("enroll.cancel")}
+                                    {fl!(LANGUAGE_LOADER, "enroll-cancel")}
                                 }
                             }
                         }

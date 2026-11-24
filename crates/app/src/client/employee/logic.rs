@@ -5,7 +5,8 @@ use domain::{EventKind, ZoneStatus};
 
 use super::env::PasskeyError;
 use crate::api::auth::Me;
-use crate::client::i18n::{format_time, t};
+use crate::client::i18n::{LANGUAGE_LOADER, format_time};
+use i18n_embed_fl::fl;
 
 /// The enrollment code in a URL fragment (`#<code>`); `None` when there is none. The code lives
 /// in the fragment because browsers never send it to servers, proxies or `Referer` headers.
@@ -96,11 +97,11 @@ pub fn needs_location_step(destination: Destination, permission_granted: bool) -
 }
 
 /// Plain-language text for a passkey ceremony that did not complete.
-pub fn passkey_message(error: PasskeyError) -> &'static str {
+pub fn passkey_message(error: PasskeyError) -> String {
     match error {
-        PasskeyError::Cancelled => t("key.cancelled"),
-        PasskeyError::Unsupported => t("key.unsupported"),
-        PasskeyError::Failed => t("key.failed"),
+        PasskeyError::Cancelled => fl!(LANGUAGE_LOADER, "key-cancelled"),
+        PasskeyError::Unsupported => fl!(LANGUAGE_LOADER, "key-unsupported"),
+        PasskeyError::Failed => fl!(LANGUAGE_LOADER, "key-failed"),
     }
 }
 

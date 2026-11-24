@@ -117,7 +117,7 @@ pub fn EnrollPage() -> Element {
                                 }
                             }
                             Err(e) => {
-                                error.set(Some(passkey_message(e).to_string()));
+                                error.set(Some(passkey_message(e)));
                                 busy.set(false);
                             }
                         }

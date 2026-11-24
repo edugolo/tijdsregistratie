@@ -10,7 +10,10 @@ pub fn t(key: &str) -> &str {
         "setup.busy" => "Even wachten",
 
         "setup.s1.title" => "Welkom",
-        "setup.s1.body" => "We stellen alles in vijf korte stappen in.",
+        "setup.s1.body" => {
+            "We stellen alles in vijf korte stappen in. Dit is stap 1: de installatiecode."
+        }
+        "setup.s1.step_code" => "Installatiecode",
         "setup.s1.step_org" => "Je organisatie",
         "setup.s1.step_school" => "Je eerste school",
         "setup.s1.step_you" => "Over jou",
@@ -28,6 +31,8 @@ pub fn t(key: &str) -> &str {
         "setup.s2.short_hint" => "Die zie je bovenaan in de app.",
         "setup.s2.color" => "Kleur",
         "setup.s2.color_custom" => "Eigen kleur",
+        "setup.s2.color_hex" => "Kleurcode",
+        "setup.s2.color_hint" => "De app maakt hier automatisch lichte en donkere tinten van.",
         "setup.s2.timezone" => "Tijdzone",
 
         "setup.s3.title" => "Je eerste school",
@@ -92,6 +97,15 @@ pub fn t(key: &str) -> &str {
         "color.green" => "Groen",
         "color.slate" => "Grijs",
 
+        "preview.title" => "Voorbeeld",
+        "preview.light" => "Licht",
+        "preview.dark" => "Donker",
+        "preview.start" => "START",
+        "preview.button" => "Aanmelden",
+        "preview.chip" => "Gekoppeld",
+        "preview.name_fallback" => "Korte naam",
+
+        "err.hex" => "Dat is geen kleurcode. Gebruik zes tekens, bijvoorbeeld #1e3a8a.",
         "err.display_name" => "Vul de naam van de organisatie in (maximaal 100 tekens).",
         "err.short_name" => "Vul een korte naam in (maximaal 100 tekens).",
         "err.brand_color" => "Kies een kleur.",

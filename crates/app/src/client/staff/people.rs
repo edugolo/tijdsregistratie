@@ -4,14 +4,17 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use super::flow::{EnrollFlow, ErrorNotice, report_error};
-use super::i18n::{no_device_hint, t};
 use super::icons::{Icon, IconKind};
 use super::load::{Skeleton, use_loaded};
-use super::map::{highest_role, matches_query, person_sites, role_key, school_names, toggle_site};
+use super::map::{
+    highest_role, matches_query, person_sites, role_label, school_names, toggle_site,
+};
 use crate::api::staff::{
     PersonRowDto, RoleDto, SiteOption, StaffContext, add_member, people as fetch_people,
     revoke_devices, set_person_active, set_person_role, set_person_sites,
 };
+use crate::client::i18n::LANGUAGE_LOADER;
+use i18n_embed_fl::fl;
 
 /// `/beheer/mensen`: `open` is the id of a person to open at once (from "Bekijk" on Vandaag).
 #[component]
@@ -37,14 +40,14 @@ pub fn StaffPeoplePage(open: String) -> Element {
     rsx! {
         section { class: "st-page",
             div { class: "st-page-head",
-                h1 { {t("people.title")} }
+                h1 { {fl!(LANGUAGE_LOADER, "people-title")} }
                 if !ctx.sites.is_empty() {
                     button {
                         class: "st-btn",
                         r#type: "button",
                         onclick: move |_| adding.set(!adding()),
                         Icon { kind: IconKind::Plus }
-                        {t("people.add")}
+                        {fl!(LANGUAGE_LOADER, "people-add")}
                     }
                 }
             }
@@ -62,16 +65,16 @@ pub fn StaffPeoplePage(open: String) -> Element {
                 input {
                     class: "st-input st-search",
                     r#type: "search",
-                    aria_label: t("people.search"),
-                    placeholder: t("people.search"),
+                    aria_label: fl!(LANGUAGE_LOADER, "people-search"),
+                    placeholder: fl!(LANGUAGE_LOADER, "people-search"),
                     autocomplete: "off",
                     value: "{query}",
                     oninput: move |e| query.set(e.value()),
                 }
                 if ctx.sites.len() > 1 {
-                    div { class: "st-chips", role: "group", aria_label: t("people.filter"),
+                    div { class: "st-chips", role: "group", aria_label: fl!(LANGUAGE_LOADER, "people-filter"),
                         FilterChip {
-                            label: t("people.all_sites").to_string(),
+                            label: fl!(LANGUAGE_LOADER, "people-all-sites"),
                             active: site_filter().is_none(),
                             on_click: move |_| site_filter.set(None),
                         }
@@ -141,13 +144,13 @@ fn PeopleList(
 ) -> Element {
     if !loaded {
         return if failed {
-            rsx! { p { class: "st-sub", role: "alert", {t("staff.err.generic")} } }
+            rsx! { p { class: "st-sub", role: "alert", {fl!(LANGUAGE_LOADER, "staff-err-generic")} } }
         } else {
             rsx! { Skeleton { rows: 7 } }
         };
     }
     if visible.is_empty() {
-        return rsx! { p { class: "st-sub", {t("people.empty")} } };
+        return rsx! { p { class: "st-sub", {fl!(LANGUAGE_LOADER, "people-empty")} } };
     }
     rsx! {
         ul { class: "st-list st-card",
@@ -183,18 +186,18 @@ fn PersonRow(person: PersonRowDto, selected: bool, on_select: EventHandler<Uuid>
                 span { class: "st-row-name", "{person.name}" }
                 span { class: "st-row-school", "{schools}" }
                 span { class: "st-row-chips",
-                    span { class: "{role_class}", {t(role_key(role))} }
+                    span { class: "{role_class}", {role_label(role)} }
                     if !person.active {
-                        span { class: "st-chip st-chip-neutral", {t("chip.inactive")} }
+                        span { class: "st-chip st-chip-neutral", {fl!(LANGUAGE_LOADER, "chip-inactive")} }
                     } else if person.device_linked {
                         span { class: "st-chip st-chip-ok",
                             Icon { kind: IconKind::Check, size: 14 }
-                            {t("chip.linked")}
+                            {fl!(LANGUAGE_LOADER, "chip-linked")}
                         }
                     } else {
                         span { class: "st-chip st-chip-warn",
                             Icon { kind: IconKind::Phone, size: 14 }
-                            {t("chip.no_device")}
+                            {fl!(LANGUAGE_LOADER, "chip-no-device")}
                         }
                     }
                 }
@@ -211,7 +214,7 @@ fn AddPerson(
 ) -> Element {
     let mut name = use_signal(String::new);
     let mut site = use_signal(|| sites.first().map(|s| s.id));
-    let message = use_signal(|| None::<&'static str>);
+    let message = use_signal(|| None::<String>);
     rsx! {
         form {
             class: "st-card st-form",
@@ -232,7 +235,7 @@ fn AddPerson(
             ErrorNotice { message }
             div { class: "st-inline",
                 label { class: "st-field",
-                    span { {t("people.add.name")} }
+                    span { {fl!(LANGUAGE_LOADER, "people-add-name")} }
                     input {
                         class: "st-input",
                         r#type: "text",
@@ -242,7 +245,7 @@ fn AddPerson(
                     }
                 }
                 label { class: "st-field",
-                    span { {t("people.add.site")} }
+                    span { {fl!(LANGUAGE_LOADER, "people-add-site")} }
                     select {
                         class: "st-input",
                         onchange: move |e| site.set(Uuid::parse_str(&e.value()).ok()),
@@ -258,12 +261,12 @@ fn AddPerson(
                 }
             }
             div { class: "st-inline",
-                button { class: "st-btn", r#type: "submit", {t("people.add.submit")} }
+                button { class: "st-btn", r#type: "submit", {fl!(LANGUAGE_LOADER, "people-add-submit")} }
                 button {
                     class: "st-btn st-btn-text",
                     r#type: "button",
                     onclick: move |_| on_close.call(()),
-                    {t("people.add.cancel")}
+                    {fl!(LANGUAGE_LOADER, "people-add-cancel")}
                 }
             }
         }
@@ -288,7 +291,7 @@ fn PersonPanel(
 ) -> Element {
     let mut linking = use_signal(|| false);
     let mut pending = use_signal(|| None::<Pending>);
-    let message = use_signal(|| None::<&'static str>);
+    let message = use_signal(|| None::<String>);
     let id = person.id;
     let role = highest_role(&person);
     let chosen = person_sites(&person);
@@ -323,26 +326,26 @@ fn PersonPanel(
             PanelHead { name: person.name.clone(), role, schools: school_names(&person), on_close }
             ErrorNotice { message }
             if !manageable {
-                p { class: "st-sub", {t("panel.read_only")} }
+                p { class: "st-sub", {fl!(LANGUAGE_LOADER, "panel-read-only")} }
             }
 
             section { class: "st-panel-section",
-                h3 { {t("panel.device")} }
+                h3 { {fl!(LANGUAGE_LOADER, "panel-device")} }
                 if person.device_linked {
                     span { class: "st-chip st-chip-ok",
                         Icon { kind: IconKind::Check, size: 14 }
-                        {t("chip.linked")}
+                        {fl!(LANGUAGE_LOADER, "chip-linked")}
                     }
                 } else {
                     div { class: "st-notice st-notice-warn",
                         Icon { kind: IconKind::Phone, size: 20 }
-                        p { {no_device_hint(&person.name)} }
+                        p { {fl!(LANGUAGE_LOADER, "people-no-device-hint", name = person.name.as_str())} }
                     }
                 }
                 if manageable && person.active {
                     if person.device_linked {
                         Confirmable {
-                            label: t("panel.revoke"),
+                            label: fl!(LANGUAGE_LOADER, "panel-revoke"),
                             asking: pending() == Some(Pending::Revoke),
                             on_ask: move |_| pending.set(Some(Pending::Revoke)),
                             on_cancel: move |_| pending.set(None),
@@ -356,15 +359,15 @@ fn PersonPanel(
                             class: "st-btn st-btn-tonal",
                             r#type: "button",
                             onclick: move |_| linking.set(true),
-                            {t("panel.link")}
+                            {fl!(LANGUAGE_LOADER, "panel-link")}
                         }
                     }
                 }
             }
 
             section { class: "st-panel-section",
-                h3 { {t("panel.role")} }
-                div { class: "st-radios", role: "radiogroup", aria_label: t("panel.role"),
+                h3 { {fl!(LANGUAGE_LOADER, "panel-role")} }
+                div { class: "st-radios", role: "radiogroup", aria_label: fl!(LANGUAGE_LOADER, "panel-role"),
                     for option in [RoleDto::Employee, RoleDto::Manager, RoleDto::Admin] {
                         label { key: "{option:?}", class: "st-radio",
                             input {
@@ -378,19 +381,19 @@ fn PersonPanel(
                                     run(Box::pin(set_person_role(id, option)));
                                 },
                             }
-                            {t(role_key(option))}
+                            {role_label(option)}
                         }
                     }
                 }
                 if !is_admin {
-                    p { class: "st-sub", {t("panel.role_admin_only")} }
+                    p { class: "st-sub", {fl!(LANGUAGE_LOADER, "panel-role-admin-only")} }
                 }
             }
 
             section { class: "st-panel-section",
-                h3 { {t("panel.sites")} }
+                h3 { {fl!(LANGUAGE_LOADER, "panel-sites")} }
                 if role == RoleDto::Admin {
-                    p { class: "st-sub", {t("panel.admin_sites")} }
+                    p { class: "st-sub", {fl!(LANGUAGE_LOADER, "panel-admin-sites")} }
                 } else {
                     div { class: "st-chips",
                         for site in sites.iter() {
@@ -418,7 +421,7 @@ fn PersonPanel(
                 section { class: "st-panel-section st-panel-danger",
                     if person.active {
                         Confirmable {
-                            label: t("panel.deactivate"),
+                            label: fl!(LANGUAGE_LOADER, "panel-deactivate"),
                             asking: pending() == Some(Pending::Deactivate),
                             on_ask: move |_| pending.set(Some(Pending::Deactivate)),
                             on_cancel: move |_| pending.set(None),
@@ -434,7 +437,7 @@ fn PersonPanel(
                             onclick: move |_| {
                                 run(Box::pin(set_person_active(id, true)));
                             },
-                            {t("panel.activate")}
+                            {fl!(LANGUAGE_LOADER, "panel-activate")}
                         }
                     }
                 }
@@ -450,7 +453,7 @@ fn PanelHead(name: String, role: RoleDto, schools: String, on_close: EventHandle
             div {
                 h2 { "{name}" }
                 p { class: "st-sub",
-                    {t(role_key(role))}
+                    {role_label(role)}
                     if !schools.is_empty() {
                         " · {schools}"
                     }
@@ -459,7 +462,7 @@ fn PanelHead(name: String, role: RoleDto, schools: String, on_close: EventHandle
             button {
                 class: "st-icon-btn",
                 r#type: "button",
-                aria_label: t("panel.close"),
+                aria_label: fl!(LANGUAGE_LOADER, "panel-close"),
                 onclick: move |_| on_close.call(()),
                 Icon { kind: IconKind::Close, size: 20 }
             }
@@ -487,7 +490,7 @@ fn SiteToggle(name: String, on: bool, disabled: bool, on_toggle: EventHandler<bo
 /// A text button that asks "Zeker?" before it confirms.
 #[component]
 fn Confirmable(
-    label: &'static str,
+    label: String,
     asking: bool,
     on_ask: EventHandler<()>,
     on_cancel: EventHandler<()>,
@@ -505,18 +508,18 @@ fn Confirmable(
     }
     rsx! {
         div { class: "st-inline",
-            span { class: "st-sub", {t("staff.confirm")} }
+            span { class: "st-sub", {fl!(LANGUAGE_LOADER, "staff-confirm")} }
             button {
                 class: "st-btn st-btn-danger",
                 r#type: "button",
                 onclick: move |_| on_confirm.call(()),
-                {t("staff.confirm_yes")}
+                {fl!(LANGUAGE_LOADER, "staff-confirm-yes")}
             }
             button {
                 class: "st-btn st-btn-text",
                 r#type: "button",
                 onclick: move |_| on_cancel.call(()),
-                {t("staff.confirm_no")}
+                {fl!(LANGUAGE_LOADER, "staff-confirm-no")}
             }
         }
     }
