@@ -18,7 +18,7 @@ use crate::api::setup::setup_required;
 use employee::{EnrollPage, HomePage, LegacyCode, LegacyEnrollPage, LoginPage};
 use preview::{PreviewAll, PreviewOne, ScreenId};
 use setup::SetupPage;
-use staff::{StaffLayout, StaffPeoplePage, StaffSettingsPage, StaffTodayPage};
+use staff::{StaffHoursPage, StaffLayout, StaffPeoplePage, StaffSettingsPage, StaffTodayPage};
 
 #[derive(Clone, Routable, PartialEq)]
 #[rustfmt::skip]
@@ -37,6 +37,8 @@ enum Route {
             StaffTodayPage {},
             #[route("/beheer/mensen?:open")]
             StaffPeoplePage { open: String },
+            #[route("/beheer/uren")]
+            StaffHoursPage {},
             #[route("/beheer/instellingen")]
             StaffSettingsPage {},
         #[end_layout]

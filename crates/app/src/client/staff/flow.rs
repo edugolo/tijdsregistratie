@@ -22,6 +22,14 @@ pub fn report_error(error: &ServerFnError, mut message: Signal<Option<String>>) 
     }
 }
 
+/// The HTTP-like status code of a failed server call, when the server sent one.
+pub fn error_code(error: &ServerFnError) -> Option<u16> {
+    match error {
+        ServerFnError::ServerError { code, .. } => Some(*code),
+        _ => None,
+    }
+}
+
 /// Inline error notice; renders nothing without an error.
 #[component]
 pub fn ErrorNotice(message: Signal<Option<String>>) -> Element {

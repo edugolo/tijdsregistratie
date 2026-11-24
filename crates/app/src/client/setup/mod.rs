@@ -15,6 +15,7 @@ use crate::api::auth::{begin_registration, finish_registration};
 use crate::api::geocode::GeoSuggestion;
 use crate::api::setup::{
     MAX_ADDRESS_CHARS, OrgSettingsInput, SetupInput, check_name, check_setup_code, complete_setup,
+    setup_required,
 };
 use crate::client::address_search::{AddressSearch, Look};
 use crate::client::components::{Icon, PrimaryButton, SecondaryButton};
@@ -339,10 +340,24 @@ fn field_error(code: &str) -> String {
     }
 }
 
+/// Whether `/setup` should hand over to the home page: only when the server reports that setup is
+/// no longer required. An unknown answer keeps the wizard open.
+fn leaves_setup(setup_needed: Option<bool>) -> bool {
+    setup_needed == Some(false)
+}
+
 /// `/setup`: first-run wizard.
 #[component]
 pub fn SetupPage() -> Element {
     let w = Wizard::new();
+    let nav = use_navigator();
+    // Checked once, on mount. A wizard that completes setup in this mount keeps its final screen,
+    // because the check is not repeated.
+    use_resource(move || async move {
+        if leaves_setup(setup_required().await.ok()) {
+            nav.replace(super::Route::HomePage {});
+        }
+    });
     let step = (w.step)();
     let title = match step {
         Step::Welcome => fl!(LANGUAGE_LOADER, "setup-s1-title"),
@@ -617,6 +632,13 @@ mod tests {
         assert_eq!(Step::About.previous(), Some(Step::School));
         assert_eq!(Step::Key.previous(), None);
         assert_eq!(Step::Welcome.previous(), None);
+    }
+
+    #[test]
+    fn only_a_finished_setup_leaves_the_wizard() {
+        assert!(leaves_setup(Some(false)));
+        assert!(!leaves_setup(Some(true)));
+        assert!(!leaves_setup(None));
     }
 
     #[test]

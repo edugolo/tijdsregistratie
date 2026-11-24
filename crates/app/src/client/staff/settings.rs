@@ -8,6 +8,7 @@ use super::flow::{ErrorNotice, report_error};
 use super::load::{Skeleton, use_loaded};
 use super::map::{site_form_to_dto, site_from_dto};
 use super::sites::{SaveRequest, SitesPage};
+use crate::api::hours::set_site_cost_centre;
 use crate::api::staff::{StaffContext, list_sites, save_site, set_site_active};
 use crate::client::components::AppearancePicker;
 use crate::client::i18n::LANGUAGE_LOADER;
@@ -109,6 +110,7 @@ fn SitesSection() -> Element {
         };
     };
     let current = list.clone();
+    let known = list.clone();
     rsx! {
         ErrorNotice { message }
         SitesPage {
@@ -116,9 +118,22 @@ fn SitesSection() -> Element {
             on_save: move |request: SaveRequest| {
                 let mut message = message;
                 message.set(None);
+                let cost_centre = request.form.cost_centre.clone();
+                let form = site_form_to_dto(request.form);
+                let before = known
+                    .iter()
+                    .find(|s| Some(s.id) == form.id)
+                    .and_then(|s| s.cost_centre.clone());
                 spawn(async move {
-                    match save_site(site_form_to_dto(request.form)).await {
-                        Ok(_) => {
+                    let saved = match save_site(form).await {
+                        Ok(saved) if cost_centre != before => {
+                            set_site_cost_centre(saved.id, cost_centre).await
+                        }
+                        Ok(_) => Ok(()),
+                        Err(e) => Err(e),
+                    };
+                    match saved {
+                        Ok(()) => {
                             sites.reload();
                             request.done.call(true);
                         }

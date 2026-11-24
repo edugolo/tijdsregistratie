@@ -114,6 +114,7 @@ pub fn site_from_dto(dto: SiteRowDto) -> SiteRow {
         break_minutes: dto.break_minutes,
         break_after_minutes: dto.break_after_minutes,
         active: dto.active,
+        cost_centre: dto.cost_centre.unwrap_or_default(),
     }
 }
 
@@ -290,6 +291,7 @@ mod tests {
             radius_m: 150,
             break_minutes: 30,
             break_after_minutes: 360,
+            cost_centre: None,
         });
         assert_eq!(dto.id, Some(id(3)));
         assert_eq!(dto.radius_m, 150);
@@ -308,9 +310,11 @@ mod tests {
             break_minutes: 0,
             break_after_minutes: 0,
             active: false,
+            cost_centre: Some("KP-7".into()),
         });
         assert!(!row.active);
         assert_eq!(row.radius_m, 100);
+        assert_eq!(row.cost_centre, "KP-7");
     }
 
     #[test]

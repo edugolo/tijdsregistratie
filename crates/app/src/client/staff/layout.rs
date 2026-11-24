@@ -1,4 +1,4 @@
-//! Persistent shell of the manager, HR and admin pages: app bar with the three destinations and the
+//! Persistent shell of the manager, HR and admin pages: app bar with the four destinations and the
 //! signed-in person. It is the layout route of the staff pages, so it stays mounted while the
 //! content below it changes, and it loads the [`StaffContext`] once for all of them.
 
@@ -19,6 +19,7 @@ const STAFF_CSS: Asset = asset!("/assets/staff.css");
 pub enum StaffNav {
     Today,
     People,
+    Hours,
     Settings,
 }
 
@@ -27,6 +28,7 @@ impl StaffNav {
         match self {
             Self::Today => fl!(LANGUAGE_LOADER, "staff-nav-today"),
             Self::People => fl!(LANGUAGE_LOADER, "staff-nav-people"),
+            Self::Hours => fl!(LANGUAGE_LOADER, "staff-nav-hours"),
             Self::Settings => fl!(LANGUAGE_LOADER, "staff-nav-settings"),
         }
     }
@@ -35,6 +37,7 @@ impl StaffNav {
         match self {
             Self::Today => "/beheer",
             Self::People => "/beheer/mensen",
+            Self::Hours => "/beheer/uren",
             Self::Settings => "/beheer/instellingen",
         }
     }
@@ -43,17 +46,23 @@ impl StaffNav {
         match route {
             Route::StaffTodayPage {} => Some(Self::Today),
             Route::StaffPeoplePage { .. } => Some(Self::People),
+            Route::StaffHoursPage {} => Some(Self::Hours),
             Route::StaffSettingsPage {} => Some(Self::Settings),
             _ => None,
         }
     }
 }
 
-/// Destinations for all staff. "Instellingen" holds everything for admins, "Weergave" and
+/// Destinations for all staff. "Uren" shows the hours of the people in scope. "Instellingen" holds everything for admins, "Weergave" and
 /// "Mijn toestellen" for HR and only "Mijn toestellen" for managers. Managers see their own
 /// sites in the other two.
 pub fn nav_items() -> Vec<StaffNav> {
-    vec![StaffNav::Today, StaffNav::People, StaffNav::Settings]
+    vec![
+        StaffNav::Today,
+        StaffNav::People,
+        StaffNav::Hours,
+        StaffNav::Settings,
+    ]
 }
 
 #[component]
@@ -139,10 +148,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_staff_see_today_people_and_settings() {
+    fn all_staff_see_today_people_hours_and_settings() {
         assert_eq!(
             nav_items(),
-            vec![StaffNav::Today, StaffNav::People, StaffNav::Settings]
+            vec![
+                StaffNav::Today,
+                StaffNav::People,
+                StaffNav::Hours,
+                StaffNav::Settings
+            ]
         );
     }
 }

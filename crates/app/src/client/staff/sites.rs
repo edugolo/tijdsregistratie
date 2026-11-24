@@ -17,6 +17,7 @@ const DEFAULT_RADIUS_M: &str = "150";
 const DEFAULT_BREAK_MINUTES: &str = "30";
 const DEFAULT_BREAK_AFTER_MINUTES: &str = "360";
 const MAX_ADDRESS_CHARS: usize = 200;
+const MAX_COST_CENTRE_CHARS: usize = 50;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct SiteRow {
@@ -29,6 +30,8 @@ pub struct SiteRow {
     pub break_minutes: u32,
     pub break_after_minutes: u32,
     pub active: bool,
+    /// Empty when there is none.
+    pub cost_centre: String,
 }
 
 /// Validated form output. `id` is `None` for a new site.
@@ -42,6 +45,8 @@ pub struct SiteForm {
     pub radius_m: u32,
     pub break_minutes: u32,
     pub break_after_minutes: u32,
+    /// `None` clears it.
+    pub cost_centre: Option<String>,
 }
 
 /// Raw text of the form fields, as typed.
@@ -55,6 +60,7 @@ pub struct RawSiteForm {
     pub radius_m: String,
     pub break_minutes: String,
     pub break_after_minutes: String,
+    pub cost_centre: String,
 }
 
 impl RawSiteForm {
@@ -90,6 +96,7 @@ impl RawSiteForm {
             radius_m: row.radius_m.to_string(),
             break_minutes: row.break_minutes.to_string(),
             break_after_minutes: row.break_after_minutes.to_string(),
+            cost_centre: row.cost_centre.clone(),
         }
     }
 }
@@ -102,6 +109,7 @@ pub enum SiteField {
     Radius,
     BreakMinutes,
     BreakAfter,
+    CostCentre,
 }
 
 impl SiteField {
@@ -113,6 +121,7 @@ impl SiteField {
             Self::Radius => fl!(LANGUAGE_LOADER, "sites-err-radius"),
             Self::BreakMinutes => fl!(LANGUAGE_LOADER, "sites-err-break-minutes"),
             Self::BreakAfter => fl!(LANGUAGE_LOADER, "sites-err-break-after"),
+            Self::CostCentre => fl!(LANGUAGE_LOADER, "sites-err-cost-centre"),
         }
     }
 }
@@ -136,6 +145,7 @@ pub fn validate_site_form(raw: &RawSiteForm) -> Result<SiteForm, Vec<SiteField>>
     let break_minutes = parse_uint(&raw.break_minutes, 0, 240);
     let break_after = parse_uint(&raw.break_after_minutes, 0, 720);
 
+    let cost_centre = raw.cost_centre.trim();
     let mut errors = Vec::new();
     if name.is_empty() {
         errors.push(SiteField::Name);
@@ -155,6 +165,11 @@ pub fn validate_site_form(raw: &RawSiteForm) -> Result<SiteForm, Vec<SiteField>>
     if break_after.is_none() {
         errors.push(SiteField::BreakAfter);
     }
+    if cost_centre.chars().count() > MAX_COST_CENTRE_CHARS
+        || cost_centre.chars().any(char::is_control)
+    {
+        errors.push(SiteField::CostCentre);
+    }
     match (lat, lng, radius, break_minutes, break_after) {
         (Some(lat), Some(lng), Some(radius_m), Some(break_minutes), Some(break_after_minutes))
             if errors.is_empty() =>
@@ -168,6 +183,7 @@ pub fn validate_site_form(raw: &RawSiteForm) -> Result<SiteForm, Vec<SiteField>>
                 radius_m,
                 break_minutes,
                 break_after_minutes,
+                cost_centre: (!cost_centre.is_empty()).then(|| cost_centre.to_string()),
             })
         }
         _ => Err(errors),
@@ -701,6 +717,26 @@ fn SiteEditorPanel(
                         }
                     }
                 }
+                Field {
+                    control_id: "site-cost-centre",
+                    label: fl!(LANGUAGE_LOADER, "sites-form-cost-centre"),
+                    error: has_error(SiteField::CostCentre).then(|| SiteField::CostCentre.error()),
+                    input {
+                        id: "site-cost-centre",
+                        class: "st-input",
+                        r#type: "text",
+                        autocomplete: "off",
+                        value: "{raw.cost_centre}",
+                        aria_invalid: has_error(SiteField::CostCentre),
+                        aria_describedby: has_error(SiteField::CostCentre).then(|| error_id("site-cost-centre")),
+                        oninput: move |e| {
+                            if let Some(form) = editor.write().form_mut() {
+                                form.cost_centre = e.value();
+                            }
+                        },
+                        onblur: move |_| editor.write().touch(SiteField::CostCentre),
+                    }
+                }
                 div { class: "st-inline",
                     button {
                         class: "st-btn",
@@ -734,6 +770,7 @@ mod tests {
             radius_m: "150".into(),
             break_minutes: "30".into(),
             break_after_minutes: "240".into(),
+            cost_centre: String::new(),
         }
     }
 
@@ -779,6 +816,23 @@ mod tests {
     }
 
     #[test]
+    fn the_cost_centre_is_optional_trimmed_and_at_most_50_characters() {
+        let mut raw = valid();
+        assert_eq!(validate_site_form(&raw).unwrap().cost_centre, None);
+        raw.cost_centre = " KP-12 ".into();
+        assert_eq!(
+            validate_site_form(&raw).unwrap().cost_centre.as_deref(),
+            Some("KP-12")
+        );
+        raw.cost_centre = "x".repeat(50);
+        assert!(validate_site_form(&raw).is_ok());
+        raw.cost_centre = "x".repeat(51);
+        assert_eq!(validate_site_form(&raw), Err(vec![SiteField::CostCentre]));
+        raw.cost_centre = "a\tb".into();
+        assert_eq!(validate_site_form(&raw), Err(vec![SiteField::CostCentre]));
+    }
+
+    #[test]
     fn rejects_non_finite() {
         let mut raw = valid();
         raw.lat = "NaN".into();
@@ -798,6 +852,7 @@ mod tests {
                 break_minutes: 20,
                 break_after_minutes: 300,
                 active: true,
+                cost_centre: String::new(),
             })
             .collect()
     }

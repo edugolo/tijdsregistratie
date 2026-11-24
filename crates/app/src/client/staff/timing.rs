@@ -60,3 +60,53 @@ pub fn date_label(ms: i64) -> String {
 pub fn date_label(_ms: i64) -> String {
     String::new()
 }
+
+/// Today's date in the browser's time zone.
+#[cfg(feature = "web")]
+pub fn today_date() -> chrono::NaiveDate {
+    let now = js_sys::Date::new_0();
+    chrono::NaiveDate::from_ymd_opt(
+        now.get_full_year() as i32,
+        now.get_month() + 1,
+        now.get_date(),
+    )
+    .unwrap_or_default()
+}
+
+#[cfg(not(feature = "web"))]
+pub fn today_date() -> chrono::NaiveDate {
+    chrono::NaiveDate::default()
+}
+
+/// A moment from unix milliseconds as `07:42`, in the browser's time zone.
+#[cfg(feature = "web")]
+pub fn time_label(ms: i64) -> String {
+    let at = js_sys::Date::new(&(ms as f64).into());
+    super::hours_fmt::clock_label(at.get_hours(), at.get_minutes())
+}
+
+#[cfg(not(feature = "web"))]
+pub fn time_label(_ms: i64) -> String {
+    String::new()
+}
+
+/// Unix milliseconds of `hour:minute` on `date` in the browser's time zone.
+#[cfg(feature = "web")]
+pub fn local_ms(date: chrono::NaiveDate, hour: u32, minute: u32) -> Option<i64> {
+    use chrono::Datelike;
+    let at = js_sys::Date::new_with_year_month_day_hr_min_sec(
+        u32::try_from(date.year()).ok()?,
+        date.month0() as i32,
+        date.day() as i32,
+        hour as i32,
+        minute as i32,
+        0,
+    );
+    let ms = at.get_time();
+    ms.is_finite().then_some(ms as i64)
+}
+
+#[cfg(not(feature = "web"))]
+pub fn local_ms(_date: chrono::NaiveDate, _hour: u32, _minute: u32) -> Option<i64> {
+    None
+}

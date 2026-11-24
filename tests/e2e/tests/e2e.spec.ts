@@ -388,6 +388,130 @@ test('7d. admin links a second device in Mijn toestellen, both sign in, then one
   await expect(devices).toHaveCount(1);
 });
 
+/** Hours and minutes of "now" in the browser time zone, as `<input type="time">` writes them. */
+async function nowClock(page: Page): Promise<string> {
+  return page.evaluate(() =>
+    new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date()),
+  );
+}
+
+test('7e. admin follows up the hours: correct a day, validate the period, a correction is refused, reopen', async () => {
+  const { page } = admin;
+  await page.goto('/beheer/uren');
+  await expect(page.getByRole('heading', { name: 'Uren', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Uren', exact: true })).toHaveAttribute('aria-current', 'page');
+
+  // This week: Fatima has her start and stop of today.
+  const card = (name: string) => page.locator('section.st-hours-person').filter({ hasText: name });
+  await expect(card('Fatima Test')).toBeVisible();
+  await expect(card('Fatima Test').locator('tbody tr')).toHaveCount(1);
+  await expect(card('Jonas Test').getByText('Niet op school')).toBeVisible();
+  await shot(page, '18-admin-hours-desktop');
+
+  // The validation bar belongs to one school.
+  await expect(page.getByText('Kies een school om de periode te valideren.')).toBeVisible();
+  await page.getByRole('button', { name: 'Basisschool Voorbeeld', exact: true }).click();
+  const bar = page.getByRole('group', { name: /Validatie van/ });
+  await expect(bar).toContainText('Niet gevalideerd');
+
+  // Amira started without a location and never stopped: the admin adds the missing stop.
+  await card('Amira Test').locator('button.st-link').click();
+  const panel = page.locator('aside.st-panel');
+  await expect(panel.getByRole('heading', { name: 'Amira Test' })).toBeVisible();
+  await expect(panel.getByText('Geen locatie')).toBeVisible();
+  await panel.getByRole('button', { name: 'Ontbrekende start/stop toevoegen' }).click();
+  await panel.getByLabel('Tijdstip').fill(await nowClock(page));
+  await panel.getByRole('button', { name: 'Opslaan' }).click();
+  await expect(panel.getByText('Geef een reden van 3 tot 500 tekens.')).toBeVisible();
+  await panel.getByLabel('Reden').fill('Vergat te stoppen');
+  await panel.getByRole('button', { name: 'Opslaan' }).click();
+  await expect(panel.getByText('Vergat te stoppen')).toBeVisible();
+  await expect(panel.getByText('Beheerder Test, ')).toBeVisible();
+  await expect(panel.getByText('Gecorrigeerd')).toBeVisible();
+  await shot(page, '19-admin-hours-day-panel');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await shot(page, '20-admin-hours-day-panel-390');
+  await panel.getByRole('button', { name: 'Sluiten' }).click();
+  await shot(page, '21-admin-hours-390');
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await expect(card('Amira Test').getByText('Gecorrigeerd')).toBeVisible();
+
+  // Validate the period: the confirmation lists the open points. The day panel stays open.
+  await card('Amira Test').locator('button.st-link').click();
+  await expect(panel.getByRole('button', { name: 'Tijd aanpassen' }).first()).toBeVisible();
+  await bar.getByRole('button', { name: 'Periode valideren' }).click();
+  await expect(bar.getByText('1 dag niet op school')).toBeVisible();
+  await bar.getByRole('button', { name: 'Valideren', exact: true }).click();
+  await expect(bar).toContainText('Gevalideerd door Beheerder Test op');
+  await expect(card('Amira Test').getByText('Gevalideerd', { exact: true })).toBeVisible();
+  await shot(page, '22-admin-hours-validated');
+
+  // A further correction is refused by the server.
+  await panel.getByRole('button', { name: 'Tijd aanpassen' }).first().click();
+  await panel.getByLabel('Reden').fill('Nog een aanpassing');
+  await panel.getByRole('button', { name: 'Opslaan' }).click();
+  await expect(panel.getByRole('alert').getByText('Deze periode is gevalideerd. Heropen ze eerst.')).toBeVisible();
+
+  // Opened again, the day shows it is locked and offers to reopen.
+  await panel.getByRole('button', { name: 'Sluiten' }).click();
+  await card('Amira Test').locator('button.st-link').click();
+  await expect(panel.getByText('Deze periode is gevalideerd. Heropen ze eerst.')).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Ontbrekende start/stop toevoegen' })).toHaveCount(0);
+  await panel.getByRole('button', { name: 'Sluiten' }).click();
+
+  // Reopen: validated no more.
+  await bar.getByRole('button', { name: 'Heropenen' }).click();
+  await bar.getByRole('button', { name: 'Ja', exact: true }).click();
+  await expect(bar).toContainText('Niet gevalideerd');
+  await expect(bar.getByRole('button', { name: 'Periode valideren' })).toBeVisible();
+});
+
+test('7f. admin sets contract, payroll number and cost centre', async () => {
+  const { page } = admin;
+  await openPeople(page);
+  await row(page, 'Fatima Test').getByRole('button').click();
+  const panel = page.locator('aside.st-panel');
+  await expect(panel.getByRole('heading', { name: 'Contract' })).toBeVisible();
+  await panel.locator('#contract-day-0').fill('7:36');
+  await panel.locator('#contract-day-1').fill('x');
+  await panel.getByRole('button', { name: 'Contract opslaan' }).click();
+  await expect(panel.getByText('Gebruik uren en minuten, bijvoorbeeld 7:36.')).toBeVisible();
+  await panel.locator('#contract-day-1').fill('7:36');
+  await panel.getByRole('button', { name: 'Contract opslaan' }).click();
+  await expect(panel.getByText('Opgeslagen')).toBeVisible();
+
+  // The payroll number is masked until asked for.
+  const payroll = panel.locator('#payroll-number');
+  await expect(payroll).toHaveAttribute('type', 'password');
+  await payroll.fill('P-100');
+  await panel.getByRole('button', { name: 'Personeelsnummer opslaan' }).click();
+  await expect(panel.getByText('Opgeslagen')).toBeVisible();
+  await openPeople(page);
+  await row(page, 'Fatima Test').getByRole('button').click();
+  await expect(panel.locator('#payroll-number')).toHaveAttribute('type', 'password');
+  await expect(panel.locator('#contract-day-0')).toHaveValue('7:36');
+  await panel.getByRole('button', { name: 'Toon personeelsnummer' }).click();
+  await expect(panel.locator('#payroll-number')).toHaveValue('P-100');
+  await expect(panel.locator('#payroll-number')).toHaveAttribute('type', 'text');
+  await shot(page, '23-admin-person-contract');
+
+  // Taken by someone else.
+  await row(page, 'Amira Test').getByRole('button').click();
+  await panel.locator('#payroll-number').fill('p-100');
+  await panel.getByRole('button', { name: 'Personeelsnummer opslaan' }).click();
+  await expect(panel.getByText('Dit personeelsnummer is al in gebruik.')).toBeVisible();
+
+  // Cost centre of a school.
+  await page.goto('/beheer/instellingen');
+  await page.getByRole('button', { name: 'Scholen', exact: true }).click();
+  await page.getByRole('button', { name: 'Bewerken: Basisschool Voorbeeld' }).click();
+  await page.getByLabel('Kostenplaats').fill('KP-1');
+  await page.getByRole('button', { name: 'Opslaan' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Opgeslagen' })).toBeVisible();
+  await page.getByRole('button', { name: 'Bewerken: Basisschool Voorbeeld' }).click();
+  await expect(page.getByLabel('Kostenplaats')).toHaveValue('KP-1');
+});
+
 test('8. security headers and no CSP violations', async ({ request }) => {
   const res = await request.get(origin() + '/');
   const h = res.headers();
@@ -421,4 +545,11 @@ function cspViolations(d: Device): string[] {
 test('9. the enrollment QR code is not cropped by its container', async () => {
   expect(qrFits.length).toBeGreaterThan(0);
   expect(qrFits, 'QR svg must fit inside its container, otherwise it cannot be scanned').not.toContain(false);
+});
+
+test('10. /setup hands over to the home page once setup is completed', async () => {
+  const { page } = admin;
+  await page.goto('/setup');
+  await expect(page).toHaveURL(/\/(beheer|aanmelden)$/);
+  await expect(page.getByRole('heading', { name: 'Welkom', exact: true })).toHaveCount(0);
 });

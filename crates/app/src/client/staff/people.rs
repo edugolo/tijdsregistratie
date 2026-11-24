@@ -3,6 +3,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
+use super::contract::ContractSection;
 use super::devices::DeviceList;
 use super::field::{Field, error_id};
 use super::flow::{EnrollFlow, ErrorNotice, report_error};
@@ -535,6 +536,10 @@ fn PersonPanel(
                         }
                     }
                 }
+            }
+
+            if can_view_all {
+                ContractSection { key: "{id}", person_id: id }
             }
 
             if manageable && !is_self {
