@@ -98,6 +98,8 @@ export default async function globalSetup() {
       AUTH_RATE_LIMIT_PER_MINUTE: '100000',
       // Never reach the real Nominatim from the tests: the address search is switched off.
       GEOCODER_URL: 'off',
+      // The API reference is off by default; scenario 7i and 8 look at it.
+      API_DOCS: 'on',
       IP: '127.0.0.1',
       PORT: String(port),
       RUST_LOG: process.env.RUST_LOG ?? 'info',

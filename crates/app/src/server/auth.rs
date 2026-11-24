@@ -170,7 +170,11 @@ pub mod http {
     const GEOCODE_PATH: &str = "/api/geocode";
     const GEOCODE_PER_MINUTE: u32 = 30;
     /// Ceremony endpoints whose failures (400/401) are counted per client.
-    const FINISH_PATHS: [&str; 2] = ["/api/auth/login/finish", "/api/auth/register/finish"];
+    const FINISH_PATHS: [&str; 3] = [
+        "/api/auth/login/finish",
+        "/api/auth/register/finish",
+        "/api/auth/reauth/finish",
+    ];
     const FAILURES_PER_WINDOW: u32 = 10;
     const FAILURE_WINDOW: Duration = Duration::from_secs(600);
     /// Clocking in or out per authenticated person (not per address).
@@ -532,13 +536,16 @@ pub mod http {
     ) -> Response {
         let mut res = next.run(req).await;
         let headers = res.headers_mut();
+        // A handler that sets its own, stricter policy (the API reference) keeps it.
+        headers
+            .entry(HeaderName::from_static("content-security-policy"))
+            .or_insert(HeaderValue::from_static(CSP));
         let mut set = |name: &'static str, value: &'static str| {
             headers.insert(
                 HeaderName::from_static(name),
                 HeaderValue::from_static(value),
             );
         };
-        set("content-security-policy", CSP);
         set("x-frame-options", "DENY");
         set("referrer-policy", "no-referrer");
         set("x-content-type-options", "nosniff");
@@ -644,7 +651,8 @@ pub mod http {
                     .route("/api/setup/check-code", post(|| async { "ok" }))
                     .route("/api/setup/complete", post(|| async { "ok" }))
                     .route("/api/auth/login/finish", post(finish))
-                    .route("/api/auth/register/finish", post(finish)),
+                    .route("/api/auth/register/finish", post(finish))
+                    .route("/api/auth/reauth/finish", post(finish)),
                 guard,
             )
         }
@@ -970,18 +978,22 @@ pub mod http {
                 let r = send(&app, "POST", "/api/auth/login/finish", &ip("200")).await;
                 assert_eq!(r.status(), StatusCode::OK);
             }
-            // Ten failures (401 and 400 both count, across both finish endpoints) ...
+            // Ten failures (401 and 400 both count, across all three finish endpoints) ...
             for i in 0..10 {
-                let (path, status) = if i % 2 == 0 {
-                    ("/api/auth/login/finish", "401")
-                } else {
-                    ("/api/auth/register/finish", "400")
+                let (path, status) = match i % 3 {
+                    0 => ("/api/auth/login/finish", "401"),
+                    1 => ("/api/auth/register/finish", "400"),
+                    _ => ("/api/auth/reauth/finish", "401"),
                 };
                 let r = send(&app, "POST", path, &ip(status)).await;
                 assert_eq!(r.status().as_u16(), status.parse::<u16>().unwrap());
             }
             // ... and the client is stopped, even with a correct attempt.
-            for path in ["/api/auth/login/finish", "/api/auth/register/finish"] {
+            for path in [
+                "/api/auth/login/finish",
+                "/api/auth/register/finish",
+                "/api/auth/reauth/finish",
+            ] {
                 let r = send(&app, "POST", path, &ip("200")).await;
                 assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS, "{path}");
                 assert_eq!(r.headers()[RETRY_AFTER], "60");

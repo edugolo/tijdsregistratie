@@ -234,6 +234,55 @@ fn rule_site<'a>(
         .and_then(|id| sites.get(&id))
 }
 
+/// The sites that can lock a person's day: where the day's events were recorded plus the
+/// person's current employee sites. A day is closed when ANY of them is validated for it, so
+/// moving a person to another school never reopens a validated day. Sorted, without duplicates.
+fn relevant_sites(events: &[EventRow], own_sites: &[Uuid]) -> Vec<Uuid> {
+    let mut sites: Vec<Uuid> = events
+        .iter()
+        .filter_map(|e| e.site_id)
+        .chain(own_sites.iter().copied())
+        .collect();
+    sites.sort();
+    sites.dedup();
+    sites
+}
+
+/// Keeps what was recorded at `allowed` sites: their events, and the corrections that depend on
+/// them. A correction that adds an event has no site; it is kept only when `adds_visible`.
+fn restrict_bucket(bucket: Bucket, allowed: &[Uuid], adds_visible: bool) -> Bucket {
+    let events: Vec<EventRow> = bucket
+        .events
+        .into_iter()
+        .filter(|e| e.site_id.is_some_and(|s| allowed.contains(&s)))
+        .collect();
+    let mut kept: HashSet<Uuid> = HashSet::new();
+    loop {
+        let before = kept.len();
+        for c in &bucket.corrections {
+            let keep = match c.target {
+                Target::None => adds_visible,
+                Target::Event(id) => events.iter().any(|e| e.id == id),
+                Target::Addition(id) => kept.contains(&id),
+            };
+            if keep {
+                kept.insert(c.id);
+            }
+        }
+        if kept.len() == before {
+            break;
+        }
+    }
+    Bucket {
+        events,
+        corrections: bucket
+            .corrections
+            .into_iter()
+            .filter(|c| kept.contains(&c.id))
+            .collect(),
+    }
+}
+
 struct Computed {
     summary: DaySummary,
     flags: DayFlagsDto,
@@ -404,6 +453,22 @@ pub(super) async fn hours_of(
     to: NaiveDate,
     now: DateTime<Utc>,
 ) -> Result<HoursDto> {
+    hours_of_sites(env, tz, people, from, to, now, None).await
+}
+
+/// Like [`hours_of`]. With `restrict` only what was recorded at those sites is returned: events
+/// and days elsewhere, and what depends on them, are left out, and `validated` looks at those
+/// sites only. A day without anything recorded there is only listed for a contract day of a
+/// person who works exclusively at those sites.
+pub(super) async fn hours_of_sites(
+    env: &StaffEnv<'_>,
+    tz: Tz,
+    people: Vec<person::Person>,
+    from: NaiveDate,
+    to: NaiveDate,
+    now: DateTime<Utc>,
+    restrict: Option<&[Uuid]>,
+) -> Result<HoursDto> {
     let ids: Vec<Uuid> = people.iter().map(|p| p.id).collect();
     if ids.is_empty() {
         return Ok(HoursDto {
@@ -421,32 +486,49 @@ pub(super) async fn hours_of(
         .map(|s| (s.id, s))
         .collect();
     let person_sites = employee_sites_of(env.pool, &ids).await?;
-    let all_site_ids: Vec<Uuid> = person_sites
-        .values()
-        .flatten()
-        .copied()
+    let schedules = contract::schedules(env.pool, &ids).await?;
+    let events = time_event::events_between(env.pool, &ids, from_utc, to_utc).await?;
+    let corrections = correction::between(env.pool, &ids, from_utc, to_utc).await?;
+    let all_site_ids: Vec<Uuid> = events
+        .iter()
+        .filter_map(|e| e.site_id)
+        .chain(person_sites.values().flatten().copied())
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    let schedules = contract::schedules(env.pool, &ids).await?;
     let validations = validation::active_between(env.pool, &all_site_ids, from, to).await?;
-    let events = time_event::events_between(env.pool, &ids, from_utc, to_utc).await?;
-    let corrections = correction::between(env.pool, &ids, from_utc, to_utc).await?;
     let mut buckets = bucket_by_day(tz, events, corrections);
     let today = local_date(tz, now);
 
     let mut out = Vec::new();
     for p in people {
-        let own_sites = person_sites.get(&p.id).map_or(&[][..], Vec::as_slice);
+        let all_own = person_sites.get(&p.id).map_or(&[][..], Vec::as_slice);
+        let own_sites: Vec<Uuid> = match restrict {
+            Some(allowed) => all_own
+                .iter()
+                .copied()
+                .filter(|s| allowed.contains(s))
+                .collect(),
+            None => all_own.to_vec(),
+        };
+        let only_allowed = own_sites.len() == all_own.len();
         let schedule = schedules.get(&p.id).copied();
         let mut days = Vec::new();
         let mut date = from;
         while date <= to {
             let contract_minutes = schedule.map_or(0, |s| contract_minutes_on(&s, date));
-            let bucket = buckets.remove(&(p.id, date));
-            if bucket.is_some() || (contract_minutes > 0 && date <= today) {
+            let bucket = buckets.remove(&(p.id, date)).map(|b| match restrict {
+                Some(allowed) => restrict_bucket(b, allowed, only_allowed),
+                None => b,
+            });
+            let listed = bucket
+                .as_ref()
+                .is_some_and(|b| !b.events.is_empty() || !b.corrections.is_empty());
+            let contract_day = contract_minutes > 0 && date <= today && only_allowed;
+            if listed || contract_day {
                 let bucket = bucket.unwrap_or_default();
-                let rule = break_rule(rule_site(&bucket.events, own_sites, &sites));
+                let rule = break_rule(rule_site(&bucket.events, &own_sites, &sites));
+                let relevant = relevant_sites(&bucket.events, &own_sites);
                 let computed = compute_day(
                     &bucket.events,
                     &bucket.corrections,
@@ -456,7 +538,7 @@ pub(super) async fn hours_of(
                 );
                 let mut flags = computed.flags;
                 flags.validated = validations.iter().any(|v| {
-                    own_sites.contains(&v.site_id) && v.period_start <= date && date <= v.period_end
+                    relevant.contains(&v.site_id) && v.period_start <= date && date <= v.period_end
                 });
                 days.push(DayHoursDto {
                     date,
@@ -568,7 +650,8 @@ async fn detail(
         person_id,
         name,
         date,
-        validated: validation::is_validated(&mut *conn, sites, date).await?,
+        validated: validation::is_validated(&mut *conn, &relevant_sites(&data.raw, sites), date)
+            .await?,
         events: data
             .raw
             .iter()
@@ -626,10 +709,20 @@ pub async fn correct(
     // One writer per person: corrections and clocking see each other's result.
     time_event::lock_person(&mut tx, person_id).await?;
     let sites = check_person(&mut tx, env, scope, person_id).await?;
-    if validation::is_validated(&mut *tx, &sites, date).await? {
-        return Err(HoursError::PeriodValidated);
+    // Separation of duties: managers do not correct their own hours; HR and admins may.
+    if person_id == scope.person_id && !scope.can_view_all_sites() {
+        return Err(HoursError::Forbidden);
     }
     let data = load_day(&mut tx, person_id, tz, date).await?;
+    // The same per-site locks as `validate_period` (in site order, so writers cannot deadlock):
+    // the check below and the insert see a validation that is committing at the same moment.
+    let relevant = relevant_sites(&data.raw, &sites);
+    for site_id in &relevant {
+        validation::lock_site(&mut tx, *site_id).await?;
+    }
+    if validation::is_validated(&mut *tx, &relevant, date).await? {
+        return Err(HoursError::PeriodValidated);
+    }
     let effective = |event_id: Uuid| {
         data.effective
             .iter()
@@ -728,7 +821,8 @@ pub async fn validate_period(
 ) -> Result<()> {
     check_site(scope, site_id)?;
     let tz = settings::get_settings(env.pool).await?.timezone;
-    if to > local_date(tz, now) {
+    // Only finished days: today's clock taps and corrections must stay possible.
+    if to >= local_date(tz, now) {
         return Err(HoursError::Invalid("range"));
     }
     let mut tx = env.pool.begin().await?;
@@ -1681,7 +1775,7 @@ mod tests {
             .await
             .unwrap();
         // Overlap with an active validation of the same site is refused.
-        for (from, to) in [(1, 1), (7, 8), (9, 10), (5, 6)] {
+        for (from, to) in [(1, 1), (7, 8), (9, 9), (5, 6)] {
             let r = validate_period(&e, &s.admin, s.site_a, d(from), d(to), now()).await;
             assert_eq!(
                 r.unwrap_err(),
@@ -1700,7 +1794,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let r = validate_period(&e, &s.admin, Uuid::new_v4(), d(10), d(10), now()).await;
+        let r = validate_period(&e, &s.admin, Uuid::new_v4(), d(9), d(9), now()).await;
         assert_eq!(r.unwrap_err(), HoursError::NotFound);
         // Reopen: HR and admin only.
         for who in [&s.mgr_a, &s.mgr_b] {
@@ -1948,5 +2042,163 @@ mod tests {
                 .unwrap_err(),
             HoursError::Invalid("range")
         );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn only_finished_days_can_be_validated(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        // now() is 10 March: today and the future are refused, yesterday is fine.
+        for to in [10, 11] {
+            let r = validate_period(&e, &s.admin, s.site_a, d(9), d(to), now()).await;
+            assert_eq!(r.unwrap_err(), HoursError::Invalid("range"), "{to}");
+        }
+        validate_period(&e, &s.admin, s.site_a, d(9), d(9), now())
+            .await
+            .unwrap();
+        // Just after local midnight of the 11th, the 10th is finished.
+        validate_period(&e, &s.admin, s.site_a, d(10), d(10), at(10, 23, 30))
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn moving_a_person_never_reopens_a_validated_day(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let (start, _) = eva_monday(&pool, &k, &s).await;
+        validate_period(&e, &s.mgr_a, s.site_a, d(1), d(7), now())
+            .await
+            .unwrap();
+        let change = CorrectionChangeDto::Replace {
+            event_id: start,
+            new_time: at(2, 7, 5).timestamp_millis(),
+        };
+        let add = CorrectionChangeDto::Add {
+            kind: EventKind::Stop,
+            time: at(2, 16, 0).timestamp_millis(),
+        };
+        // Eva moves to school B (as the API or a role change would do), then loses every role.
+        role::revoke(&pool, s.emp_a, Role::Employee, Some(s.site_a))
+            .await
+            .unwrap();
+        role::assign(&pool, s.emp_a, Role::Employee, Some(s.site_b), None)
+            .await
+            .unwrap();
+        for step in 0..2 {
+            for c in [change.clone(), add.clone()] {
+                let r = correct(&e, &s.admin, s.emp_a, d(2), c, REASON, now()).await;
+                assert_eq!(r.unwrap_err(), HoursError::PeriodValidated, "step {step}");
+            }
+            let detail = day_detail(&e, &s.hr, s.emp_a, d(2)).await.unwrap();
+            assert!(detail.validated, "step {step}");
+            let h = hours(&e, &s.hr, d(2), d(2), None, None, now())
+                .await
+                .unwrap();
+            assert!(h.people[0].days[0].flags.validated, "step {step}");
+            role::revoke(&pool, s.emp_a, Role::Employee, Some(s.site_b))
+                .await
+                .unwrap();
+        }
+        // A validation of the new site locks the day too, wherever the hours were worked.
+        reopen_period(&e, &s.hr, s.site_a, d(1), d(7))
+            .await
+            .unwrap();
+        role::assign(&pool, s.emp_a, Role::Employee, Some(s.site_b), None)
+            .await
+            .unwrap();
+        validate_period(&e, &s.mgr_b, s.site_b, d(1), d(7), now())
+            .await
+            .unwrap();
+        let r = correct(&e, &s.admin, s.emp_a, d(2), change, REASON, now()).await;
+        assert_eq!(r.unwrap_err(), HoursError::PeriodValidated);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_correction_waits_for_a_validation_that_commits_meanwhile(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let (start, _) = eva_monday(&pool, &k, &s).await;
+        // Another request validates the week and holds the site lock, not yet committed.
+        let mut other = pool.begin().await.unwrap();
+        validation::lock_site(&mut other, s.site_a).await.unwrap();
+        validation::validate(&mut other, s.site_a, d(1), d(7), s.mgr_a.person_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let change = CorrectionChangeDto::Replace {
+            event_id: start,
+            new_time: at(2, 7, 5).timestamp_millis(),
+        };
+        let correcting = correct(&e, &s.admin, s.emp_a, d(2), change, REASON, now());
+        let committing = async {
+            // Wait until the correction is blocked on the lock, then let the validation commit.
+            for _ in 0..1000 {
+                let waiting: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting > 0 {
+                    other.commit().await.unwrap();
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("the correction never waited for the site lock");
+        };
+        let (result, ()) = tokio::join!(correcting, committing);
+        assert_eq!(result.unwrap_err(), HoursError::PeriodValidated);
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM correction")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "nothing was committed into the validated period");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_manager_cannot_correct_their_own_hours(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let change = CorrectionChangeDto::Add {
+            kind: EventKind::Start,
+            time: at(2, 7, 0).timestamp_millis(),
+        };
+        // The manager, HR and the admin also work at site A.
+        for who in [&s.mgr_a, &s.hr, &s.admin] {
+            role::assign(&pool, who.person_id, Role::Employee, Some(s.site_a), None)
+                .await
+                .unwrap();
+        }
+        let r = correct(
+            &e,
+            &s.mgr_a,
+            s.mgr_a.person_id,
+            d(2),
+            change.clone(),
+            REASON,
+            now(),
+        )
+        .await;
+        assert_eq!(r.unwrap_err(), HoursError::Forbidden);
+        // Someone else can correct the manager's hours, and HR and admins their own.
+        for (who, target) in [
+            (&s.hr, s.mgr_a.person_id),
+            (&s.hr, s.hr.person_id),
+            (&s.admin, s.admin.person_id),
+        ] {
+            correct(&e, who, target, d(2), change.clone(), REASON, now())
+                .await
+                .unwrap();
+        }
+        // A manager still corrects the employees of their site.
+        correct(&e, &s.mgr_a, s.emp_a, d(2), change, REASON, now())
+            .await
+            .unwrap();
     }
 }

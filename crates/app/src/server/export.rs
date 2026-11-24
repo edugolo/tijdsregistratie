@@ -1,13 +1,16 @@
 //! Payroll export: neutral rows from validated hours, profiles (shipped and custom), batches and
 //! the checks in front of them. HR and admins only (managers get no export for now); custom
-//! profiles are admin only. Only days in a validated period of the person's site are exportable:
-//! anything else is reported as a problem and nothing is produced. The file is never stored; a
-//! batch records the inputs and the checksum, and the same inputs give the same bytes (the
-//! "generated at" stamp of a file is the end of the period, not the wall clock).
+//! profiles are admin only. Only days before today (organisation time zone) in a validated
+//! period are exportable: later days are left out, anything else is reported as a problem and
+//! nothing is produced. A day is exported under the site where it was worked (the site of its
+//! events) and needs that site's validation. The file is never stored; a batch records the
+//! inputs (with the period cut off at yesterday) and the checksum, and the same inputs give the
+//! same bytes (the "generated at" stamp of a file is the end of the period, not the wall clock).
+//! At most [`MAX_EXPORT_ROWS`] rows, and [`MAX_CONCURRENT_EXPORTS`] exports are generated at once.
 //!
 //! Audit rows and batches hold ids, profile keys and counts, never a name or a payroll number.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -20,14 +23,15 @@ use store::repo::export_batch::{self, Batch, NewBatch};
 use store::repo::export_profile::{self, StoredProfile};
 use store::repo::role::StaffScope;
 use store::repo::site::{self, Site};
-use store::repo::{RepoError, audit, person, settings, validation};
+use store::repo::{RepoError, audit, person, settings, time_event, validation};
+use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
 
-use super::hours::{HoursError, MAX_PERIOD_DAYS, check_period, hours_of};
+use super::hours::{HoursError, MAX_PERIOD_DAYS, check_period, day_bounds, hours_of};
 use super::staff::StaffEnv;
 use crate::api::export::{
     ExportBatchDto, ExportFileDto, ExportPreviewDto, ExportProblemsDto, ExportProfileDto,
-    MissingPayrollDto, TimeBasisDto, UnvalidatedPeriodDto,
+    MissingPayrollDto, TimeBasisDto, UnencodablePersonDto, UnvalidatedPeriodDto,
 };
 
 /// Rows of a preview.
@@ -35,6 +39,39 @@ pub const PREVIEW_ROWS: usize = 20;
 const HISTORY_MAX: u32 = 200;
 const PROFILE_NAME_MAX_CHARS: usize = 100;
 const PROFILE_TOML_MAX_BYTES: usize = 65_536;
+/// Most rows (person-days) of one export.
+pub const MAX_EXPORT_ROWS: usize = 200_000;
+/// Person-days that are looked at before the rows are known: twice the row limit, because most
+/// people have no hours on weekends and holidays.
+const MAX_SCANNED_PERSON_DAYS: i64 = 2 * MAX_EXPORT_ROWS as i64;
+/// Exports generated at the same moment; further requests get "busy".
+pub const MAX_CONCURRENT_EXPORTS: usize = 2;
+
+/// The global limit on export generation (each export holds every row in memory).
+pub struct ExportSlots(Semaphore);
+
+impl ExportSlots {
+    pub const fn new(permits: usize) -> Self {
+        Self(Semaphore::const_new(permits))
+    }
+
+    /// A slot while an export is generated, or `Busy` when all are taken.
+    pub fn try_acquire(&self) -> Result<SemaphorePermit<'_>> {
+        self.0.try_acquire().map_err(|_| ExportError::Busy)
+    }
+}
+
+// Unit tests run many exports at once; the limit itself is tested on its own instance.
+static EXPORT_SLOTS: ExportSlots = ExportSlots::new(if cfg!(test) {
+    64
+} else {
+    MAX_CONCURRENT_EXPORTS
+});
+
+/// Take one of the global export slots for the duration of the request.
+pub fn export_slot() -> Result<SemaphorePermit<'static>> {
+    EXPORT_SLOTS.try_acquire()
+}
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ExportError {
@@ -44,9 +81,15 @@ pub enum ExportError {
     NotFound,
     #[error("invalid input: {0}")]
     Invalid(&'static str),
-    /// Sites not validated for the whole period, or people without a payroll number.
+    /// Sites not validated, people without a payroll number or with an unencodable value.
     #[error("export blocked")]
     Blocked(ExportProblemsDto),
+    /// More than [`MAX_EXPORT_ROWS`] rows: choose a shorter period or fewer sites.
+    #[error("export too large")]
+    TooLarge,
+    /// All export slots are taken: try again in a moment.
+    #[error("busy")]
+    Busy,
     /// The profile cannot be loaded or applied; the messages say what to fix.
     #[error("invalid profile")]
     ProfileInvalid(Vec<String>),
@@ -100,6 +143,8 @@ impl From<ExportError> for ServerFnError {
             ExportError::ProfileInvalid(messages) => {
                 (400, "invalid profile", serde_json::to_value(messages).ok())
             }
+            ExportError::TooLarge => (413, "export too large", None),
+            ExportError::Busy => (429, "busy", None),
             ExportError::Internal => (500, "internal error", None),
         };
         ServerFnError::ServerError {
@@ -198,19 +243,21 @@ fn render_error(e: export::ExportError) -> ExportError {
         E::ProfileParse(_) | E::MissingCode { .. } | E::Unencodable { .. } | E::Format(_) => {
             ExportError::ProfileInvalid(vec![e.to_string()])
         }
-        // The rows were checked for payroll numbers before rendering.
-        E::MissingPersonKey { .. } | E::Csv(_) | E::Xlsx(_) => {
+        // The rows were checked for payroll numbers before rendering; `render_failure` turns
+        // unencodable values into problems.
+        E::MissingPersonKey { .. } | E::UnencodablePersons { .. } | E::Csv(_) | E::Xlsx(_) => {
             tracing::error!("export rendering failed: {}", kind_of(&e));
             ExportError::Internal
         }
     }
 }
 
-/// The error without its message: `MissingPersonKey` lists names.
+/// The error without its message: `MissingPersonKey` lists names, `UnencodablePersons` keys.
 fn kind_of(e: &export::ExportError) -> &'static str {
     use export::ExportError as E;
     match e {
         E::MissingPersonKey { .. } => "missing person key",
+        E::UnencodablePersons { .. } => "unencodable persons",
         E::Csv(_) => "csv",
         E::Xlsx(_) => "xlsx",
         _ => "other",
@@ -416,11 +463,36 @@ pub fn uncovered(
 
 // --- neutral rows ---
 
+/// A person with a payroll number, to turn the keys of an encoding problem back into people.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyedPerson {
+    pub id: Uuid,
+    pub name: String,
+    pub key: String,
+}
+
 /// Neutral rows of the sites' people plus what blocks the export.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prepared {
     pub rows: Vec<ExportRow>,
     pub problems: ExportProblemsDto,
+    pub people: Vec<KeyedPerson>,
+}
+
+/// Refuses a selection that would look at too many person-days before any row exists.
+fn check_scan(people: usize, days: i64) -> Result<()> {
+    let people = i64::try_from(people).unwrap_or(i64::MAX);
+    if people.saturating_mul(days) > MAX_SCANNED_PERSON_DAYS {
+        return Err(ExportError::TooLarge);
+    }
+    Ok(())
+}
+
+fn check_rows(rows: usize) -> Result<()> {
+    if rows > MAX_EXPORT_ROWS {
+        return Err(ExportError::TooLarge);
+    }
+    Ok(())
 }
 
 fn local_time(tz: Tz, ms: i64) -> Option<NaiveTime> {
@@ -430,11 +502,32 @@ fn local_time(tz: Tz, ms: i64) -> Option<NaiveTime> {
         .with_nanosecond(0)
 }
 
-/// One row per person per day for the employees of `site_ids` (a person with several of these
-/// sites counts for the first), from the effective events after corrections, with the contract
-/// minutes of the day. `site_ids` must be resolved and authorised by the caller. Days outside an
-/// active validation of a site, and people without a payroll number, are reported in `problems`;
-/// the rows are complete either way (a missing payroll number is an empty `person_key`).
+fn local_day(tz: Tz, t: DateTime<Utc>) -> NaiveDate {
+    t.with_timezone(&tz).date_naive()
+}
+
+/// Consecutive days as inclusive ranges, in order.
+fn day_ranges(days: &BTreeSet<NaiveDate>) -> Vec<(NaiveDate, NaiveDate)> {
+    let mut out: Vec<(NaiveDate, NaiveDate)> = Vec::new();
+    for &day in days {
+        match out.last_mut() {
+            Some((_, end)) if end.succ_opt() == Some(day) => *end = day,
+            _ => out.push((day, day)),
+        }
+    }
+    out
+}
+
+/// One row per person per day for the employees of `site_ids`, from the effective events after
+/// corrections, with the contract minutes of the day. `site_ids` must be resolved and authorised
+/// by the caller and `to` must lie before today (see [`past_only`]).
+///
+/// Each day is exported under the site where it was worked (the site of its first event; a day
+/// without events, a contract day, falls under the first of the person's sites in `site_ids`).
+/// Every selected site must be validated for the whole period, and a site outside the selection
+/// where somebody worked must be validated for those days. What is not validated, and people
+/// without a payroll number, are reported in `problems`; the rows are complete either way (a
+/// missing payroll number is an empty `person_key`).
 pub async fn export_rows(
     env: &StaffEnv<'_>,
     site_ids: &[Uuid],
@@ -445,6 +538,9 @@ pub async fn export_rows(
 ) -> Result<Prepared> {
     check_period(from, to, MAX_PERIOD_DAYS)?;
     let tz = settings::get_settings(env.pool).await?.timezone;
+    if to >= local_day(tz, now) {
+        return Err(ExportError::Invalid("future"));
+    }
     let all_sites: HashMap<Uuid, Site> = site::list_sites(env.pool, env.keys, false)
         .await?
         .into_iter()
@@ -455,60 +551,73 @@ pub async fn export_rows(
         .map(|id| all_sites.get(id).ok_or(ExportError::NotFound))
         .collect::<Result<_>>()?;
 
-    let validations = validation::active_between(env.pool, site_ids, from, to).await?;
-    let mut problems = ExportProblemsDto::default();
-    for site in &chosen {
-        let covered: Vec<_> = validations
-            .iter()
-            .filter(|v| v.site_id == site.id)
-            .map(|v| (v.period_start, v.period_end))
-            .collect();
-        for (gap_from, gap_to) in uncovered(from, to, &covered) {
-            problems.unvalidated.push(UnvalidatedPeriodDto {
-                site_id: site.id,
-                site_name: site.name.clone(),
-                from: gap_from,
-                to: gap_to,
-            });
-        }
-    }
-
     let mut seen = HashSet::new();
     let mut people = Vec::new();
-    let mut site_of: HashMap<Uuid, &Site> = HashMap::new();
+    let mut fallback_site: HashMap<Uuid, Uuid> = HashMap::new();
     for site in &chosen {
         for p in person::list_people_for_sites(env.pool, env.keys, &[site.id]).await? {
             if seen.insert(p.id) {
-                site_of.insert(p.id, site);
+                fallback_site.insert(p.id, site.id);
                 people.push(p);
             }
         }
     }
+    check_scan(people.len(), (to - from).num_days() + 1)?;
     let overview = hours_of(env, tz, people, from, to, now).await?;
     let ids: Vec<Uuid> = overview.people.iter().map(|p| p.person_id).collect();
     let payroll = person::payroll_numbers(env.pool, env.keys, &ids).await?;
+
+    let (from_utc, _) = day_bounds(tz, from)?;
+    let (_, to_utc) = day_bounds(tz, to)?;
+    let mut worked_at: HashMap<(Uuid, NaiveDate), Vec<Uuid>> = HashMap::new();
+    for e in time_event::events_between(env.pool, &ids, from_utc, to_utc).await? {
+        if let Some(site) = e.site_id {
+            let sites = worked_at
+                .entry((e.person_id, local_day(tz, e.server_ts)))
+                .or_default();
+            if !sites.contains(&site) {
+                sites.push(site);
+            }
+        }
+    }
 
     let source_mode = match basis {
         TimeBasis::Registered => SourceMode::Registered,
         TimeBasis::Contract => SourceMode::Contract,
     };
+    let mut problems = ExportProblemsDto::default();
+    let mut keyed = Vec::new();
     let mut rows = Vec::new();
+    // Days worked at a site outside the selection: that site's validation is needed for them.
+    let mut outside: BTreeMap<Uuid, BTreeSet<NaiveDate>> = BTreeMap::new();
     for p in overview.people {
         let key = payroll.get(&p.person_id);
-        if key.is_none() {
-            problems.missing_payroll.push(MissingPayrollDto {
+        match key {
+            Some(key) => keyed.push(KeyedPerson {
+                id: p.person_id,
+                name: p.name.clone(),
+                key: key.clone(),
+            }),
+            None => problems.missing_payroll.push(MissingPayrollDto {
                 person_id: p.person_id,
                 name: p.name.clone(),
-            });
+            }),
         }
-        let site_code = site_of
-            .get(&p.person_id)
-            .and_then(|s| s.cost_centre.clone());
         for day in p.days {
+            let sites = worked_at
+                .get(&(p.person_id, day.date))
+                .map_or(&[][..], Vec::as_slice);
+            for site in sites.iter().filter(|s| !site_ids.contains(s)) {
+                outside.entry(*site).or_default().insert(day.date);
+            }
+            let site = sites
+                .first()
+                .or_else(|| fallback_site.get(&p.person_id))
+                .and_then(|id| all_sites.get(id));
             rows.push(ExportRow {
                 person_key: key.cloned().unwrap_or_default(),
                 person_name: p.name.clone(),
-                site_code: site_code.clone(),
+                site_code: site.and_then(|s| s.cost_centre.clone()),
                 date: day.date,
                 start: day.start.and_then(|ms| local_time(tz, ms)),
                 stop: day.stop.and_then(|ms| local_time(tz, ms)),
@@ -520,7 +629,118 @@ pub async fn export_rows(
             });
         }
     }
-    Ok(Prepared { rows, problems })
+    check_rows(rows.len())?;
+
+    let checked: Vec<Uuid> = site_ids
+        .iter()
+        .copied()
+        .chain(outside.keys().copied())
+        .collect();
+    let validations = validation::active_between(env.pool, &checked, from, to).await?;
+    let covered_of = |site: Uuid| -> Vec<(NaiveDate, NaiveDate)> {
+        validations
+            .iter()
+            .filter(|v| v.site_id == site)
+            .map(|v| (v.period_start, v.period_end))
+            .collect()
+    };
+    for site in &chosen {
+        for (gap_from, gap_to) in uncovered(from, to, &covered_of(site.id)) {
+            problems.unvalidated.push(UnvalidatedPeriodDto {
+                site_id: site.id,
+                site_name: site.name.clone(),
+                from: gap_from,
+                to: gap_to,
+            });
+        }
+    }
+    for (site_id, days) in &outside {
+        let covered = covered_of(*site_id);
+        let open: BTreeSet<NaiveDate> = days
+            .iter()
+            .copied()
+            .filter(|d| !covered.iter().any(|(start, end)| start <= d && d <= end))
+            .collect();
+        let site_name = all_sites
+            .get(site_id)
+            .map(|s| s.name.clone())
+            .ok_or(ExportError::NotFound)?;
+        for (gap_from, gap_to) in day_ranges(&open) {
+            problems.unvalidated.push(UnvalidatedPeriodDto {
+                site_id: *site_id,
+                site_name: site_name.clone(),
+                from: gap_from,
+                to: gap_to,
+            });
+        }
+    }
+    Ok(Prepared {
+        rows,
+        problems,
+        people: keyed,
+    })
+}
+
+/// A selection cut off at yesterday: days from today on (organisation time zone) are not
+/// validated, may still change and are never exported. `sel.to < sel.from` means nothing is
+/// left to export.
+#[derive(Debug, Clone, Copy)]
+pub struct PastOnly<'a> {
+    pub sel: Selection<'a>,
+    /// First day that was left out, `None` when the whole period lies in the past.
+    pub excluded_from: Option<NaiveDate>,
+}
+
+impl PastOnly<'_> {
+    pub fn is_empty(&self) -> bool {
+        self.sel.to < self.sel.from
+    }
+}
+
+pub async fn past_only<'a>(
+    env: &StaffEnv<'_>,
+    sel: &Selection<'a>,
+    now: DateTime<Utc>,
+) -> Result<PastOnly<'a>> {
+    check_period(sel.from, sel.to, MAX_PERIOD_DAYS)?;
+    let tz = settings::get_settings(env.pool).await?.timezone;
+    let today = local_day(tz, now);
+    if sel.to < today {
+        return Ok(PastOnly {
+            sel: *sel,
+            excluded_from: None,
+        });
+    }
+    let yesterday = today.pred_opt().ok_or(ExportError::Internal)?;
+    Ok(PastOnly {
+        sel: Selection {
+            to: yesterday,
+            ..*sel
+        },
+        excluded_from: Some(sel.from.max(today)),
+    })
+}
+
+/// A rendering failure as an export error: values the file encoding cannot hold become problems
+/// that name the persons, everything else as [`render_error`].
+fn render_failure(e: export::ExportError, prepared: &Prepared) -> ExportError {
+    let export::ExportError::UnencodablePersons { person_keys, .. } = &e else {
+        return render_error(e);
+    };
+    let mut unencodable: Vec<UnencodablePersonDto> = prepared
+        .people
+        .iter()
+        .filter(|p| person_keys.contains(&p.key))
+        .map(|p| UnencodablePersonDto {
+            person_id: p.id,
+            name: p.name.clone(),
+        })
+        .collect();
+    unencodable.sort_by(|a, b| (&a.name, a.person_id).cmp(&(&b.name, b.person_id)));
+    ExportError::Blocked(ExportProblemsDto {
+        unencodable,
+        ..ExportProblemsDto::default()
+    })
 }
 
 /// The period of a file. Its stamp is the end of the period so that regenerating gives the same
@@ -546,7 +766,8 @@ pub struct Selection<'a> {
     pub basis: Option<TimeBasisDto>,
 }
 
-/// Renders the file, or `Blocked` with the problems. Deterministic for the same inputs.
+/// Renders the file, or `Blocked` with the problems. Deterministic for the same inputs. `sel`
+/// must end before today (see [`past_only`]).
 pub async fn render_output(
     env: &StaffEnv<'_>,
     profile: &ResolvedProfile,
@@ -559,7 +780,8 @@ pub async fn render_output(
         return Err(ExportError::Blocked(prepared.problems));
     }
     let period = export_period(env, sel.from, sel.to).await?;
-    let output = export::render(&run, &prepared.rows, &period).map_err(render_error)?;
+    let output =
+        export::render(&run, &prepared.rows, &period).map_err(|e| render_failure(e, &prepared))?;
     Ok((output, basis))
 }
 
@@ -591,7 +813,8 @@ fn filename(profile: &ResolvedProfile, from: NaiveDate, to: NaiveDate, ext: &str
     format!("export-{slug}-{from}-{to}.{ext}")
 }
 
-/// Renders the file and records the batch and its audit row in one transaction.
+/// Renders the file and records the batch and its audit row in one transaction. The period of
+/// the file and the batch ends at yesterday at the latest.
 pub async fn produce(
     env: &StaffEnv<'_>,
     actor: Actor,
@@ -599,6 +822,11 @@ pub async fn produce(
     sel: &Selection<'_>,
     now: DateTime<Utc>,
 ) -> Result<Produced> {
+    let past = past_only(env, sel, now).await?;
+    if past.is_empty() {
+        return Err(ExportError::Invalid("future"));
+    }
+    let sel = &past.sel;
     let (output, basis) = render_output(env, profile, sel, now).await?;
     let (created_by, api_key_id) = match actor {
         Actor::Person(id) => (Some(id), None),
@@ -661,24 +889,43 @@ pub async fn preview(
     let profile = resolve_profile(env.pool, profile_key, false).await?;
     let sites = resolve_sites(env.pool, sel.site_ids, None).await?;
     let (run, basis) = with_basis(&profile.profile, sel.basis.map(TimeBasis::from));
-    let prepared = export_rows(env, &sites, sel.from, sel.to, basis, now).await?;
-    if !prepared.problems.is_empty() {
+    let columns = || run.columns.iter().map(|c| c.header.clone()).collect();
+    let past = past_only(env, sel, now).await?;
+    if past.is_empty() {
         return Ok(ExportPreviewDto {
-            columns: run.columns.iter().map(|c| c.header.clone()).collect(),
+            columns: columns(),
             first_rows: Vec::new(),
-            row_count: count(prepared.rows.len()),
-            problems: prepared.problems,
+            row_count: 0,
+            problems: ExportProblemsDto::default(),
+            excluded_from: past.excluded_from,
         });
     }
-    let period = export_period(env, sel.from, sel.to).await?;
-    let shown =
-        export::preview(&run, &prepared.rows, &period, PREVIEW_ROWS).map_err(render_error)?;
-    Ok(ExportPreviewDto {
-        columns: shown.headers,
-        first_rows: shown.rows,
-        row_count: count(shown.row_count),
-        problems: ExportProblemsDto::default(),
-    })
+    let (from, to) = (past.sel.from, past.sel.to);
+    let prepared = export_rows(env, &sites, from, to, basis, now).await?;
+    let blocked = |problems| ExportPreviewDto {
+        columns: columns(),
+        first_rows: Vec::new(),
+        row_count: count(prepared.rows.len()),
+        problems,
+        excluded_from: past.excluded_from,
+    };
+    if !prepared.problems.is_empty() {
+        return Ok(blocked(prepared.problems.clone()));
+    }
+    let period = export_period(env, from, to).await?;
+    match export::preview(&run, &prepared.rows, &period, PREVIEW_ROWS) {
+        Ok(shown) => Ok(ExportPreviewDto {
+            columns: shown.headers,
+            first_rows: shown.rows,
+            row_count: count(shown.row_count),
+            problems: ExportProblemsDto::default(),
+            excluded_from: past.excluded_from,
+        }),
+        Err(e) => match render_failure(e, &prepared) {
+            ExportError::Blocked(problems) => Ok(blocked(problems)),
+            other => Err(other),
+        },
+    }
 }
 
 pub async fn file(
@@ -785,7 +1032,8 @@ pub async fn verify(
     };
     match render_output(env, &profile, &sel, now).await {
         Ok((output, _)) => Ok(output.sha256 == batch.sha256),
-        Err(ExportError::Blocked(_)) => Ok(false),
+        // Blocked, or a period that is no longer exportable: not reproducible.
+        Err(ExportError::Blocked(_) | ExportError::Invalid(_)) => Ok(false),
         Err(e) => Err(e),
     }
 }
@@ -1431,6 +1679,235 @@ mod tests {
                 "export_profile.updated",
                 "export_profile.deactivated"
             ]
+        );
+    }
+
+    #[test]
+    fn export_size_and_concurrency_are_limited() {
+        assert!(check_rows(MAX_EXPORT_ROWS).is_ok());
+        assert_eq!(check_rows(MAX_EXPORT_ROWS + 1), Err(ExportError::TooLarge));
+        // 1 000 people for a full year is looked at; 1 100 are too many.
+        assert!(check_scan(1_000, 366).is_ok());
+        assert_eq!(check_scan(1_100, 366), Err(ExportError::TooLarge));
+        assert!(check_scan(0, 366).is_ok());
+
+        let slots = ExportSlots::new(2);
+        let first = slots.try_acquire().unwrap();
+        let _second = slots.try_acquire().unwrap();
+        assert_eq!(slots.try_acquire().unwrap_err(), ExportError::Busy);
+        drop(first);
+        assert!(slots.try_acquire().is_ok());
+        assert_eq!(MAX_CONCURRENT_EXPORTS, 2);
+    }
+
+    #[test]
+    fn busy_and_too_large_are_429_and_413() {
+        let code = |e: ExportError| match ServerFnError::from(e) {
+            ServerFnError::ServerError { code, .. } => code,
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(code(ExportError::Busy), 429);
+        assert_eq!(code(ExportError::TooLarge), 413);
+    }
+
+    #[test]
+    fn day_ranges_merge_consecutive_days() {
+        let days: BTreeSet<NaiveDate> = [d(2), d(3), d(5), d(9), d(10), d(11)].into();
+        assert_eq!(
+            day_ranges(&days),
+            vec![(d(2), d(3)), (d(5), d(5)), (d(9), d(11))]
+        );
+        assert!(day_ranges(&BTreeSet::new()).is_empty());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn days_from_today_are_left_out_and_never_a_problem(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        // Eva also works today (10 March), Bob has no hours today.
+        clock(&pool, &k, s.eva, s.site_a, EventKind::Start, at(10, 7, 0)).await;
+        for site in [s.site_a, s.site_b] {
+            hours::validate_period(&e, &s.hr, site, d(1), d(9), now())
+                .await
+                .unwrap();
+        }
+        let sites = [s.site_a, s.site_b];
+        let week = Selection {
+            from: d(1),
+            to: d(14),
+            site_ids: &sites,
+            basis: None,
+        };
+        let p = preview(&e, &s.hr, "generic-csv", &week, now())
+            .await
+            .unwrap();
+        assert!(p.problems.is_empty(), "{:?}", p.problems);
+        assert_eq!(p.excluded_from, Some(d(10)));
+        // Eva: 2, 3, 4, 5, 6 and 9 March (contract days and the clocked day); Bob: 3 March.
+        assert_eq!(p.row_count, 7);
+        assert!(p.first_rows.iter().all(|r| r[3].as_str() < "2026-03-10"));
+
+        let out = file(&e, &s.hr, "generic-csv", &week, now()).await.unwrap();
+        assert!(!decode(&out).contains("2026-03-10"));
+        let batch = export_batch::get(&pool, out.batch_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((batch.period_from, batch.period_to), (d(1), d(9)));
+        // Later, with more days in the past, the recorded export still reproduces.
+        assert!(
+            verify(&e, &s.hr, out.batch_id, at(20, 12, 0))
+                .await
+                .unwrap()
+        );
+
+        // A period wholly in the past has nothing excluded.
+        let past = preview(&e, &s.hr, "generic-csv", &sel(&sites), now())
+            .await
+            .unwrap();
+        assert_eq!(past.excluded_from, None);
+
+        // Today alone: nothing to export, no problems, no file.
+        let today = Selection {
+            from: d(10),
+            to: d(10),
+            ..week
+        };
+        let p = preview(&e, &s.hr, "generic-csv", &today, now())
+            .await
+            .unwrap();
+        assert_eq!((p.row_count, p.excluded_from), (0, Some(d(10))));
+        assert!(p.problems.is_empty() && p.first_rows.is_empty());
+        assert_eq!(
+            file(&e, &s.hr, "generic-csv", &today, now())
+                .await
+                .unwrap_err(),
+            ExportError::Invalid("future")
+        );
+        let future = Selection {
+            from: d(12),
+            to: d(14),
+            ..week
+        };
+        let p = preview(&e, &s.hr, "generic-csv", &future, now())
+            .await
+            .unwrap();
+        assert_eq!((p.row_count, p.excluded_from), (0, Some(d(12))));
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_day_is_exported_under_the_site_where_it_was_worked(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        // Eva (employee of A, cost centre A-100) works Thursday 5 March at school B.
+        clock(&pool, &k, s.eva, s.site_b, EventKind::Start, at(5, 7, 0)).await;
+        clock(&pool, &k, s.eva, s.site_b, EventKind::Stop, at(5, 15, 30)).await;
+        hours::set_site_cost_centre(&e, &s.admin, s.site_b, Some("B-200"))
+            .await
+            .unwrap();
+        hours::validate_period(&e, &s.hr, s.site_a, d(1), d(7), now())
+            .await
+            .unwrap();
+
+        // Only A is selected, but the day at B needs B's validation.
+        let a_only = [s.site_a];
+        let p = preview(&e, &s.hr, "generic-csv", &sel(&a_only), now())
+            .await
+            .unwrap();
+        let listed: Vec<_> = p
+            .problems
+            .unvalidated
+            .iter()
+            .map(|u| (u.site_id, u.from, u.to))
+            .collect();
+        assert_eq!(listed, vec![(s.site_b, d(5), d(5))]);
+        assert_eq!(
+            file(&e, &s.hr, "generic-csv", &sel(&a_only), now())
+                .await
+                .unwrap_err(),
+            ExportError::Blocked(p.problems.clone())
+        );
+
+        hours::validate_period(&e, &s.hr, s.site_b, d(1), d(7), now())
+            .await
+            .unwrap();
+        let out = file(&e, &s.hr, "generic-csv", &sel(&a_only), now())
+            .await
+            .unwrap();
+        let text = decode(&out);
+        assert!(
+            text.contains("P001;Eva Employee;A-100;2026-03-02;"),
+            "{text}"
+        );
+        assert!(
+            text.contains("P001;Eva Employee;B-200;2026-03-05;08:00;16:30;"),
+            "{text}"
+        );
+        // Selecting both gives the same attribution.
+        let both = [s.site_a, s.site_b];
+        let again = file(&e, &s.hr, "generic-csv", &sel(&both), now())
+            .await
+            .unwrap();
+        assert!(decode(&again).contains("P001;Eva Employee;B-200;2026-03-05;"));
+        assert!(!decode(&again).contains("P001;Eva Employee;A-100;2026-03-05;"));
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn unencodable_values_block_with_the_persons_named(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        validate_both(&pool, &k, &s).await;
+        let legacy = save_profile(
+            &pool,
+            &s.admin,
+            None,
+            "Oud formaat",
+            &COPY.replace("encoding = \"utf-8\"", "encoding = \"windows-1252\""),
+        )
+        .await
+        .unwrap();
+        let sites = [s.site_a, s.site_b];
+        // Accents are fine in windows-1252.
+        assert!(
+            file(&e, &s.hr, &legacy.key, &sel(&sites), now())
+                .await
+                .is_ok()
+        );
+
+        let zed = mk_person(&pool, &k, "日本 Zed", Role::Employee, Some(s.site_a)).await;
+        hours::set_payroll_number(&e, &s.hr, zed, Some("P003"))
+            .await
+            .unwrap();
+        clock(&pool, &k, zed, s.site_a, EventKind::Start, at(4, 7, 0)).await;
+        clock(&pool, &k, zed, s.site_a, EventKind::Stop, at(4, 15, 0)).await;
+        let before = batch_count(&pool).await;
+
+        let p = preview(&e, &s.hr, &legacy.key, &sel(&sites), now())
+            .await
+            .unwrap();
+        assert!(p.first_rows.is_empty());
+        assert_eq!(
+            p.problems.unencodable,
+            vec![UnencodablePersonDto {
+                person_id: zed,
+                name: "日本 Zed".to_string()
+            }]
+        );
+        assert!(p.problems.unvalidated.is_empty() && p.problems.missing_payroll.is_empty());
+        let err = file(&e, &s.hr, &legacy.key, &sel(&sites), now())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ExportError::Blocked(ref pr) if pr.unencodable.len() == 1));
+        assert_eq!(batch_count(&pool).await, before, "nothing was recorded");
+
+        // The UTF-8 profile takes the same data.
+        assert!(
+            file(&e, &s.hr, "generic-csv", &sel(&sites), now())
+                .await
+                .is_ok()
         );
     }
 }

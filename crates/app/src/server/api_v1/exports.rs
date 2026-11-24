@@ -1,5 +1,8 @@
 //! `GET /api/v1/exports/{profile}`: the payroll export file of validated days.
 
+use std::sync::LazyLock;
+use std::time::Instant;
+
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Extension, Path, Query};
 use axum::http::header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE};
@@ -14,8 +17,18 @@ use super::auth::{ApiAuth, ApiState};
 use super::error::{ApiError, ErrorBody};
 use crate::api::export::TimeBasisDto;
 use crate::server::AppState;
-use crate::server::export::{Actor, Produced, Selection, produce, resolve_profile, resolve_sites};
+use crate::server::auth::http::RateLimiter;
+use crate::server::export::{
+    Actor, Produced, Selection, export_slot, produce, resolve_profile, resolve_sites,
+};
 use crate::server::staff::StaffEnv;
+
+/// Exports per minute and key. Generating one is heavy, so this is far below the general limit
+/// of the API.
+pub const EXPORTS_PER_MINUTE: u32 = 10;
+
+static EXPORT_LIMITER: LazyLock<RateLimiter> =
+    LazyLock::new(|| RateLimiter::new(EXPORTS_PER_MINUTE));
 
 const SHA256_HEADER: HeaderName = HeaderName::from_static("x-export-sha256");
 const BATCH_HEADER: HeaderName = HeaderName::from_static("x-export-batch");
@@ -83,10 +96,15 @@ pub async fn export(
 /// Download a payroll export.
 ///
 /// `profile` is the id of a shipped profile (`generic-csv`, `generic-xlsx`, `acerta-kalender`) or
-/// the uuid of an active custom profile. Only days in a validated period of the person's site
-/// are exported, and everyone with hours needs a payroll number: otherwise nothing is produced
-/// (`409`; `GET /api/v1/periods` shows what is not validated). The same inputs give the same
-/// bytes and checksum.
+/// the uuid of an active custom profile. Only days before today (organisation time zone) are
+/// exported: later days are left out, and a period that ends today or later is cut off at
+/// yesterday (the batch records the cut period). Days must be in a validated period of the site
+/// where they were worked, and everyone with hours needs a payroll number and values the file
+/// encoding can hold: otherwise nothing is produced (`409`; `GET /api/v1/periods` shows what is
+/// not validated). Text cells that a spreadsheet could read as a formula (starting with `=`, `+`,
+/// `-`, `@`, tab or carriage return) get a leading `'` in CSV files. At most 200 000 rows per
+/// export (`400` otherwise), 10 exports per minute per key and 2 exports at a time on the server
+/// (`429`). The same inputs give the same bytes and checksum.
 #[utoipa::path(
     get,
     path = "/api/v1/exports/{profile}",
@@ -107,12 +125,12 @@ pub async fn export(
                 ("X-Export-Batch" = String, description = "Id of the recorded export batch"),
             )
         ),
-        (status = 400, description = "Invalid query or range", body = ErrorBody),
+        (status = 400, description = "Invalid query, range, a period with no past days, or more than 200 000 rows", body = ErrorBody),
         (status = 401, description = "Missing, unknown, revoked or expired key", body = ErrorBody),
         (status = 403, description = "Scope missing or site not allowed for this key", body = ErrorBody),
         (status = 404, description = "Unknown or inactive profile or unknown site", body = ErrorBody),
-        (status = 409, description = "Not every site is validated for the whole period, someone has no payroll number, or the profile cannot be applied", body = ErrorBody),
-        (status = 429, description = "Rate limit exceeded", body = ErrorBody),
+        (status = 409, description = "Not every site is validated for the whole period, someone has no payroll number or a value the file encoding cannot hold, or the profile cannot be applied", body = ErrorBody),
+        (status = 429, description = "Rate limit exceeded (10 exports per minute per key) or the server is busy with other exports", body = ErrorBody),
     )
 )]
 pub async fn get_export(
@@ -123,6 +141,10 @@ pub async fn get_export(
 ) -> Result<Response, ApiError> {
     auth.require(ApiScope::ExportRead)?;
     let Query(query) = query.map_err(|_| ApiError::InvalidRequest)?;
+    if !EXPORT_LIMITER.allow(&auth.0.id.to_string(), Instant::now()) {
+        return Err(ApiError::RateLimited);
+    }
+    let _slot = export_slot()?;
     let produced = export(&state.app, &auth.0, &profile, &query, Utc::now()).await?;
     let header = |value: &str| HeaderValue::from_str(value).map_err(|_| ApiError::Internal);
     let mut res = (StatusCode::OK, produced.output.bytes).into_response();

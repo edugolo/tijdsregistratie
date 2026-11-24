@@ -50,15 +50,19 @@ pub enum ProblemView {
     },
     /// A person with hours but no payroll number; opens the person panel.
     MissingPayroll { person_id: Uuid, name: String },
+    /// A person with a character the file encoding cannot hold; opens the person panel.
+    Unencodable { person_id: Uuid, name: String },
 }
 
 /// Problems in reading order: unvalidated stretches by school name and date, then people without
-/// a payroll number by name.
+/// a payroll number by name, then people with unencodable data by name.
 pub fn problem_views(problems: &ExportProblemsDto) -> Vec<ProblemView> {
     let mut unvalidated: Vec<_> = problems.unvalidated.iter().collect();
     unvalidated.sort_by(|a, b| (&a.site_name, a.from).cmp(&(&b.site_name, b.from)));
     let mut missing: Vec<_> = problems.missing_payroll.iter().collect();
     missing.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut unencodable: Vec<_> = problems.unencodable.iter().collect();
+    unencodable.sort_by(|a, b| a.name.cmp(&b.name));
     unvalidated
         .into_iter()
         .map(|p| ProblemView::Unvalidated {
@@ -71,7 +75,28 @@ pub fn problem_views(problems: &ExportProblemsDto) -> Vec<ProblemView> {
             person_id: p.person_id,
             name: p.name.clone(),
         }))
+        .chain(unencodable.into_iter().map(|p| ProblemView::Unencodable {
+            person_id: p.person_id,
+            name: p.name.clone(),
+        }))
         .collect()
+}
+
+/// Why the server refused to generate an export right now, apart from the problems.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Refusal {
+    /// Other exports are being generated (429): try again in a moment.
+    Busy,
+    /// More rows than one export may hold (413): choose less.
+    TooLarge,
+}
+
+pub fn refusal(error: &ServerFnError) -> Option<Refusal> {
+    match error {
+        ServerFnError::ServerError { code: 429, .. } => Some(Refusal::Busy),
+        ServerFnError::ServerError { code: 413, .. } => Some(Refusal::TooLarge),
+        _ => None,
+    }
 }
 
 /// The problems of a refused export (409, in the details of the answer).
@@ -169,7 +194,7 @@ pub fn check_key_form(name: &str, scopes: &[String]) -> Result<String, KeyFormEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::export::{MissingPayrollDto, UnvalidatedPeriodDto};
+    use crate::api::export::{MissingPayrollDto, UnencodablePersonDto, UnvalidatedPeriodDto};
     use serde_json::json;
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
@@ -237,6 +262,16 @@ mod tests {
                     name: "Amira Test".into(),
                 },
             ],
+            unencodable: vec![
+                UnencodablePersonDto {
+                    person_id: id(22),
+                    name: "日本 Zed".into(),
+                },
+                UnencodablePersonDto {
+                    person_id: id(21),
+                    name: "Bo".into(),
+                },
+            ],
         };
         let views = problem_views(&problems);
         let names: Vec<String> = views
@@ -245,7 +280,8 @@ mod tests {
                 ProblemView::Unvalidated {
                     site_name, from, ..
                 } => format!("{site_name} {from}"),
-                ProblemView::MissingPayroll { name, .. } => name.clone(),
+                ProblemView::MissingPayroll { name, .. }
+                | ProblemView::Unencodable { name, .. } => name.clone(),
             })
             .collect();
         assert_eq!(
@@ -255,7 +291,9 @@ mod tests {
                 "Noord 2026-10-15",
                 "Zuid 2026-10-01",
                 "Amira Test",
-                "Zoë Test"
+                "Zoë Test",
+                "Bo",
+                "日本 Zed"
             ]
         );
         assert!(problem_views(&ExportProblemsDto::default()).is_empty());
@@ -275,11 +313,28 @@ mod tests {
             "unvalidated": [{
                 "site_id": id(1), "site_name": "Noord", "from": "2026-10-01", "to": "2026-10-31"
             }],
-            "missing_payroll": [{ "person_id": id(2), "name": "Amira Test" }]
+            "missing_payroll": [{ "person_id": id(2), "name": "Amira Test" }],
+            "unencodable": [{ "person_id": id(3), "name": "Bo" }]
         });
         let problems = blocked_problems(&server_error(409, Some(details))).unwrap();
         assert_eq!(problems.unvalidated.len(), 1);
         assert_eq!(problems.missing_payroll[0].name, "Amira Test");
+        assert_eq!(problems.unencodable[0].name, "Bo");
+        // An answer without the list (older server) still reads.
+        let older = json!({ "unvalidated": [], "missing_payroll": [] });
+        assert!(
+            blocked_problems(&server_error(409, Some(older)))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn busy_and_too_large_are_told_apart() {
+        assert_eq!(refusal(&server_error(429, None)), Some(Refusal::Busy));
+        assert_eq!(refusal(&server_error(413, None)), Some(Refusal::TooLarge));
+        assert_eq!(refusal(&server_error(500, None)), None);
+        assert_eq!(refusal(&ServerFnError::new("boom")), None);
     }
 
     #[test]

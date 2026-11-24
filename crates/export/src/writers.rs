@@ -1,10 +1,44 @@
 //! CSV and XLSX serialisation of a built table.
 
+use std::borrow::Cow;
+
 use rust_xlsxwriter::{DocProperties, ExcelDateTime, Format, Workbook};
 
 use crate::error::ExportError;
 use crate::profile::{Encoding, LineEnding, Profile, Quote};
 use crate::table::{Cell, Table};
+
+/// Whether `text` is a plain number: an optional `-`, digits, and optionally one `.` or `,` and
+/// more digits. Spreadsheets read that as a value, never as a formula.
+fn is_plain_number(text: &str) -> bool {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    let (int, frac) = match digits.split_once(['.', ',']) {
+        Some((int, frac)) => (int, Some(frac)),
+        None => (digits, None),
+    };
+    let all_digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    all_digits(int) && frac.is_none_or(all_digits)
+}
+
+/// OWASP CSV-injection guard: a text that starts with `=`, `+`, `-`, `@`, tab or carriage return
+/// (no trimming) gets a leading `'`, so a spreadsheet shows it as text instead of running it. A
+/// plain (possibly negative) number is left alone.
+fn neutralise(text: &str) -> Cow<'_, str> {
+    if text.starts_with(['=', '+', '-', '@', '\t', '\r']) && !is_plain_number(text) {
+        Cow::Owned(format!("'{text}"))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+/// The CSV text of a cell. Numeric cells are written as numbers; every other cell is guarded.
+fn csv_text(cell: &Cell, decimal: char) -> Result<String, ExportError> {
+    let text = cell.to_text(decimal)?;
+    Ok(match cell {
+        Cell::Minutes(_) | Cell::Hours { .. } | Cell::Empty => text,
+        Cell::Text(_) | Cell::Date(..) => neutralise(&text).into_owned(),
+    })
+}
 
 pub(crate) fn write_csv(profile: &Profile, table: &Table) -> Result<Vec<u8>, ExportError> {
     let terminator = match profile.line_ending {
@@ -21,12 +55,14 @@ pub(crate) fn write_csv(profile: &Profile, table: &Table) -> Result<Vec<u8>, Exp
         .from_writer(Vec::new());
     let csv_err = |e: csv::Error| ExportError::Csv(e.to_string());
     if profile.header {
-        writer.write_record(&table.headers).map_err(csv_err)?;
+        writer
+            .write_record(table.headers.iter().map(|h| neutralise(h).into_owned()))
+            .map_err(csv_err)?;
     }
     for row in &table.rows {
         let texts = row
             .iter()
-            .map(|c| c.to_text(profile.decimal_separator))
+            .map(|c| csv_text(c, profile.decimal_separator))
             .collect::<Result<Vec<_>, _>>()?;
         writer.write_record(&texts).map_err(csv_err)?;
     }

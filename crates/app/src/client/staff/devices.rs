@@ -4,9 +4,11 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use super::flow::{EnrollFlow, ErrorNotice, SIGN_IN, report_error};
+use super::flow::{
+    EnrollFlow, ErrorNotice, ReauthGate, SIGN_IN, ask_reauth, is_reauth_required, report_error,
+};
 use super::icons::{Icon, IconKind};
-use super::load::{Skeleton, use_loaded};
+use super::load::{Loaded, Skeleton, use_loaded};
 use super::people::Confirmable;
 use super::timing::date_label;
 use crate::api::staff::{DeviceDto, devices, revoke_device};
@@ -34,12 +36,37 @@ fn last_used(device: &DeviceDto) -> String {
     }
 }
 
+/// Shows the outcome of revoking a device.
+fn revoked(
+    result: Result<(), ServerFnError>,
+    current: bool,
+    list: Loaded<Vec<DeviceDto>>,
+    mut message: Signal<Option<String>>,
+    on_changed: EventHandler<()>,
+) {
+    match result {
+        // Revoking the device in use ends this session.
+        Ok(()) if current => {
+            navigator().replace(SIGN_IN);
+        }
+        Ok(()) => {
+            list.reload();
+            on_changed.call(());
+        }
+        Err(e) if is_last_admin_refusal(&e) => {
+            message.set(Some(fl!(LANGUAGE_LOADER, "devices-err-last")));
+        }
+        Err(e) => report_error(&e, message),
+    }
+}
+
 /// The devices of `person_id` with a revoke button each when `can_revoke`.
 #[component]
 pub fn DeviceList(person_id: Uuid, can_revoke: bool, on_changed: EventHandler<()>) -> Element {
     let list = use_loaded(move || devices(person_id));
     let mut asking = use_signal(|| None::<Uuid>);
     let mut message = use_signal(|| None::<String>);
+    let pending = use_signal(|| None::<Callback<()>>);
     let Some(items) = list.get() else {
         return if list.failed() {
             rsx! { p { class: "st-sub", role: "alert", {fl!(LANGUAGE_LOADER, "staff-err-generic")} } }
@@ -49,6 +76,7 @@ pub fn DeviceList(person_id: Uuid, can_revoke: bool, on_changed: EventHandler<()
     };
     rsx! {
         ErrorNotice { message }
+        ReauthGate { pending, message }
         ul { class: "st-list",
             for device in items {
                 li { key: "{device.id}", class: "st-row",
@@ -80,18 +108,15 @@ pub fn DeviceList(person_id: Uuid, can_revoke: bool, on_changed: EventHandler<()
                                         message.set(None);
                                         spawn(async move {
                                             match revoke_device(person_id, id).await {
-                                                // Revoking the device in use ends this session.
-                                                Ok(()) if current => {
-                                                    navigator().replace(SIGN_IN);
+                                                Err(e) if is_reauth_required(&e) => {
+                                                    ask_reauth(pending, move || {
+                                                        spawn(async move {
+                                                            let done = revoke_device(person_id, id).await;
+                                                            revoked(done, current, list, message, on_changed);
+                                                        });
+                                                    });
                                                 }
-                                                Ok(()) => {
-                                                    list.reload();
-                                                    on_changed.call(());
-                                                }
-                                                Err(e) if is_last_admin_refusal(&e) => {
-                                                    message.set(Some(fl!(LANGUAGE_LOADER, "devices-err-last")));
-                                                }
-                                                Err(e) => report_error(&e, message),
+                                                done => revoked(done, current, list, message, on_changed),
                                             }
                                         });
                                     },

@@ -9,8 +9,8 @@ use uuid::Uuid;
 
 use super::download::save_file;
 use super::export_fmt::{
-    ProblemView, basis_choice, blocked_problems, export_range_valid, problem_views, safe_filename,
-    short_checksum,
+    ProblemView, Refusal, basis_choice, blocked_problems, export_range_valid, problem_views,
+    refusal, safe_filename, short_checksum,
 };
 use super::field::{Field, error_id};
 use super::flow::{ErrorNotice, report_error};
@@ -27,6 +27,15 @@ use crate::api::staff::StaffContext;
 use crate::client::Route;
 use crate::client::i18n::LANGUAGE_LOADER;
 use i18n_embed_fl::fl;
+
+/// Shows why an export call failed: too busy or too large in words, anything else as usual.
+fn report_export_error(error: &ServerFnError, mut message: Signal<Option<String>>) {
+    match refusal(error) {
+        Some(Refusal::Busy) => message.set(Some(fl!(LANGUAGE_LOADER, "export-err-busy"))),
+        Some(Refusal::TooLarge) => message.set(Some(fl!(LANGUAGE_LOADER, "export-err-too-large"))),
+        None => report_error(error, message),
+    }
+}
 
 /// Exports shown in the history.
 const HISTORY_LIMIT: u32 = 20;
@@ -130,7 +139,7 @@ pub fn ExportTab(
                     Ok(dto) => preview.set(Some((sel, dto))),
                     Err(e) => {
                         preview.set(None);
-                        report_error(&e, message);
+                        report_export_error(&e, message);
                     }
                 }
                 busy.set(false);
@@ -180,9 +189,10 @@ pub fn ExportTab(
                                 first_rows: Vec::new(),
                                 row_count: 0,
                                 problems,
+                                excluded_from: None,
                             },
                         ))),
-                        None => report_error(&e, message),
+                        None => report_export_error(&e, message),
                     },
                 }
                 busy.set(false);
@@ -377,6 +387,9 @@ fn PreviewView(
 ) -> Element {
     let shown = preview.first_rows.len();
     rsx! {
+        if preview.excluded_from.is_some() {
+            p { class: "st-sub", {fl!(LANGUAGE_LOADER, "export-excluded-today")} }
+        }
         if !preview.problems.is_empty() {
             Problems { problems: preview.problems.clone(), on_open_hours }
         } else {
@@ -428,9 +441,12 @@ fn Problems(
     problems: ExportProblemsDto,
     on_open_hours: EventHandler<(Uuid, NaiveDate, NaiveDate)>,
 ) -> Element {
-    let (unvalidated, missing): (Vec<_>, Vec<_>) = problem_views(&problems)
+    let (unvalidated, rest): (Vec<_>, Vec<_>) = problem_views(&problems)
         .into_iter()
         .partition(|v| matches!(v, ProblemView::Unvalidated { .. }));
+    let (missing, unencodable): (Vec<_>, Vec<_>) = rest
+        .into_iter()
+        .partition(|v| matches!(v, ProblemView::MissingPayroll { .. }));
     rsx! {
         div { class: "st-notice st-notice-warn", role: "alert",
             Icon { kind: IconKind::Alert, size: 20 }
@@ -465,6 +481,28 @@ fn Problems(
                     ul { class: "st-issues",
                         for (index, view) in missing.into_iter().enumerate() {
                             if let ProblemView::MissingPayroll { person_id, name } = view {
+                                li { key: "{index}",
+                                    button {
+                                        class: "st-link",
+                                        r#type: "button",
+                                        onclick: move |_| {
+                                            navigator()
+                                                .push(Route::StaffPeoplePage {
+                                                    open: person_id.to_string(),
+                                                });
+                                        },
+                                        "{name}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !unencodable.is_empty() {
+                    p { {fl!(LANGUAGE_LOADER, "export-problem-unencodable")} }
+                    ul { class: "st-issues",
+                        for (index, view) in unencodable.into_iter().enumerate() {
+                            if let ProblemView::Unencodable { person_id, name } = view {
                                 li { key: "{index}",
                                     button {
                                         class: "st-link",
@@ -591,7 +629,7 @@ fn HistorySection(history: Option<Vec<ExportBatchDto>>, failed: bool) -> Element
                                                                             Ok(same) => {
                                                                                 verified.write().insert(id, same);
                                                                             }
-                                                                            Err(e) => report_error(&e, message),
+                                                                            Err(e) => report_export_error(&e, message),
                                                                         }
                                                                         checking.set(None);
                                                                     });

@@ -115,6 +115,7 @@ pub fn server_message(code: &str) -> String {
         "clock-uncertain" => fl!(LANGUAGE_LOADER, "clock-uncertain"),
         "clock-already-started" => fl!(LANGUAGE_LOADER, "clock-already-started"),
         "clock-not-started" => fl!(LANGUAGE_LOADER, "clock-not-started"),
+        "clock-day-closed" => fl!(LANGUAGE_LOADER, "clock-day-closed"),
         "token-invalid" => fl!(LANGUAGE_LOADER, "token-invalid"),
         "login-failed" => fl!(LANGUAGE_LOADER, "login-failed"),
         _ => fl!(LANGUAGE_LOADER, "error-generic"),

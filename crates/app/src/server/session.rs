@@ -23,9 +23,13 @@ use store::repo::{RepoError, person};
 const USER_KEY: &str = "user";
 /// Set once this session entered a valid setup code; lets the wizard use admin-only helpers.
 const SETUP_CODE_KEY: &str = "setup_code_ok";
+/// Time of the last successful step-up passkey check, bound to the person who did it.
+const REAUTH_KEY: &str = "reauth";
 const ANONYMOUS_MINUTES: i64 = 10;
 const EMPLOYEE_INACTIVITY_DAYS: i64 = 30;
 const STAFF_MAX_HOURS: i64 = 12;
+/// A step-up passkey check (re-authentication) stays good for this long.
+pub const REAUTH_MAX_MINUTES: i64 = 5;
 /// A WebAuthn ceremony must be finished within this time of being started.
 const CEREMONY_MAX_AGE_MINUTES: i64 = 5;
 const DELETE_EXPIRED_EVERY: StdDuration = StdDuration::from_secs(3600);
@@ -168,8 +172,65 @@ pub async fn set_user(
     user: SessionUser,
 ) -> Result<(), tower_sessions::session::Error> {
     session.cycle_id().await?;
+    // A step-up check never carries over to another sign-in.
+    session.remove::<serde_json::Value>(REAUTH_KEY).await?;
     session.set_expiry(Some(expiry_for(Some(&user))));
     session.insert(USER_KEY, user).await
+}
+
+#[derive(Serialize, Deserialize)]
+struct ReauthMark {
+    person_id: Uuid,
+    at: DateTime<Utc>,
+}
+
+/// Whether the session's person recently proved presence with a passkey again (step-up). The
+/// current time is passed in, so tests control the clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reauth {
+    at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+}
+
+impl Reauth {
+    pub fn new(at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Self {
+        Self { at, now }
+    }
+
+    /// Done at most five minutes ago (and not in the future).
+    pub fn is_fresh(&self) -> bool {
+        self.at.is_some_and(|at| {
+            (Duration::zero()..=Duration::minutes(REAUTH_MAX_MINUTES)).contains(&(self.now - at))
+        })
+    }
+}
+
+/// The step-up state of `person_id`'s session at `now`. A mark of another person counts as none.
+pub async fn reauth_of(
+    session: &Session,
+    person_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<Reauth, tower_sessions::session::Error> {
+    let mark = match session.get::<ReauthMark>(REAUTH_KEY).await {
+        Ok(mark) => mark,
+        Err(tower_sessions::session::Error::SerdeJson(_)) => None,
+        Err(e) => return Err(e),
+    };
+    Ok(Reauth::new(
+        mark.filter(|m| m.person_id == person_id).map(|m| m.at),
+        now,
+    ))
+}
+
+/// Records a successful step-up check of `person_id` at `at`.
+pub async fn mark_reauth(
+    session: &Session,
+    person_id: Uuid,
+    at: DateTime<Utc>,
+) -> Result<(), tower_sessions::session::Error> {
+    session
+        .insert(REAUTH_KEY, ReauthMark { person_id, at })
+        .await
 }
 
 /// Remembers that this (anonymous) session entered a valid setup code. It lives and dies with
@@ -343,6 +404,30 @@ mod tests {
         s.set_expiry(Some(expiry_for(None)));
         refresh_expiry(&s).await;
         assert_eq!(s.expiry(), Some(expiry_for(Some(&u))));
+    }
+
+    #[test]
+    fn reauth_is_fresh_for_five_minutes_only() {
+        let now = Utc::now();
+        let at = |ago: Duration| Reauth::new(Some(now - ago), now).is_fresh();
+        assert!(at(Duration::zero()));
+        assert!(at(Duration::minutes(5)));
+        assert!(!at(Duration::minutes(5) + Duration::seconds(1)));
+        assert!(!at(-Duration::seconds(1)));
+        assert!(!Reauth::new(None, now).is_fresh());
+    }
+
+    #[tokio::test]
+    async fn reauth_belongs_to_one_person_and_one_sign_in() {
+        let s = new_session();
+        let (me, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let now = Utc::now();
+        assert!(!reauth_of(&s, me, now).await.unwrap().is_fresh());
+        mark_reauth(&s, me, now).await.unwrap();
+        assert!(reauth_of(&s, me, now).await.unwrap().is_fresh());
+        assert!(!reauth_of(&s, other, now).await.unwrap().is_fresh());
+        set_user(&s, user(SessionKind::Staff, now)).await.unwrap();
+        assert!(!reauth_of(&s, me, now).await.unwrap().is_fresh());
     }
 
     #[tokio::test]

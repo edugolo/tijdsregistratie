@@ -34,6 +34,35 @@ async function countEvents(): Promise<number> {
   }
 }
 
+/**
+ * Validation only covers finished days. Copies today's events to yesterday (without coordinates)
+ * and stops every day that is still open, so yesterday looks like a completed day to validate.
+ */
+async function copyTodayToYesterday() {
+  const db = new Client({ connectionString: process.env.E2E_DB_URL });
+  await db.connect();
+  try {
+    await db.query(`
+      INSERT INTO time_event (person_id, kind, server_ts, client_ts, site_id, zone_status, source)
+      SELECT person_id, kind, server_ts - interval '1 day', NULL, site_id, zone_status, source
+      FROM time_event
+      WHERE server_ts >= (date_trunc('day', now() AT TIME ZONE 'Europe/Brussels') AT TIME ZONE 'Europe/Brussels')`);
+    await db.query(`
+      INSERT INTO time_event (person_id, kind, server_ts, site_id, zone_status, source)
+      SELECT person_id, 'stop', server_ts + interval '1 hour', site_id, 'no_location', 'personal'
+      FROM (
+        SELECT DISTINCT ON (person_id) person_id, kind, server_ts, site_id
+        FROM time_event
+        WHERE server_ts < (date_trunc('day', now() AT TIME ZONE 'Europe/Brussels') AT TIME ZONE 'Europe/Brussels')
+          AND server_ts >= (date_trunc('day', now() AT TIME ZONE 'Europe/Brussels') AT TIME ZONE 'Europe/Brussels') - interval '1 day'
+        ORDER BY person_id, server_ts DESC
+      ) last_event
+      WHERE kind = 'start'`);
+  } finally {
+    await db.end();
+  }
+}
+
 /** The row of one person on the Vandaag or Mensen page. */
 function row(page: Page, name: string) {
   return page.getByRole('listitem').filter({ hasText: name });
@@ -233,6 +262,8 @@ test('7. revoking the devices ends the session and the old passkey stops working
   await row(admin.page, 'Fatima Test').getByRole('button').click();
   await admin.page.getByRole('button', { name: 'Toestel intrekken' }).click();
   await admin.page.getByRole('button', { name: 'Ja', exact: true }).click();
+  // Step-up: confirm with the admin's own passkey (virtual authenticator).
+  await admin.page.getByRole('button', { name: 'Bevestigen', exact: true }).click();
   await expect(row(admin.page, 'Fatima Test').getByText('Geen toestel')).toBeVisible();
 
   // The employee's next request ends on the login screen.
@@ -338,7 +369,12 @@ test('7d. admin links a second device in Mijn toestellen, both sign in, then one
   await shot(page, '16-admin-my-devices');
 
   await page.getByRole('button', { name: 'Nog een toestel koppelen', exact: true }).click();
+  // Step-up: confirm with the passkey before the code is made, unless an earlier check (test 7)
+  // is still fresh.
   const qr = page.getByRole('img', { name: 'QR-code om het toestel te koppelen' });
+  const confirm = page.getByRole('button', { name: 'Bevestigen', exact: true });
+  await expect(qr.or(confirm)).toBeVisible();
+  if (await confirm.isVisible()) await confirm.click();
   await expect(qr).toBeVisible();
   const link = await readQrLink(qr);
 
@@ -375,6 +411,8 @@ test('7d. admin links a second device in Mijn toestellen, both sign in, then one
   const other = devices.filter({ hasNotText: 'Dit toestel' });
   await other.getByRole('button', { name: 'Intrekken' }).click();
   await other.getByRole('button', { name: 'Ja', exact: true }).click();
+  // New sign-in above, so the passkey check is asked again.
+  await page.getByRole('button', { name: 'Bevestigen', exact: true }).click();
   await expect(devices).toHaveCount(1);
   await expect(devices.first()).toContainText('Dit toestel');
 
@@ -435,6 +473,14 @@ test('7e. admin follows up the hours: correct a day, validate the period, a corr
   await shot(page, '21-admin-hours-390');
   await page.setViewportSize({ width: 1280, height: 720 });
   await expect(card('Amira Test').getByText('Gecorrigeerd')).toBeVisible();
+
+  // Only finished days can be validated: look at yesterday, with the same events.
+  await copyTodayToYesterday();
+  await page.getByRole('button', { name: 'Andere periode', exact: true }).click();
+  const yesterday = await orgYesterday(page);
+  await page.locator('#hours-from').fill(yesterday);
+  await page.locator('#hours-to').fill(yesterday);
+  await expect(card('Amira Test')).toBeVisible();
 
   // Validate the period: the confirmation lists the open points. The day panel stays open.
   const [dayResponse] = await Promise.all([
@@ -528,29 +574,29 @@ test('7f. admin sets contract, payroll number and cost centre', async () => {
   await expect(page.getByLabel('Kostenplaats')).toHaveValue('KP-1');
 });
 
-/** Today in the organisation time zone as `<input type="date">` writes it. */
-async function orgToday(page: Page): Promise<string> {
+/** Yesterday in the organisation time zone as `<input type="date">` writes it. */
+async function orgYesterday(page: Page): Promise<string> {
   return page.evaluate(() =>
     new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Brussels', year: 'numeric', month: '2-digit', day: '2-digit' }).format(
-      new Date(),
+      new Date(Date.now() - 24 * 60 * 60 * 1000),
     ),
   );
 }
 
-/** Opens Uren > Export and chooses today as the period. */
-async function openExportForToday(page: Page) {
+/** Opens Uren > Export and chooses yesterday as the period (only finished days are validated). */
+async function openExportForYesterday(page: Page) {
   await page.goto('/beheer/uren');
   await page.getByRole('button', { name: 'Export', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Export voor de loonadministratie' })).toBeVisible();
   await page.getByRole('button', { name: 'Andere periode', exact: true }).click();
-  const today = await orgToday(page);
-  await page.locator('#export-from').fill(today);
-  await page.locator('#export-to').fill(today);
+  const yesterday = await orgYesterday(page);
+  await page.locator('#export-from').fill(yesterday);
+  await page.locator('#export-to').fill(yesterday);
 }
 
 test('7g. HR or admin exports: problems first, then preview and download, then verify', async () => {
   const { page } = admin;
-  await openExportForToday(page);
+  await openExportForYesterday(page);
   const download = page.getByRole('button', { name: 'Downloaden', exact: true });
   const preview = page.getByRole('button', { name: 'Voorbeeld', exact: true });
   await expect(download).toBeDisabled();
@@ -564,7 +610,7 @@ test('7g. HR or admin exports: problems first, then preview and download, then v
   const links = await problems.getByRole('button', { name: 'Naar de uren' }).count();
   expect(links).toBeGreaterThan(0);
   for (let i = 0; i < links; i++) {
-    await openExportForToday(page);
+    await openExportForYesterday(page);
     await preview.click();
     await problems.getByRole('button', { name: 'Naar de uren' }).first().click();
     const bar = page.getByRole('group', { name: /Validatie van/ });
@@ -575,14 +621,14 @@ test('7g. HR or admin exports: problems first, then preview and download, then v
   }
 
   // Now only missing payroll numbers are left: each name opens the person panel.
-  await openExportForToday(page);
+  await openExportForYesterday(page);
   await preview.click();
   await expect(problems).toContainText('nog geen personeelsnummer');
   await expect(problems).not.toContainText('nog niet gevalideerd');
   const names = await problems.locator('ul.st-issues').last().getByRole('button').allTextContents();
   expect(names.length).toBeGreaterThan(0);
   for (const [index, name] of names.entries()) {
-    await openExportForToday(page);
+    await openExportForYesterday(page);
     await preview.click();
     await problems.getByRole('button', { name, exact: true }).click();
     await expect(page).toHaveURL(/\/beheer\/mensen\?open=/);
@@ -594,7 +640,7 @@ test('7g. HR or admin exports: problems first, then preview and download, then v
   }
 
   // Nothing blocks any more: preview shows rows, the download is enabled.
-  await openExportForToday(page);
+  await openExportForYesterday(page);
   await preview.click();
   await expect(page.getByText(/^\d+ rij(en)?/).first()).toBeVisible();
   await expect(page.locator('table.st-table-preview tbody tr').first()).toBeVisible();
@@ -611,6 +657,13 @@ test('7g. HR or admin exports: problems first, then preview and download, then v
   await expect(history.locator('tbody tr').first()).toContainText('Beheerder Test');
   await history.getByRole('button', { name: 'Controleren' }).first().click();
   await expect(history.getByText('Klopt').first()).toBeVisible();
+
+  // A period that includes today exports the finished days only and says so.
+  await page.goto('/beheer/uren');
+  await page.getByRole('button', { name: 'Export', exact: true }).click();
+  await page.getByRole('button', { name: 'Deze maand', exact: true }).click();
+  await preview.click();
+  await expect(page.getByText('Dagen vanaf vandaag worden niet meegenomen.')).toBeVisible();
 });
 
 test('7h. admin copies a profile, sees the errors of a wrong one and deactivates the copy', async () => {
@@ -683,9 +736,21 @@ test('7i. admin makes an API key, sees it once, uses it and revokes it', async (
   await shot(page, '29-admin-integrations-list');
 
   // The interactive documentation loads from this origin (the CSP check of scenario 8 covers it).
+  const external: string[] = [];
+  const onRequest = (r: { url(): string }) => {
+    const url = r.url();
+    if (!url.startsWith(origin()) && !url.startsWith('data:') && !url.startsWith('blob:')) external.push(url);
+  };
+  page.on('request', onRequest);
   await page.goto('/api/v1/docs');
   await expect(page.locator('.scalar-app').first()).toBeVisible();
   await expect(page.getByText('Tijdsregistratie API').first()).toBeVisible();
+  // None of Scalar's cloud features or tools, and nothing is fetched from another origin.
+  for (const text of [/Ask AI/i, /Generate SDK/i, /Generate MCP/i, /Developer Tools/i, /Deploy API/i, /Open API Client/i]) {
+    await expect(page.getByText(text)).toHaveCount(0);
+  }
+  page.off('request', onRequest);
+  expect(external, 'requests to other origins').toEqual([]);
   await shot(page, '30-api-docs');
 });
 

@@ -8,3 +8,7 @@
   and serves it from `/api/v1/docs/scalar.js`, so the page needs no CDN and no CSP exception.
 - To update: download the new version the same way, replace the file, update this note and check
   `/api/v1/docs` in a browser.
+- The page configures Scalar (`data-configuration` in `docs.rs`) without its cloud features:
+  `agent.disabled`, `mcp.disabled`, `showDeveloperTools: "never"`, `hideClientButton`,
+  `hideTestRequestButton`, `telemetry: false`, `withDefaultFonts: false`, no `proxyUrl`. After an update
+  check that the options still exist (grep the bundle) and that the end-to-end test (scenario 7i) passes.

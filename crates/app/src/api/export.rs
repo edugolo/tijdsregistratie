@@ -48,16 +48,28 @@ pub struct MissingPayrollDto {
     pub name: String,
 }
 
-/// Why an export cannot be produced yet. Both lists empty: nothing blocks it.
+/// A person whose data (name, payroll number or a cost centre) holds a character that the
+/// profile's file encoding (windows-1252) cannot represent. HR fixes the data and tries again.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct UnencodablePersonDto {
+    pub person_id: Uuid,
+    pub name: String,
+}
+
+/// Why an export cannot be produced yet. All lists empty: nothing blocks it.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct ExportProblemsDto {
     pub unvalidated: Vec<UnvalidatedPeriodDto>,
     pub missing_payroll: Vec<MissingPayrollDto>,
+    #[serde(default)]
+    pub unencodable: Vec<UnencodablePersonDto>,
 }
 
 impl ExportProblemsDto {
     pub fn is_empty(&self) -> bool {
-        self.unvalidated.is_empty() && self.missing_payroll.is_empty()
+        self.unvalidated.is_empty()
+            && self.missing_payroll.is_empty()
+            && self.unencodable.is_empty()
     }
 }
 
@@ -70,6 +82,10 @@ pub struct ExportPreviewDto {
     /// Number of rows of the whole export (of the neutral input when there are problems).
     pub row_count: u32,
     pub problems: ExportProblemsDto,
+    /// First day of the period that is left out because only days before today (in the
+    /// organisation time zone) are exported. `None` when the whole period is in the past.
+    #[serde(default)]
+    pub excluded_from: Option<NaiveDate>,
 }
 
 /// A produced export. The batch is recorded; the file is not stored on the server.
@@ -112,7 +128,8 @@ pub async fn export_profiles() -> Result<Vec<ExportProfileDto>, ServerFnError> {
 }
 
 /// HR and admins. `site_ids` empty: all sites with employees. `time_basis` `None`: the profile's
-/// own. At most 366 days. Problems are part of the answer, not an error.
+/// own. At most 366 days; days from today on are never included (`excluded_from`). Problems are
+/// part of the answer, not an error. 429 when other exports are being generated.
 #[post("/api/export/preview")]
 pub async fn export_preview(
     profile: String,
@@ -123,6 +140,7 @@ pub async fn export_preview(
 ) -> Result<ExportPreviewDto, ServerFnError> {
     use crate::server::{app_state, auth, export as logic, staff};
     let scope = auth::require_staff().await?;
+    let _slot = logic::export_slot()?;
     let state = app_state().await?;
     let env = staff::StaffEnv::new(&state);
     let sel = logic::Selection {
@@ -135,7 +153,8 @@ pub async fn export_preview(
 }
 
 /// HR and admins. Produces the file and records the batch. 409 (details: the problems) when a
-/// site is not validated for the whole period or someone has no payroll number.
+/// site is not validated for the whole period, someone has no payroll number or a value cannot
+/// be encoded; 413 when the export has too many rows; 429 when other exports are being generated.
 #[post("/api/export/file")]
 pub async fn export_file(
     profile: String,
@@ -146,6 +165,7 @@ pub async fn export_file(
 ) -> Result<ExportFileDto, ServerFnError> {
     use crate::server::{app_state, auth, export as logic, staff};
     let scope = auth::require_staff().await?;
+    let _slot = logic::export_slot()?;
     let state = app_state().await?;
     let env = staff::StaffEnv::new(&state);
     let sel = logic::Selection {
@@ -173,6 +193,7 @@ pub async fn export_history(limit: u32) -> Result<Vec<ExportBatchDto>, ServerFnE
 pub async fn export_verify(batch_id: Uuid) -> Result<bool, ServerFnError> {
     use crate::server::{app_state, auth, export as logic, staff};
     let scope = auth::require_staff().await?;
+    let _slot = logic::export_slot()?;
     let state = app_state().await?;
     let env = staff::StaffEnv::new(&state);
     Ok(logic::verify(&env, &scope, batch_id, chrono::Utc::now()).await?)

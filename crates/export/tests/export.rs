@@ -352,19 +352,6 @@ format = "hours_decimal(0)"
     assert_eq!(out.bytes, b"\xEF\xBB\xBFkey;worked;amount\n1001;8:00;8\n");
 }
 
-#[test]
-fn unencodable_character_is_an_error() {
-    let p = custom(
-        "encoding = \"windows-1252\"\n[[columns]]\nheader = \"n\"\nfield = \"person_name\"\n",
-    );
-    let mut rows = sample();
-    for r in &mut rows {
-        r.person_name = "日本".into();
-    }
-    let err = render(&p, &rows, &period()).unwrap_err();
-    assert!(matches!(err, ExportError::Unencodable { .. }));
-}
-
 // ---- errors ----
 
 #[test]
@@ -433,4 +420,162 @@ fn xlsx_has_typed_cells_and_is_deterministic() {
     assert_eq!(range.get_value((1, 8)), Some(&Data::Float(7.6)));
     // Empty stop on the DST day stays an empty cell.
     assert!(matches!(range.get_value((2, 5)), None | Some(Data::Empty)));
+}
+
+// ---- spreadsheet formula injection ----
+
+const ATTACK_NAME: &str = "=HYPERLINK(\"http://evil.example/\",\"x\")";
+
+fn attack_rows() -> Vec<ExportRow> {
+    let mut rows = vec![
+        row(
+            "=cmd|' /C calc'!A0",
+            ATTACK_NAME,
+            "@SUM(1+1)",
+            date(3, 2),
+            time(8, 0),
+            time(16, 0),
+            30,
+            450,
+            456,
+        ),
+        row(
+            "+1",
+            "-2+3",
+            "\tTAB",
+            date(3, 3),
+            time(8, 0),
+            time(16, 0),
+            30,
+            450,
+            456,
+        ),
+        row(
+            "1003",
+            "\rCR",
+            "-5",
+            date(3, 4),
+            time(8, 0),
+            time(16, 0),
+            30,
+            450,
+            456,
+        ),
+    ];
+    rows.sort_by(|a, b| a.person_key.cmp(&b.person_key));
+    rows
+}
+
+#[test]
+fn generic_csv_neutralises_formulas() {
+    let out = text(&shipped("generic-csv"), &attack_rows());
+    // `+1` sorts before `=...`; a plain negative number such as the site `-5` stays as it is.
+    let expected = "person_key;name;site;date;start;stop;break_minutes;worked_hours;contract_hours;code;mode\r\n\
+'+1;'-2+3;'\tTAB;2026-03-03;08:00;16:00;30;7,50;7,60;WORK;registered\r\n\
+1003;\"'\rCR\";-5;2026-03-04;08:00;16:00;30;7,50;7,60;WORK;registered\r\n\
+'=cmd|' /C calc'!A0;\"'=HYPERLINK(\"\"http://evil.example/\"\",\"\"x\"\")\";'@SUM(1+1);2026-03-02;08:00;16:00;30;7,50;7,60;WORK;registered\r\n";
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn acerta_csv_neutralises_the_contract_number() {
+    let out = text(&shipped("acerta-kalender"), &attack_rows());
+    let expected = "overeenkomst;datum;looncode;uren\r\n\
+'+1;2026-03-03;100;7,50\r\n\
+1003;2026-03-04;100;7,50\r\n\
+'=cmd|' /C calc'!A0;2026-03-02;100;7,50\r\n";
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn headers_are_neutralised_too() {
+    let p = custom(
+        "[[columns]]\nheader = \"=1+1\"\nfield = \"person_name\"\n[[columns]]\nheader = \"-7\"\nfield = \"person_key\"\n",
+    );
+    let out = text(&p, &attack_rows()[..1]);
+    assert!(out.starts_with("'=1+1;-7\r\n"), "{out}");
+}
+
+#[test]
+fn only_plain_numbers_keep_their_leading_sign() {
+    let p = custom(
+        "line_ending = \"lf\"\nheader = false\n[[columns]]\nheader = \"n\"\nfield = \"person_name\"\n",
+    );
+    let value = |s: &str| {
+        let mut r = vec![row("1", s, "S", date(3, 2), None, None, 0, 60, 0)];
+        r[0].person_name = s.to_owned();
+        text(&p, &r)
+    };
+    assert_eq!(value("-5"), "-5\n");
+    assert_eq!(value("-5,25"), "-5,25\n");
+    assert_eq!(value("-5.25"), "-5.25\n");
+    assert_eq!(value("12"), "12\n");
+    assert_eq!(value("+5"), "'+5\n");
+    assert_eq!(value("-"), "'-\n");
+    assert_eq!(value("-5-5"), "'-5-5\n");
+    assert_eq!(value("-5,"), "'-5,\n");
+    assert_eq!(value("-1e3"), "'-1e3\n");
+    assert_eq!(value(" =1"), " =1\n");
+    assert_eq!(value("a=1"), "a=1\n");
+}
+
+#[test]
+fn numeric_cells_are_not_touched() {
+    let out = text(&shipped("generic-csv"), &sample());
+    assert!(out.contains(";30;8,00;7,60;"), "{out}");
+    assert!(!out.contains('\''), "{out}");
+}
+
+#[test]
+fn xlsx_stores_formula_lookalikes_as_strings() {
+    let out = render(&shipped("generic-xlsx"), &attack_rows(), &period()).unwrap();
+    let mut wb: Xlsx<_> = open_workbook_from_rs(Cursor::new(out.bytes)).unwrap();
+    let range = wb.worksheet_range("Export").unwrap();
+    let cells: Vec<Data> = range.rows().flatten().cloned().collect();
+    assert!(
+        cells.contains(&Data::String(ATTACK_NAME.into())),
+        "{cells:?}"
+    );
+    assert!(cells.contains(&Data::String("=cmd|' /C calc'!A0".into())));
+    assert!(cells.contains(&Data::String("@SUM(1+1)".into())));
+    let formulas = wb.worksheet_formula("Export").unwrap();
+    assert!(
+        formulas.rows().flatten().all(String::is_empty),
+        "no cell may hold a formula"
+    );
+}
+
+// ---- encoding problems name the persons ----
+
+#[test]
+fn unencodable_values_name_the_persons_not_the_whole_export() {
+    let p = custom(
+        "encoding = \"windows-1252\"\n[[columns]]\nheader = \"k\"\nfield = \"person_key\"\n[[columns]]\nheader = \"n\"\nfield = \"person_name\"\n",
+    );
+    let mut rows = sample();
+    for r in &mut rows {
+        if r.person_key == "1002" {
+            r.person_name = "日本".into();
+        }
+    }
+    let err = render(&p, &rows, &period()).unwrap_err();
+    let ExportError::UnencodablePersons { person_keys, .. } = err else {
+        panic!("expected UnencodablePersons");
+    };
+    assert_eq!(person_keys, vec!["1002".to_owned()]);
+    let err = export::preview(&p, &rows, &period(), 5).unwrap_err();
+    assert!(matches!(err, ExportError::UnencodablePersons { .. }));
+    // Encodable accents are fine.
+    let mut ok = sample();
+    ok[0].person_name = "Zoë Ça".into();
+    assert!(render(&p, &ok, &period()).is_ok());
+}
+
+#[test]
+fn an_unencodable_header_is_a_profile_problem() {
+    let p = custom(
+        "encoding = \"windows-1252\"\n[[columns]]\nheader = \"日本\"\nfield = \"person_key\"\n",
+    );
+    let err = render(&p, &sample(), &period()).unwrap_err();
+    assert!(matches!(err, ExportError::Unencodable { .. }));
 }

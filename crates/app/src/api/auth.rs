@@ -84,6 +84,26 @@ pub async fn finish_login(credential: PublicKeyCredential) -> Result<Me, ServerF
         .map_err(ServerFnError::from)
 }
 
+/// Step-up: starts a passkey check for the signed-in person (before adding or removing devices).
+#[post("/api/auth/reauth/begin")]
+pub async fn begin_reauth() -> Result<RequestChallengeResponse, ServerFnError> {
+    let state = crate::server::app_state().await?;
+    let session = crate::server::session().await?;
+    crate::server::passkey::begin_reauth(&state, &session)
+        .await
+        .map_err(ServerFnError::from)
+}
+
+/// Verifies the step-up passkey check; device changes are allowed for five minutes after.
+#[post("/api/auth/reauth/finish")]
+pub async fn finish_reauth(credential: PublicKeyCredential) -> Result<(), ServerFnError> {
+    let state = crate::server::app_state().await?;
+    let session = crate::server::session().await?;
+    crate::server::passkey::finish_reauth(&state, &session, &credential, chrono::Utc::now())
+        .await
+        .map_err(ServerFnError::from)
+}
+
 #[post("/api/auth/logout")]
 pub async fn logout() -> Result<()> {
     let session = crate::server::session().await?;

@@ -6,7 +6,9 @@ use uuid::Uuid;
 use super::contract::ContractSection;
 use super::devices::DeviceList;
 use super::field::{Field, error_id};
-use super::flow::{EnrollFlow, ErrorNotice, report_error};
+use super::flow::{
+    EnrollFlow, ErrorNotice, ReauthGate, ask_reauth, is_reauth_required, report_error,
+};
 use super::icons::{Icon, IconKind};
 use super::load::{Skeleton, use_loaded};
 use super::map::{
@@ -390,6 +392,7 @@ fn PersonPanel(
 ) -> Element {
     let mut linking = use_signal(|| false);
     let mut pending = use_signal(|| None::<Pending>);
+    let reauth = use_signal(|| None::<Callback<()>>);
     let message = use_signal(|| None::<String>);
     let id = person.id;
     let role = highest_role(&person);
@@ -433,6 +436,7 @@ fn PersonPanel(
         aside { class: "st-panel",
             PanelHead { name: person.name.clone(), role, schools: shown_schools(&person), on_close }
             ErrorNotice { message }
+            ReauthGate { pending: reauth, message }
             if !manageable {
                 p { class: "st-sub", {fl!(LANGUAGE_LOADER, "panel-read-only")} }
             }
@@ -467,7 +471,15 @@ fn PersonPanel(
                             on_cancel: move |_| pending.set(None),
                             on_confirm: move |_| {
                                 pending.set(None);
-                                run(Box::pin(revoke_devices(id)));
+                                spawn(async move {
+                                    match revoke_devices(id).await {
+                                        Err(e) if is_reauth_required(&e) => {
+                                            ask_reauth(reauth, move || run(Box::pin(revoke_devices(id))));
+                                        }
+                                        Ok(()) => on_changed.call(()),
+                                        Err(e) => report_error(&e, message),
+                                    }
+                                });
                             },
                         }
                     } else {

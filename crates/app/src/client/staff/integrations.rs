@@ -372,6 +372,12 @@ fn KeyForm(
                         }
                     }
                 }
+                if scopes.read().iter().any(|s| s == "people:write") {
+                    div { class: "st-notice st-notice-warn", role: "status",
+                        Icon { kind: IconKind::Alert, size: 20 }
+                        p { {fl!(LANGUAGE_LOADER, "integrations-people-write-warning")} }
+                    }
+                }
                 if scopes_problem {
                     span { class: "st-error", role: "alert",
                         Icon { kind: IconKind::Alert, size: 14 }

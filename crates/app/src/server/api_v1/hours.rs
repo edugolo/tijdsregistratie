@@ -13,7 +13,7 @@ use super::auth::{ApiAuth, ApiState};
 use super::error::{ApiError, ErrorBody};
 use crate::server::AppState;
 use crate::server::export::{ExportError, uncovered};
-use crate::server::hours::{MAX_PERIOD_DAYS, MAX_RANGE_DAYS, check_period, hours_of};
+use crate::server::hours::{MAX_PERIOD_DAYS, MAX_RANGE_DAYS, check_period, hours_of_sites};
 use crate::server::staff::StaffEnv;
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -69,6 +69,10 @@ fn requested_sites(site: Option<Uuid>, key: &ApiKey) -> Result<Option<Vec<Uuid>>
 }
 
 /// Hours per person per day. Not limited to validated periods: `validated` says which days are.
+///
+/// A key restricted to sites only gets days and events recorded at those sites, also for people
+/// who work elsewhere too; a correction that adds an event (it has no site) counts only for
+/// people who work exclusively at the key's sites.
 #[utoipa::path(
     get,
     path = "/api/v1/hours",
@@ -110,7 +114,10 @@ pub async fn hours(
         Some(sites) => person::list_people_for_sites(env.pool, env.keys, sites).await,
         None => person::list_all_people(env.pool, env.keys).await,
     }?;
-    let overview = hours_of(&env, tz, people, query.from, query.to, now).await?;
+    // A restricted key only gets what was recorded at its sites, also for people who work
+    // elsewhere too.
+    let restrict = key.site_ids.as_ref().and(sites.as_deref());
+    let overview = hours_of_sites(&env, tz, people, query.from, query.to, now, restrict).await?;
     let ids: Vec<Uuid> = overview.people.iter().map(|p| p.person_id).collect();
     let payroll = person::payroll_numbers(env.pool, env.keys, &ids).await?;
     Ok(overview

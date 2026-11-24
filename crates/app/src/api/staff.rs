@@ -239,7 +239,8 @@ pub async fn revoke_devices(person_id: Uuid) -> Result<(), ServerFnError> {
     use crate::server::{app_state, auth, staff};
     let scope = auth::require_staff().await?;
     let state = app_state().await?;
-    Ok(staff::revoke_devices(&staff::StaffEnv::new(&state), &scope, person_id).await?)
+    let reauth = staff::request_reauth(scope.person_id).await?;
+    Ok(staff::revoke_devices(&staff::StaffEnv::new(&state), &scope, person_id, reauth).await?)
 }
 
 /// The linked devices of a person in the caller's scope, or of the caller themselves.
@@ -258,23 +259,27 @@ pub async fn devices(person_id: Uuid) -> Result<Vec<DeviceDto>, ServerFnError> {
     Ok(list)
 }
 
-/// Revokes one device; only sessions signed in with it end.
+/// Revokes one device; only sessions signed in with it end. Needs a recent passkey check
+/// (`reauth-required`, 403).
 #[post("/api/staff/devices/revoke-one")]
 pub async fn revoke_device(person_id: Uuid, passkey_id: Uuid) -> Result<(), ServerFnError> {
     use crate::server::{app_state, auth, staff};
     let scope = auth::require_staff().await?;
     let state = app_state().await?;
     let env = staff::StaffEnv::new(&state);
-    Ok(staff::revoke_device(&env, &scope, person_id, passkey_id).await?)
+    let reauth = staff::request_reauth(scope.person_id).await?;
+    Ok(staff::revoke_device(&env, &scope, person_id, passkey_id, reauth).await?)
 }
 
-/// Enrollment code to link one more device for the signed-in staff member themselves.
+/// Enrollment code to link one more device for the signed-in staff member themselves. Needs a
+/// recent passkey check (`reauth-required`, 403).
 #[post("/api/staff/enrollment/start-own")]
 pub async fn start_own_enrollment() -> Result<EnrollmentDto, ServerFnError> {
     use crate::server::{app_state, auth, staff};
     let scope = auth::require_staff().await?;
     let state = app_state().await?;
-    Ok(staff::start_own_enrollment(&staff::StaffEnv::new(&state), &scope).await?)
+    let reauth = staff::request_reauth(scope.person_id).await?;
+    Ok(staff::start_own_enrollment(&staff::StaffEnv::new(&state), &scope, reauth).await?)
 }
 
 #[post("/api/staff/enrollment/start")]
@@ -282,7 +287,8 @@ pub async fn start_enrollment(person_id: Uuid) -> Result<EnrollmentDto, ServerFn
     use crate::server::{app_state, auth, staff};
     let scope = auth::require_staff().await?;
     let state = app_state().await?;
-    Ok(staff::start_enrollment(&staff::StaffEnv::new(&state), &scope, person_id).await?)
+    let reauth = staff::request_reauth(scope.person_id).await?;
+    Ok(staff::start_enrollment(&staff::StaffEnv::new(&state), &scope, person_id, reauth).await?)
 }
 
 #[post("/api/staff/enrollment/status")]

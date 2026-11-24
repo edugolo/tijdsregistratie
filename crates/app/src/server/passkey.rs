@@ -19,13 +19,15 @@
 //! Client-facing errors are generic. Internals are logged with ids only, never tokens or
 //! credential material.
 
+use chrono::{DateTime, Utc};
 use dioxus::prelude::ServerFnError;
 use serde::{Deserialize, Serialize};
 use tower_sessions::Session;
 use uuid::Uuid;
 use webauthn_rs::prelude::{
-    CreationChallengeResponse, DiscoverableAuthentication, Passkey, PasskeyRegistration,
-    PublicKeyCredential, RegisterPublicKeyCredential, RequestChallengeResponse,
+    CreationChallengeResponse, DiscoverableAuthentication, Passkey, PasskeyAuthentication,
+    PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
+    RequestChallengeResponse,
 };
 use webauthn_rs_proto::ResidentKeyRequirement;
 
@@ -38,6 +40,7 @@ use store::repo::{audit, enrollment, passkey};
 
 const REGISTRATION_KEY: &str = "ceremony.registration";
 const LOGIN_KEY: &str = "ceremony.login";
+const REAUTH_KEY: &str = "ceremony.reauth";
 
 /// Stable codes; the client translates them through `i18n/nl-BE/app.ftl`.
 const MSG_TOKEN: &str = "token-invalid";
@@ -391,6 +394,101 @@ pub async fn finish_login(
         .map_err(db)?;
     tx.commit().await.map_err(|e| db(e.into()))?;
     sign_in(state, session, &p, stored.id).await
+}
+
+#[derive(Serialize, Deserialize)]
+struct ReauthCeremony {
+    state: PasskeyAuthentication,
+    person_id: Uuid,
+}
+
+/// The signed-in user of this session, or a login failure.
+async fn signed_in_user(state: &AppState, session: &Session) -> Result<SessionUser> {
+    session::current(&state.pool, session)
+        .await
+        .map_err(|e| internal("session check failed")(&e))?
+        .ok_or(AuthError::Login)
+}
+
+/// Step-up: starts a passkey check for the person of the current session. Not discoverable:
+/// only that person's active passkeys are allowed, and user verification is required.
+pub async fn begin_reauth(state: &AppState, session: &Session) -> Result<RequestChallengeResponse> {
+    let user = signed_in_user(state, session).await?;
+    let keys = existing_passkeys(state, user.person_id).await?;
+    if keys.is_empty() {
+        return Err(AuthError::Login);
+    }
+    let (challenge, auth) = state
+        .webauthn
+        .start_passkey_authentication(&keys)
+        .map_err(|e| internal("start reauth failed")(&e))?;
+    session::put_ceremony(
+        session,
+        REAUTH_KEY,
+        &ReauthCeremony {
+            state: auth,
+            person_id: user.person_id,
+        },
+    )
+    .await
+    .map_err(sess)?;
+    Ok(challenge)
+}
+
+/// Step-up: verifies the assertion and, only if it is by an active passkey of the session's own
+/// person, remembers `now` as the time of the last check.
+pub async fn finish_reauth(
+    state: &AppState,
+    session: &Session,
+    credential: &PublicKeyCredential,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let user = signed_in_user(state, session).await?;
+    let ceremony: ReauthCeremony = session::take_ceremony(session, REAUTH_KEY)
+        .await
+        .map_err(sess)?
+        .ok_or(AuthError::Login)?;
+    if ceremony.person_id != user.person_id {
+        return Err(AuthError::Login);
+    }
+    let result = state
+        .webauthn
+        .finish_passkey_authentication(credential, &ceremony.state)
+        .map_err(|e| {
+            tracing::warn!(person_id = %user.person_id, error = %e, "reauth rejected");
+            AuthError::Login
+        })?;
+    // Row lock to the commit, like a login: the signature counter check cannot be raced.
+    let mut tx = state.pool.begin().await.map_err(|e| db(e.into()))?;
+    let stored = passkey::find_by_credential_id_for_update(&mut tx, result.cred_id().as_ref())
+        .await
+        .map_err(db)?
+        .ok_or(AuthError::Login)?;
+    if stored.revoked_at.is_some() || stored.person_id != user.person_id {
+        tracing::warn!(person_id = %user.person_id, "reauth with revoked or foreign passkey");
+        return Err(AuthError::Login);
+    }
+    let mut key: Passkey = serde_json::from_value(stored.credential)
+        .map_err(|e| internal("stored passkey unreadable")(&e))?;
+    key.update_credential(&result);
+    let json = serde_json::to_value(&key).map_err(|e| internal("serialize passkey failed")(&e))?;
+    passkey::update_after_login(&mut *tx, stored.id, json)
+        .await
+        .map_err(db)?;
+    audit::record(
+        &mut *tx,
+        Some(user.person_id),
+        "auth.reauth",
+        "person",
+        Some(user.person_id),
+        &[],
+    )
+    .await
+    .map_err(db)?;
+    tx.commit().await.map_err(|e| db(e.into()))?;
+    session::mark_reauth(session, user.person_id, now)
+        .await
+        .map_err(sess)
 }
 
 pub async fn logout(session: &Session) -> Result<()> {
@@ -1089,5 +1187,164 @@ mod tests {
         for (ua, expected) in cases {
             assert_eq!(device_label(ua).as_deref(), expected, "{ua}");
         }
+    }
+
+    // --- step-up (reauth) ---
+
+    /// A staff person (admin) signed in with a software authenticator.
+    async fn staff_signed_in(
+        state: &AppState,
+        name: &str,
+    ) -> (Person, Session, Vec<u8>, SoftPasskey) {
+        let (p, token) = person_with_token(state, name).await;
+        role::assign(&state.pool, p.id, Role::Admin, None, None)
+            .await
+            .unwrap();
+        let mut auth = SoftPasskey::new(true);
+        let session = new_session();
+        let (me, id) = register(state, &session, &mut auth, &token).await;
+        me.unwrap();
+        (p, session, id.unwrap(), auth)
+    }
+
+    async fn reauth(
+        state: &AppState,
+        session: &Session,
+        auth: &mut SoftPasskey,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let challenge = begin_reauth(state, session).await.unwrap();
+        let cred = auth.do_authentication(origin(), challenge).unwrap();
+        finish_reauth(state, session, &cred, now).await
+    }
+
+    async fn is_fresh(session: &Session, person_id: Uuid, now: DateTime<Utc>) -> bool {
+        session::reauth_of(session, person_id, now)
+            .await
+            .unwrap()
+            .is_fresh()
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn reauth_with_the_own_passkey_counts_for_five_minutes(pool: PgPool) {
+        let state = state(pool);
+        let (p, session, _, mut auth) = staff_signed_in(&state, "Els Manager").await;
+        let now = Utc::now();
+        assert!(!is_fresh(&session, p.id, now).await);
+
+        let challenge = begin_reauth(&state, &session).await.unwrap();
+        assert_eq!(challenge.public_key.allow_credentials.len(), 1);
+        assert_eq!(
+            challenge.public_key.user_verification,
+            webauthn_rs_proto::UserVerificationPolicy::Required
+        );
+        let cred = auth.do_authentication(origin(), challenge).unwrap();
+        finish_reauth(&state, &session, &cred, now).await.unwrap();
+        assert!(is_fresh(&session, p.id, now).await);
+        assert!(is_fresh(&session, p.id, now + Duration::minutes(5)).await);
+        assert!(!is_fresh(&session, p.id, now + Duration::minutes(6)).await);
+        assert_eq!(
+            audit_actions(&state.pool).await,
+            vec!["passkey.registered", "auth.reauth"]
+        );
+        // The ceremony is single use.
+        assert_eq!(
+            finish_reauth(&state, &session, &cred, now).await,
+            Err(AuthError::Login)
+        );
+    }
+
+    async fn audit_actions(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar("SELECT action FROM audit_log ORDER BY at, id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn reauth_needs_a_session_and_a_ceremony(pool: PgPool) {
+        let state = state(pool);
+        let (p, session, _, mut auth) = staff_signed_in(&state, "Els Manager").await;
+        assert_eq!(
+            begin_reauth(&state, &new_session()).await.unwrap_err(),
+            AuthError::Login
+        );
+        // No ceremony started in this session.
+        let challenge = begin_reauth(&state, &session).await.unwrap();
+        let cred = auth.do_authentication(origin(), challenge).unwrap();
+        assert_eq!(
+            finish_reauth(&state, &new_session(), &cred, Utc::now()).await,
+            Err(AuthError::Login)
+        );
+        assert!(!is_fresh(&session, p.id, Utc::now()).await);
+        // An old ceremony is dropped.
+        let challenge = begin_reauth(&state, &session).await.unwrap();
+        let cred = auth.do_authentication(origin(), challenge).unwrap();
+        let ceremony: ReauthCeremony = session::take_ceremony(&session, REAUTH_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        session::put_ceremony_at(
+            &session,
+            REAUTH_KEY,
+            &ceremony,
+            Utc::now() - Duration::minutes(6),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            finish_reauth(&state, &session, &cred, Utc::now()).await,
+            Err(AuthError::Login)
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn reauth_with_another_persons_passkey_is_refused(pool: PgPool) {
+        let state = state(pool);
+        let (p, session, _, _) = staff_signed_in(&state, "Els Manager").await;
+        let (_, _, other_id, mut other_auth) = staff_signed_in(&state, "Jos Beheerder").await;
+        let mut challenge = begin_reauth(&state, &session).await.unwrap();
+        // The other person's authenticator answers, as if the attacker held their device.
+        challenge.public_key.allow_credentials = vec![AllowCredentials {
+            type_: "public-key".to_string(),
+            id: other_id,
+            transports: None,
+        }];
+        let cred = other_auth.do_authentication(origin(), challenge).unwrap();
+        assert_eq!(
+            finish_reauth(&state, &session, &cred, Utc::now()).await,
+            Err(AuthError::Login)
+        );
+        assert!(!is_fresh(&session, p.id, Utc::now()).await);
+        assert_eq!(
+            audit_actions(&state.pool).await,
+            vec!["passkey.registered"; 2]
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn reauth_with_a_passkey_revoked_meanwhile_is_refused(pool: PgPool) {
+        let state = state(pool);
+        let (p, session, _, mut first) = staff_signed_in(&state, "Els Manager").await;
+        let (_, second_id, mut second) = second_device(&state, p.id, None).await;
+        let challenge = begin_reauth(&state, &session).await.unwrap();
+        assert_eq!(challenge.public_key.allow_credentials.len(), 2);
+        let cred = second.do_authentication(origin(), challenge).unwrap();
+        let stored = passkey::find_by_credential_id(&state.pool, &second_id)
+            .await
+            .unwrap()
+            .unwrap();
+        passkey::revoke_one(&state.pool, p.id, stored.id, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            finish_reauth(&state, &session, &cred, Utc::now()).await,
+            Err(AuthError::Login)
+        );
+        assert!(!is_fresh(&session, p.id, Utc::now()).await);
+        // The remaining passkey still works.
+        let now = Utc::now();
+        reauth(&state, &session, &mut first, now).await.unwrap();
+        assert!(is_fresh(&session, p.id, now).await);
     }
 }

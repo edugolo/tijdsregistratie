@@ -12,7 +12,7 @@ use sqlx::{PgExecutor, PgPool};
 use store::repo::RepoError;
 use store::repo::site::{self, Site, ZonePolicy};
 use store::repo::time_event::{self, EventRow, NewEvent};
-use store::repo::{role, settings};
+use store::repo::{role, settings, validation};
 use uuid::Uuid;
 
 use crate::api::clock::{ClockResult, FixDto, TodayDto};
@@ -26,6 +26,7 @@ const CODE_NO_LOCATION: &str = "clock-no-location";
 const CODE_UNCERTAIN: &str = "clock-uncertain";
 const CODE_ALREADY_STARTED: &str = "clock-already-started";
 const CODE_NOT_STARTED: &str = "clock-not-started";
+const CODE_DAY_CLOSED: &str = "clock-day-closed";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClockError {
@@ -151,6 +152,22 @@ pub async fn clock_for(
     time_event::lock_person(&mut tx, person_id).await?;
     let events = events_today(&mut *tx, person_id, ctx.tz, now).await?;
     let last = events.last();
+
+    // Defence in depth: validation only covers finished days, but a validated day must never
+    // receive a new event, whatever site it would be recorded at.
+    let site_ids: Vec<Uuid> = ctx.sites.iter().map(|s| s.id).collect();
+    if validation::is_validated(&mut *tx, &site_ids, now.with_timezone(&ctx.tz).date_naive())
+        .await?
+    {
+        return Ok(ClockResult {
+            kind: last.map_or(EventKind::Stop, |e| e.kind),
+            at: last.map_or(now, |e| e.server_ts),
+            zone_status: last.map_or(ZoneStatus::NoLocation, |e| e.zone_status),
+            site_name: name_of(&ctx.sites, last.and_then(|e| e.site_id)),
+            accepted: false,
+            code: Some(CODE_DAY_CLOSED.to_string()),
+        });
+    }
     let expected = next_action(last.map(|e| e.kind));
 
     if kind != expected {
@@ -810,5 +827,37 @@ mod tests {
         let r = tap(&pool, &k, p, EventKind::Start, None, T0()).await;
         assert!(r.accepted);
         assert_eq!(r.zone_status, ZoneStatus::NoLocation);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_validated_day_receives_no_event(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Flag).await;
+        let site_id = role::employee_sites(&pool, p).await.unwrap()[0];
+        let mut conn = pool.acquire().await.unwrap();
+        // Normally unreachable (only finished days are validated); the guard holds regardless.
+        let day = T0().date_naive();
+        validation::validate(&mut conn, site_id, day, day, p)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(conn);
+        for kind in [EventKind::Start, EventKind::Stop] {
+            let r = tap(&pool, &k, p, kind, here(), T0()).await;
+            assert!(!r.accepted);
+            assert_eq!(r.code.as_deref(), Some("clock-day-closed"));
+        }
+        assert_eq!(event_count(&pool).await, 0);
+        // The next day is open again.
+        let r = tap(
+            &pool,
+            &k,
+            p,
+            EventKind::Start,
+            here(),
+            T0() + Duration::days(1),
+        )
+        .await;
+        assert!(r.accepted);
     }
 }

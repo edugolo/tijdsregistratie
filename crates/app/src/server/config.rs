@@ -43,7 +43,8 @@ pub struct AppConfig {
     /// Nominatim-compatible `/search` endpoint for the address search; `None` switches the
     /// feature off (`GEOCODER_URL` empty or `off`).
     pub geocoder_url: Option<String>,
-    /// Serve the interactive API reference and `openapi.json` under `/api/v1` (`API_DOCS`).
+    /// Serve the interactive API reference and `openapi.json` under `/api/v1` (`API_DOCS`, off
+    /// unless set to `on`).
     pub api_docs: bool,
 }
 
@@ -179,8 +180,8 @@ impl AppConfig {
                 ))?,
         };
         let api_docs = match get("API_DOCS") {
-            None | Some("on") => true,
-            Some("off") => false,
+            Some("on") => true,
+            None | Some("off") => false,
             Some(_) => return Err(ConfigError::Invalid("API_DOCS", "expected on or off")),
         };
         let geocoder_url = parse_geocoder_url(env.get("GEOCODER_URL").map(String::as_str))?;
@@ -233,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn api_docs_default_on_and_switchable() {
+    fn api_docs_default_off_and_switchable() {
         let with = |value: Option<&str>| {
             let mut m = base();
             if let Some(v) = value {
@@ -241,7 +242,7 @@ mod tests {
             }
             AppConfig::from_map(&m).map(|c| c.api_docs)
         };
-        assert_eq!(with(None), Ok(true));
+        assert_eq!(with(None), Ok(false));
         assert_eq!(with(Some("on")), Ok(true));
         assert_eq!(with(Some("off")), Ok(false));
         assert!(with(Some("maybe")).is_err());

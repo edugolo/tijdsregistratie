@@ -232,8 +232,16 @@ Encrypted columns marked 🔒.
 - `period_validation` — id, site_id, period_start, period_end (inclusive), validated_by, validated_at,
   reopened_by, reopened_at. Rows are never deleted; reopening only fills the `reopened_*` columns
   (trigger). The repository refuses overlapping active validations of a site (per-site advisory lock).
-  Corrections on a day inside an active validation of any of the person's sites are refused until HR
-  or an admin reopens it.
+  Only finished days (strictly before today in the organisation time zone) can be validated. A day
+  is closed when ANY site that can lock it is validated for it: the sites of that day's events plus
+  the person's current employee sites, so moving a person to another school (API, role change)
+  never reopens a validated day. Corrections on a closed day, and clock taps (defence in depth),
+  are refused until HR or an admin reopens it. `correct()` takes the same per-site advisory locks
+  as `validate_period` (in site order) before checking, in one transaction, so a correction cannot
+  commit into a period validated at the same moment. A database trigger also refuses a new active
+  validation that overlaps an active one of the same site. A manager cannot correct their own
+  hours (HR and admins can). Night shifts crossing midnight are split per local day (known
+  limitation): each day is computed, corrected and validated on its own.
 - Reserved for next steps: `contract_type`, `export_batch`, `message`.
 
 ## 10. Repository layout
@@ -313,9 +321,15 @@ minutes, payroll number, site cost centre; schema in §9); the screens and the e
   (see `docs/api.md`). Rules: only days covered by an active period validation of the person's site
   are exported (otherwise `Blocked` with the unvalidated stretches per site, no partial export);
   people with hours but no payroll number block the export and are listed by name in the staff UI
-  (the API only answers `409`); the person key is the payroll number, `site_code` the site's cost
-  centre; a person at several selected sites counts for the first (by site id); the time basis can
-  override the profile's.
+  (the API only answers `409`); the person key is the payroll number, `site_code` the cost centre of
+  the site where the day was worked (site of the day's first event; contract days without events
+  fall under the person's first selected site), and that site must have validated the day; the time
+  basis can override the profile's. Security hardening (2026-11-24): only days before today are
+  exported (a period ending today or later is cut at yesterday and recorded so; never an
+  "unvalidated" problem); CSV text cells and headers starting with `= + - @ TAB CR` get a leading
+  `'` (plain numbers excepted; XLSX writes strings); unencodable windows-1252 values are a
+  problem naming the persons, not a failed export; limits: 200 000 rows per export, two exports
+  generated at a time, 10 API exports per minute per key (`docs/export-profiles.md`).
 - **Neutral export model**: per person per day from validated periods: payroll/contract number
   (encrypted), site code (cost centre), date, start, stop, break, worked minutes, contract minutes,
   registered-vs-contract mode, later absence codes.
@@ -329,12 +343,19 @@ minutes, payroll number, site cost centre; schema in §9); the screens and the e
     `hours:read`, `export:read`), optional site restriction, expiry; shown once, stored hashed,
     last-used, revocable; `Authorization: Bearer`; per-key rate limit; every call audited; optional IP
     allowlist. Keys grant access to decrypted personal data and are treated accordingly.
+  - `people:write` only creates and changes **employees** (never manager, HR or admin), only
+    people who already have role assignments at the key's sites (no claiming of role-less people);
+    answers for people it may not touch are identical (`409`); the Integraties page warns when the
+    scope is chosen. Restricted keys see only roles, sites, days and events of their own sites.
+    Mutating calls write their `api.call` audit row in the same transaction; failed
+    authentications are audited with a keyed client hash under a per-client rate limit.
   - Endpoints: `GET /people`, `PUT /people/{external_id}` (HR sync upsert), `GET /hours`,
     `GET /exports/{profile}`, `GET /periods`. Webhooks later (e.g. period validated).
   - **OpenAPI** generated from code with `utoipa` (+ `utoipa-axum`), served at `/api/v1/openapi.json`;
     interactive docs with **Scalar** via `utoipa-scalar` at `/api/v1/docs` (owner's choice over
     RapiDoc). The Scalar script is vendored in `crates/app/vendor/scalar/` and embedded in the binary (no CDN) so the strict CSP stays intact; the
-    docs page can be disabled by configuration.
+    docs page is **off by default** (`API_DOCS=on`), has its own CSP (no inline script) and Scalar is
+    configured without agent, MCP, developer tools, client button, telemetry, fonts and proxy.
 - **Outbound connectors**: "send directly" next to "download" (e.g. Acerta REST API if access is
   granted); connector credentials stored encrypted with the data key.
 

@@ -14,9 +14,9 @@ use store::repo::role::{self, Role};
 use store::repo::{RepoError, audit, person, site};
 use uuid::Uuid;
 
-use super::auth::{ApiAuth, ApiState};
+use super::auth::{ApiAuth, ApiState, record_call};
 use super::error::{ApiError, ErrorBody};
-use crate::server::hours::{PAYROLL_NUMBER_MAX_CHARS, validate_code};
+use crate::server::hours::PAYROLL_NUMBER_MAX_CHARS;
 use crate::server::staff::validate_name;
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -44,8 +44,9 @@ pub struct PersonDto {
 
 /// List people.
 ///
-/// A key restricted to sites sees employees of those sites only; an unrestricted key sees
-/// everyone, including organisation-wide roles.
+/// A key restricted to sites sees employees of those sites only, and of each person only the
+/// roles and sites within the key's sites (organisation-wide roles are not shown). An
+/// unrestricted key sees everyone, including organisation-wide roles.
 #[utoipa::path(
     get,
     path = "/api/v1/people",
@@ -92,11 +93,15 @@ pub async fn people(
         .into_iter()
         .filter(|p| query.active.is_none_or(|active| p.active == active))
         .collect();
-    dtos(pool, found).await
+    dtos(pool, found, key.site_ids.as_deref()).await
 }
 
-/// The API form of `found`, in the same order.
-async fn dtos(pool: &PgPool, found: Vec<person::Person>) -> Result<Vec<PersonDto>, ApiError> {
+/// The API form of `found`, in the same order. With `restrict`, only roles at those sites count.
+async fn dtos(
+    pool: &PgPool,
+    found: Vec<person::Person>,
+    restrict: Option<&[Uuid]>,
+) -> Result<Vec<PersonDto>, ApiError> {
     let ids: Vec<Uuid> = found.iter().map(|p| p.id).collect();
 
     let assignments: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
@@ -120,6 +125,9 @@ async fn dtos(pool: &PgPool, found: Vec<person::Person>) -> Result<Vec<PersonDto
     let mut roles: HashMap<Uuid, Vec<String>> = HashMap::new();
     let mut person_sites: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
     for (person, role, site) in assignments {
+        if restrict.is_some_and(|allowed| !site.is_some_and(|s| allowed.contains(&s))) {
+            continue;
+        }
         let list = roles.entry(person).or_default();
         if !list.contains(&role) {
             list.push(role);
@@ -144,22 +152,28 @@ async fn dtos(pool: &PgPool, found: Vec<person::Person>) -> Result<Vec<PersonDto
         .collect())
 }
 
-/// The role an API key may give: organisation-wide roles (HR, admin) are never set through the
-/// API.
+/// The only role an API key may give. Managers, HR and admins are never set through the API: a
+/// leaked or misused key must not be able to create someone who can validate hours, correct them
+/// or manage others.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum WritableRole {
     Employee,
-    Manager,
 }
 
-impl WritableRole {
-    fn role(self) -> Role {
-        match self {
-            Self::Employee => Role::Employee,
-            Self::Manager => Role::Manager,
-        }
-    }
+/// Longest `external_id`, in characters.
+const EXTERNAL_ID_MAX_CHARS: usize = PAYROLL_NUMBER_MAX_CHARS;
+
+/// `external_id`: 1 to 20 characters from `A-Z a-z 0-9 . _ / -`, not starting with `=`, `+`, `-`
+/// or `@` (spreadsheet formula characters: the number ends up in exports).
+pub fn validate_external_id(value: &str) -> Result<String, ApiError> {
+    let ok = (1..=EXTERNAL_ID_MAX_CHARS).contains(&value.chars().count())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
+        && !value.starts_with(['=', '+', '-', '@']);
+    ok.then(|| value.to_string())
+        .ok_or(ApiError::InvalidRequest)
 }
 
 /// The desired state of a person, identified by payroll number.
@@ -168,10 +182,10 @@ impl WritableRole {
 pub struct PersonUpsert {
     /// Display name, 1 to 100 characters.
     pub name: String,
-    /// `employee` or `manager`, at every site in `site_ids`.
+    /// Always `employee`, at every site in `site_ids`.
     pub role: WritableRole,
-    /// Sites the person works at (or manages): at least one, active sites only. The person's
-    /// roles are made to match exactly.
+    /// Sites the person works at: at least one, active sites only. The person's employee roles
+    /// are made to match exactly.
     pub site_ids: Vec<Uuid>,
     /// `false` deactivates the person (sessions end immediately).
     pub active: bool,
@@ -183,9 +197,15 @@ pub struct Upserted {
     pub person: PersonDto,
 }
 
-/// Create or update the person with payroll number `external_id`. Never touches admins or HR.
-/// A key restricted to sites may only use its sites, and only change people who work at them
-/// exclusively. Changes are audited with field names only.
+/// The route pattern of [`put_person`], as recorded in the audit row of a call.
+const PUT_ROUTE: &str = "/api/v1/people/{external_id}";
+
+/// Create or update the employee with payroll number `external_id`. An existing person can only
+/// be changed when they have role assignments, all of them `employee` at sites the key may use:
+/// anyone else (no roles, manager, HR, admin, someone who also works elsewhere) is refused with
+/// the same `conflict` answer, so a restricted key learns nothing about people outside its
+/// sites. Changes are audited with field names only; the `api.call` audit row is written in the
+/// same transaction, so a change is never committed without it.
 pub async fn upsert_person(
     pool: &PgPool,
     keys: &DataKeys,
@@ -194,7 +214,7 @@ pub async fn upsert_person(
     external_id: &str,
     body: &PersonUpsert,
 ) -> Result<Upserted, ApiError> {
-    let external_id = validate_code(external_id, PAYROLL_NUMBER_MAX_CHARS, "external_id")?;
+    let external_id = validate_external_id(external_id)?;
     let name = validate_name(&body.name).map_err(|_| ApiError::InvalidRequest)?;
     let mut sites = body.site_ids.clone();
     sites.sort();
@@ -205,7 +225,6 @@ pub async fn upsert_person(
     if !sites.iter().all(|s| key.allows_site(*s)) {
         return Err(ApiError::Forbidden);
     }
-    let new_role = body.role.role();
     let api_key = format!("api_key:{}", key.id);
 
     let mut tx = pool.begin().await.map_err(RepoError::from)?;
@@ -218,33 +237,27 @@ pub async fn upsert_person(
         }
     }
     let existing = person::find_by_payroll_number(&mut *tx, blind, &external_id).await?;
-    let (id, created, mut changed, previous_role) = match existing {
+    let (id, created, mut changed) = match existing {
         None => {
             let p = person::create_person(&mut *tx, keys, blind, &name, None).await?;
             if !person::set_payroll_number(&mut *tx, keys, blind, p.id, Some(&external_id)).await? {
                 return Err(ApiError::Conflict);
             }
             let fields = ["display_name", "payroll_number", "role", "site_id"];
-            (p.id, true, fields.map(String::from).to_vec(), None)
+            (p.id, true, fields.map(String::from).to_vec())
         }
         Some(id) => {
             let current = role::roles_of(&mut *tx, id).await?;
-            if current
-                .iter()
-                .any(|r| matches!(r.role, Role::Admin | Role::Hr))
-            {
-                return Err(ApiError::Forbidden);
-            }
-            if !current
-                .iter()
-                .filter_map(|r| r.site_id)
-                .all(|s| key.allows_site(s))
-            {
-                return Err(ApiError::Forbidden);
+            let manageable = !current.is_empty()
+                && current.iter().all(|r| {
+                    r.role == Role::Employee && r.site_id.is_some_and(|s| key.allows_site(s))
+                });
+            if !manageable {
+                return Err(ApiError::Conflict);
             }
             let p = person::get_person(&mut *tx, keys, id)
                 .await?
-                .ok_or(ApiError::NotFound)?;
+                .ok_or(ApiError::Conflict)?;
             let mut changed = Vec::new();
             if p.display_name != name {
                 person::rename(&mut *tx, keys, blind, id, &name).await?;
@@ -254,20 +267,17 @@ pub async fn upsert_person(
                 person::set_active(&mut *tx, id, body.active).await?;
                 changed.push("active".to_string());
             }
-            let wanted = |r: &role::RoleAssignment| {
-                r.role == new_role && r.site_id.is_some_and(|s| sites.contains(&s))
-            };
             let mut roles_changed = false;
-            for r in current.iter().filter(|r| !wanted(r)) {
+            for r in current
+                .iter()
+                .filter(|r| !r.site_id.is_some_and(|s| sites.contains(&s)))
+            {
                 role::revoke(&mut *tx, id, r.role, r.site_id).await?;
                 roles_changed = true;
             }
             for s in &sites {
-                let held = current
-                    .iter()
-                    .any(|r| r.role == new_role && r.site_id == Some(*s));
-                if !held {
-                    role::assign(&mut *tx, id, new_role, Some(*s), None).await?;
+                if !current.iter().any(|r| r.site_id == Some(*s)) {
+                    role::assign(&mut *tx, id, Role::Employee, Some(*s), None).await?;
                     roles_changed = true;
                 }
             }
@@ -275,20 +285,19 @@ pub async fn upsert_person(
                 changed.push("role".to_string());
                 changed.push("site_id".to_string());
             }
-            let previous = current.first().map(|r| r.role);
-            (id, false, changed, previous)
+            (id, false, changed)
         }
     };
     if created {
         for s in &sites {
-            role::assign(&mut *tx, id, new_role, Some(*s), None).await?;
+            role::assign(&mut *tx, id, Role::Employee, Some(*s), None).await?;
         }
         if !body.active {
             person::set_active(&mut *tx, id, false).await?;
         }
     }
     if !changed.is_empty() {
-        changed.push(api_key.clone());
+        changed.push(api_key);
         let fields: Vec<&str> = changed.iter().map(String::as_str).collect();
         let action = if created {
             "person.created"
@@ -296,25 +305,19 @@ pub async fn upsert_person(
             "person.updated"
         };
         audit::record(&mut *tx, None, action, "person", Some(id), &fields).await?;
-        if (created && new_role != Role::Employee) || previous_role.is_some_and(|r| r != new_role) {
-            let detail = format!("role:{}", new_role.as_str());
-            audit::record(
-                &mut *tx,
-                None,
-                "role.changed",
-                "person",
-                Some(id),
-                &["role", &detail, &api_key],
-            )
-            .await?;
-        }
     }
+    let status = if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    record_call(&mut *tx, key.id, PUT_ROUTE, status.as_u16()).await?;
     tx.commit().await.map_err(RepoError::from)?;
 
     let found = person::get_person(pool, keys, id)
         .await?
-        .ok_or(ApiError::NotFound)?;
-    let person = dtos(pool, vec![found])
+        .ok_or(ApiError::Internal)?;
+    let person = dtos(pool, vec![found], key.site_ids.as_deref())
         .await?
         .pop()
         .ok_or(ApiError::Internal)?;
@@ -324,14 +327,16 @@ pub async fn upsert_person(
 /// Create or update a person by payroll number.
 ///
 /// `external_id` is the person's payroll number. The person is created when no one has it,
-/// otherwise updated (`201` or `200`). Only `employee` and `manager` can be set; people who are
-/// HR or admin are refused (`403`). A key restricted to sites may only use those sites and only
-/// change people who work at them exclusively.
+/// otherwise updated (`201` or `200`). Only the role `employee` can be set. An existing person
+/// is only changed when they are an employee at sites the key may use and have no other role;
+/// managers, HR, admins, people without roles and people who also work at other sites are
+/// refused with `409`, the same answer for every such case. This includes deactivating and
+/// reactivating: the API only touches the employees it may manage.
 #[utoipa::path(
     put,
     path = "/api/v1/people/{external_id}",
     tag = "people",
-    params(("external_id" = String, Path, description = "Payroll number, 1 to 20 characters")),
+    params(("external_id" = String, Path, description = "Payroll number: 1 to 20 characters from A-Z a-z 0-9 . _ / -, not starting with = + - or @")),
     request_body = PersonUpsert,
     security(("bearer" = ["people:write"])),
     responses(
@@ -339,8 +344,8 @@ pub async fn upsert_person(
         (status = 201, description = "The created person", body = PersonDto),
         (status = 400, description = "Invalid body, payroll number or site", body = ErrorBody),
         (status = 401, description = "Missing, unknown, revoked or expired key", body = ErrorBody),
-        (status = 403, description = "Scope missing, site not allowed for this key or person is HR or admin", body = ErrorBody),
-        (status = 409, description = "Payroll number taken in the meantime", body = ErrorBody),
+        (status = 403, description = "Scope missing or a requested site not allowed for this key", body = ErrorBody),
+        (status = 409, description = "The payroll number belongs to someone this key may not change, or was taken in the meantime", body = ErrorBody),
         (status = 429, description = "Rate limit exceeded", body = ErrorBody),
     )
 )]

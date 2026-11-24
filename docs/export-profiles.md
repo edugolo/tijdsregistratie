@@ -24,7 +24,7 @@ problems are listed together.
 | Key | Values | Default | Notes |
 | --- | --- | --- | --- |
 | `format` | `csv`, `xlsx` | required | |
-| `encoding` | `utf-8`, `windows-1252` | `utf-8` | csv only. A character that cannot be encoded fails the export. |
+| `encoding` | `utf-8`, `windows-1252` | `utf-8` | csv only. A value with a character that cannot be encoded blocks the export, see below. |
 | `bom` | bool | `false` | utf-8 byte order mark (helps Excel open UTF-8 CSV). |
 | `separator` | one ASCII char | `;` | csv only. Not a quote or newline; must differ from `decimal_separator`. |
 | `quote` | `necessary`, `always` | `necessary` | csv only. |
@@ -84,6 +84,42 @@ Duration formats: `minutes` (integer), `hours_decimal` (2 decimals), `hours_deci
 (half-up rounding), `hh:mm`. In XLSX, dates are real date cells (the strftime pattern is translated to an
 Excel number format; `%Y %y %m %d %b %B` are supported, anything else falls back to `yyyy-mm-dd`), and
 `minutes` / `hours_decimal` are numeric cells; `hh:mm` and times are text.
+
+## Spreadsheet formula injection
+
+A name such as `=HYPERLINK(...)` would run as a formula when HR opens a CSV in Excel or Calc. The CSV
+writer therefore puts a single quote in front of every **text cell and header** whose first character
+(no trimming) is `=`, `+`, `-`, `@`, a tab or a carriage return (OWASP guidance). Not escaped: numeric
+columns (`minutes`, `hours_decimal`, which are written as numbers) and a text that is a plain number,
+meaning an optional `-`, digits, and optionally one `.` or `,` with more digits (`-5`, `-5,25`). So
+`+5`, `-`, `-5-5`, `-1e3` and ` =1` (leading space) are written as `'+5`, `'-`, ... and ` =1`
+respectively; only the first character counts. Quoting by the CSV rules happens after this.
+The quote is part of the file: payroll software that imports the text sees it. XLSX writes every text
+as a string cell, never as a formula, so it needs no escaping. Golden tests cover each shipped profile
+with malicious values.
+
+## Unencodable characters
+
+With `encoding = "windows-1252"`, a person whose name, payroll number or cost centre holds a character
+that does not exist in windows-1252 does not fail the whole export with an anonymous error: the
+engine reports `UnencodablePersons` with the payroll numbers of the affected rows. The app turns this
+into a problem in the preview (like a missing payroll number): the staff screen lists the persons by
+name so HR can fix the data, and the download stays blocked. The API answers `409` and names nobody.
+A header that cannot be encoded is a profile error. Nothing is replaced or dropped silently.
+
+## Which days are exported
+
+In the app (not in the engine, which only renders the rows it gets):
+
+- Only days **before today** in the organisation time zone are exported; later days may still
+  change. They are not "unvalidated problems" either, so "this week" and "this month" export the
+  finished days and the preview says "Dagen vanaf vandaag worden niet meegenomen." The batch records
+  the cut period, so it still verifies later.
+- Days are exported under the site where they were worked (the site of the day's first event; its
+  cost centre fills `site_code`) and need that site's validation. A day without events (contract)
+  falls under the person's first selected site.
+- At most 200 000 rows per export, and two exports are generated at the same time on the server
+  ("busy, try again" otherwise); API exports are also limited to 10 per minute per key.
 
 ## Rows without a payroll number
 

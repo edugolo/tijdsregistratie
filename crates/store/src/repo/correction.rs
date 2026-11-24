@@ -415,6 +415,42 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../../migrations")]
+    async fn the_database_refuses_overlapping_active_validations(pool: PgPool) {
+        let k = keys();
+        let by = mk_person(&pool, &k, "Mia").await;
+        let (a, b) = (mk_site(&pool).await, mk_site(&pool).await);
+        let raw = |site: Uuid, s: u32, e: u32| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO period_validation (site_id, period_start, period_end, validated_by) \
+                     VALUES ($1, $2, $3, $4)",
+                )
+                .bind(site)
+                .bind(day(s))
+                .bind(day(e))
+                .bind(by)
+                .execute(&pool)
+                .await
+            }
+        };
+        raw(a, 1, 7).await.unwrap();
+        for (s, e) in [(1, 1), (7, 9), (3, 4), (1, 31)] {
+            assert!(raw(a, s, e).await.is_err(), "{s}-{e}");
+        }
+        raw(a, 8, 9).await.unwrap();
+        raw(b, 1, 7).await.unwrap();
+        // A reopened validation frees its period.
+        let mut conn = pool.acquire().await.unwrap();
+        validation::reopen(&mut conn, a, day(1), day(7), by)
+            .await
+            .unwrap();
+        drop(conn);
+        raw(a, 2, 3).await.unwrap();
+        assert!(raw(a, 3, 5).await.is_err());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
     async fn reopen_frees_the_period_and_keeps_the_row(pool: PgPool) {
         let k = keys();
         let by = mk_person(&pool, &k, "Mia").await;

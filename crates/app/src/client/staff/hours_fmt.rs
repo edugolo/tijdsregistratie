@@ -78,13 +78,14 @@ pub fn parse_date(text: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d").ok()
 }
 
-/// The part of a period that can be validated: it ends at the latest today.
+/// The part of a period that can be validated: only finished days, so it ends at the latest
+/// yesterday.
 pub fn validation_range(
     from: NaiveDate,
     to: NaiveDate,
     today: NaiveDate,
 ) -> Option<(NaiveDate, NaiveDate)> {
-    let to = to.min(today);
+    let to = to.min(today.pred_opt()?);
     (from <= to).then_some((from, to))
 }
 
@@ -325,11 +326,15 @@ mod tests {
     }
 
     #[test]
-    fn a_period_is_validated_up_to_today() {
+    fn a_period_is_validated_up_to_yesterday() {
         let today = d(2026, 11, 24);
         assert_eq!(
             validation_range(d(2026, 11, 23), d(2026, 11, 29), today),
-            Some((d(2026, 11, 23), today))
+            Some((d(2026, 11, 23), d(2026, 11, 23)))
+        );
+        assert_eq!(
+            validation_range(d(2026, 11, 24), d(2026, 11, 24), today),
+            None
         );
         assert_eq!(
             validation_range(d(2026, 11, 1), d(2026, 11, 10), today),

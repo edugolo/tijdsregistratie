@@ -61,7 +61,9 @@ impl From<crate::server::export::ExportError> for ApiError {
         match e {
             E::Forbidden => Self::Forbidden,
             E::NotFound => Self::NotFound,
-            E::Invalid(_) => Self::InvalidRequest,
+            // Also a period with more rows than one export may hold.
+            E::Invalid(_) | E::TooLarge => Self::InvalidRequest,
+            E::Busy => Self::RateLimited,
             // Nothing is produced; GET /periods says which sites and days are not validated.
             E::Blocked(_) | E::ProfileInvalid(_) => Self::Conflict,
             E::Internal => Self::Internal,

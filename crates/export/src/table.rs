@@ -3,12 +3,20 @@
 use std::collections::BTreeSet;
 
 use chrono::{NaiveDate, NaiveTime};
+use encoding_rs::WINDOWS_1252;
 
 use crate::error::ExportError;
 use crate::model::{ExportKind, ExportPeriod, ExportRow, SourceMode};
 use crate::profile::{
-    ColumnFormat, DurationFormat, Field, Granularity, Profile, TimeBasis, format_date, format_time,
+    ColumnFormat, DurationFormat, Encoding, Field, Granularity, Profile, TimeBasis, format_date,
+    format_time,
 };
+
+const WINDOWS_1252_NAME: &str = "windows-1252";
+
+fn encodable(text: &str) -> bool {
+    !WINDOWS_1252.encode(text).2
+}
 
 /// A typed output cell. CSV writes the text form; XLSX keeps the type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,16 +258,34 @@ pub(crate) fn build(
         recs.retain(|r| amount(profile, r) > 0);
     }
 
+    let headers: Vec<String> = profile.columns.iter().map(|c| c.header.clone()).collect();
+    let legacy = profile.encoding == Encoding::Windows1252;
+    if legacy && !headers.iter().all(|h| encodable(h)) {
+        return Err(ExportError::Unencodable {
+            encoding: WINDOWS_1252_NAME,
+        });
+    }
+    let mut unencodable: BTreeSet<&str> = BTreeSet::new();
     let mut table_rows = Vec::with_capacity(recs.len());
     for rec in &recs {
         let mut cells = Vec::with_capacity(profile.columns.len());
         for c in &profile.columns {
-            cells.push(cell_for(profile, period, rec, c.field, &c.format)?);
+            let cell = cell_for(profile, period, rec, c.field, &c.format)?;
+            if legacy && !encodable(&cell.to_text(profile.decimal_separator)?) {
+                unencodable.insert(&rec.person_key);
+            }
+            cells.push(cell);
         }
         table_rows.push(cells);
     }
+    if !unencodable.is_empty() {
+        return Err(ExportError::UnencodablePersons {
+            encoding: WINDOWS_1252_NAME,
+            person_keys: unencodable.into_iter().map(str::to_owned).collect(),
+        });
+    }
     Ok(Table {
-        headers: profile.columns.iter().map(|c| c.header.clone()).collect(),
+        headers,
         rows: table_rows,
     })
 }
