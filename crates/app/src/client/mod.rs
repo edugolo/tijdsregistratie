@@ -1,5 +1,6 @@
 //! Client UI: routes and screens.
 
+mod address_search;
 mod components;
 mod employee;
 #[cfg(feature = "web")]

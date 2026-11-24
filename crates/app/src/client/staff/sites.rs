@@ -4,8 +4,18 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use super::icons::{Icon, IconKind};
+use crate::api::geocode::GeoSuggestion;
+use crate::client::address_search::{AddressSearch, Look};
 use crate::client::i18n::LANGUAGE_LOADER;
+use crate::client::setup::form::format_coordinate;
+use crate::client::setup::platform::{self, LocateFailure};
 use i18n_embed_fl::fl;
+
+/// Defaults of a new school (radius in metres, breaks in minutes).
+const DEFAULT_RADIUS_M: &str = "150";
+const DEFAULT_BREAK_MINUTES: &str = "30";
+const DEFAULT_BREAK_AFTER_MINUTES: &str = "360";
+const MAX_ADDRESS_CHARS: usize = 200;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct SiteRow {
@@ -47,6 +57,28 @@ pub struct RawSiteForm {
 }
 
 impl RawSiteForm {
+    /// The empty form of a new school, with sensible defaults.
+    pub fn new_site() -> Self {
+        Self {
+            radius_m: DEFAULT_RADIUS_M.into(),
+            break_minutes: DEFAULT_BREAK_MINUTES.into(),
+            break_after_minutes: DEFAULT_BREAK_AFTER_MINUTES.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Fills address and coordinates from a chosen search result.
+    pub fn apply_suggestion(&mut self, suggestion: &GeoSuggestion) {
+        self.address = suggestion.label.chars().take(MAX_ADDRESS_CHARS).collect();
+        self.apply_position(suggestion.lat, suggestion.lng);
+    }
+
+    /// Fills the coordinates (6 decimals, about 0.1 m).
+    pub fn apply_position(&mut self, lat: f64, lng: f64) {
+        self.lat = format_coordinate(lat);
+        self.lng = format_coordinate(lng);
+    }
+
     fn from_row(row: &SiteRow) -> Self {
         Self {
             id: Some(row.id),
@@ -141,13 +173,166 @@ pub fn validate_site_form(raw: &RawSiteForm) -> Result<SiteForm, Vec<SiteField>>
     }
 }
 
+/// Which school the editor is about.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Target {
+    New,
+    Edit(Uuid),
+}
+
+#[derive(Clone, PartialEq, Debug)]
+struct OpenEditor {
+    target: Target,
+    form: RawSiteForm,
+    /// What the form looked like when it opened, to tell unsaved changes.
+    baseline: RawSiteForm,
+    touched: Vec<SiteField>,
+    submitted: bool,
+}
+
+/// State of the one school editor: closed, or open for exactly one target. Switching target
+/// replaces the form; with unsaved changes it first waits for a decision (`pending`).
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct SiteEditor {
+    open: Option<OpenEditor>,
+    pending: Option<Target>,
+}
+
+impl SiteEditor {
+    pub fn target(&self) -> Option<Target> {
+        self.open.as_ref().map(|o| o.target)
+    }
+
+    pub fn form(&self) -> Option<&RawSiteForm> {
+        self.open.as_ref().map(|o| &o.form)
+    }
+
+    pub fn form_mut(&mut self) -> Option<&mut RawSiteForm> {
+        self.open.as_mut().map(|o| &mut o.form)
+    }
+
+    /// The target waiting for the user to confirm discarding unsaved changes.
+    pub fn pending(&self) -> Option<Target> {
+        self.pending
+    }
+
+    /// Name of the school being edited as it was saved; `None` for a new school.
+    pub fn saved_name(&self) -> Option<&str> {
+        self.open
+            .as_ref()
+            .filter(|o| matches!(o.target, Target::Edit(_)))
+            .map(|o| o.baseline.name.as_str())
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.open.as_ref().is_some_and(|o| o.form != o.baseline)
+    }
+
+    fn form_for(target: Target, sites: &[SiteRow]) -> Option<RawSiteForm> {
+        match target {
+            Target::New => Some(RawSiteForm::new_site()),
+            Target::Edit(id) => sites.iter().find(|s| s.id == id).map(RawSiteForm::from_row),
+        }
+    }
+
+    fn replace_with(&mut self, target: Target, sites: &[SiteRow]) {
+        self.pending = None;
+        if let Some(form) = Self::form_for(target, sites) {
+            self.open = Some(OpenEditor {
+                target,
+                baseline: form.clone(),
+                form,
+                touched: Vec::new(),
+                submitted: false,
+            });
+        }
+    }
+
+    /// Opens `target`. Asking for the target that is already open changes nothing; switching
+    /// with unsaved changes waits for [`Self::confirm_switch`] or [`Self::keep_editing`].
+    pub fn request(&mut self, target: Target, sites: &[SiteRow]) {
+        if self.target() == Some(target) {
+            self.pending = None;
+        } else if self.is_dirty() {
+            self.pending = Some(target);
+        } else {
+            self.replace_with(target, sites);
+        }
+    }
+
+    /// Discards the unsaved changes and opens the target that was waiting.
+    pub fn confirm_switch(&mut self, sites: &[SiteRow]) {
+        if let Some(target) = self.pending {
+            self.replace_with(target, sites);
+        }
+    }
+
+    pub fn keep_editing(&mut self) {
+        self.pending = None;
+    }
+
+    pub fn close(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Marks a field as left, so its error may show.
+    pub fn touch(&mut self, field: SiteField) {
+        if let Some(open) = self.open.as_mut()
+            && !open.touched.contains(&field)
+        {
+            open.touched.push(field);
+        }
+    }
+
+    /// The user tries to save: every error shows from now on. Returns the valid form, if any.
+    pub fn submit(&mut self) -> Option<SiteForm> {
+        let open = self.open.as_mut()?;
+        open.submitted = true;
+        validate_site_form(&open.form).ok()
+    }
+
+    /// Errors to show: all after a save attempt, otherwise only those of fields that were left.
+    pub fn visible_errors(&self) -> Vec<SiteField> {
+        self.open
+            .as_ref()
+            .map(|o| visible_errors(&o.form, &o.touched, o.submitted))
+            .unwrap_or_default()
+    }
+}
+
+/// Invalid fields that may show their error: all once `submitted`, else the `touched` ones.
+pub fn visible_errors(raw: &RawSiteForm, touched: &[SiteField], submitted: bool) -> Vec<SiteField> {
+    validate_site_form(raw)
+        .err()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|field| submitted || touched.contains(field))
+        .collect()
+}
+
+/// A save request: the form to store and where to report whether it worked.
+#[derive(Clone, PartialEq)]
+pub struct SaveRequest {
+    pub form: SiteForm,
+    pub done: Callback<bool>,
+}
+
 #[component]
 pub fn SitesPage(
     sites: Vec<SiteRow>,
-    on_save: EventHandler<SiteForm>,
+    on_save: EventHandler<SaveRequest>,
     on_toggle_active: EventHandler<Uuid>,
 ) -> Element {
-    let mut editing = use_signal(|| None::<RawSiteForm>);
+    let mut editor = use_signal(SiteEditor::default);
+    let mut saving = use_signal(|| false);
+    let mut saved = use_signal(|| false);
+    let open_target = editor.read().target();
+    let list = sites.clone();
+    let request = use_callback(move |target: Target| {
+        saved.set(false);
+        editor.write().request(target, &list);
+    });
+    let switch_list = sites.clone();
     rsx! {
         section { class: "st-page",
             div { class: "st-page-head",
@@ -155,64 +340,52 @@ pub fn SitesPage(
                 button {
                     class: "st-btn",
                     r#type: "button",
-                    onclick: move |_| editing.set(Some(RawSiteForm::default())),
+                    onclick: move |_| request.call(Target::New),
                     Icon { kind: IconKind::Plus }
                     {fl!(LANGUAGE_LOADER, "sites-add")}
                 }
             }
-            if let Some(raw) = editing() {
-                SiteFormCard {
-                    initial: raw,
-                    on_save: move |form| {
-                        on_save.call(form);
-                        editing.set(None);
-                    },
-                    on_cancel: move |_| editing.set(None),
+            if saved() {
+                div { class: "st-notice st-notice-ok", role: "status",
+                    Icon { kind: IconKind::Check, size: 20 }
+                    p { {fl!(LANGUAGE_LOADER, "sites-saved")} }
                 }
             }
-            div { class: "st-card",
-                ul { class: "st-list",
-                    for site in sites {
-                        li { key: "{site.id}", class: "st-row",
-                            span { class: "st-row-name",
-                                strong { "{site.name}" }
-                                span { class: "st-sub", "{site.address}" }
-                            }
-                            span { class: "st-row-status",
-                                if site.active {
-                                    span { class: "st-chip st-chip-ok",
-                                        Icon { kind: IconKind::Check, size: 14 }
-                                        {fl!(LANGUAGE_LOADER, "chip-active")}
-                                    }
-                                } else {
-                                    span { class: "st-chip st-chip-neutral",
-                                        Icon { kind: IconKind::Close, size: 14 }
-                                        {fl!(LANGUAGE_LOADER, "chip-inactive")}
-                                    }
-                                }
-                                span { class: "st-sub", "{site.radius_m} m" }
-                            }
-                            span { class: "st-row-actions",
-                                button {
-                                    class: "st-btn st-btn-ghost",
-                                    r#type: "button",
-                                    onclick: {
-                                        let row = site.clone();
-                                        move |_| editing.set(Some(RawSiteForm::from_row(&row)))
-                                    },
-                                    {fl!(LANGUAGE_LOADER, "sites-edit")}
-                                }
-                                button {
-                                    class: "st-btn st-btn-ghost",
-                                    r#type: "button",
-                                    onclick: {
-                                        let id = site.id;
-                                        move |_| on_toggle_active.call(id)
-                                    },
-                                    if site.active { {fl!(LANGUAGE_LOADER, "sites-deactivate")} } else { {fl!(LANGUAGE_LOADER, "sites-activate")} }
+            div { class: if open_target.is_some() { "st-split st-split-open" } else { "st-split" },
+                div { class: "st-split-main",
+                    div { class: "st-card",
+                        ul { class: "st-list",
+                            for site in sites {
+                                SiteListRow {
+                                    key: "{site.id}",
+                                    editing: open_target == Some(Target::Edit(site.id)),
+                                    site,
+                                    on_edit: move |id| request.call(Target::Edit(id)),
+                                    on_toggle_active,
                                 }
                             }
                         }
+                    }
+                }
+                if let Some(target) = open_target {
+                    SiteEditorPanel {
+                        key: "{target:?}",
+                        editor,
+                        saving: saving(),
+                        on_switch: move |_| editor.write().confirm_switch(&switch_list),
+                        on_submit: move |form| {
+                            saving.set(true);
+                            on_save.call(SaveRequest {
+                                form,
+                                done: Callback::new(move |ok: bool| {
+                                    saving.set(false);
+                                    if ok {
+                                        editor.write().close();
+                                        saved.set(true);
+                                    }
+                                }),
+                            });
+                        },
                     }
                 }
             }
@@ -221,128 +394,319 @@ pub fn SitesPage(
 }
 
 #[component]
-fn SiteFormCard(
-    initial: RawSiteForm,
-    on_save: EventHandler<SiteForm>,
-    on_cancel: EventHandler<()>,
+fn SiteListRow(
+    site: SiteRow,
+    editing: bool,
+    on_edit: EventHandler<Uuid>,
+    on_toggle_active: EventHandler<Uuid>,
 ) -> Element {
-    let mut raw = use_signal(|| initial);
-    let mut errors = use_signal(Vec::<SiteField>::new);
-    let has_error = move |field: SiteField| errors.read().contains(&field);
+    let id = site.id;
     rsx! {
-        form {
-            class: "st-card st-form",
-            onsubmit: move |e| {
-                e.prevent_default();
-                match validate_site_form(&raw.read()) {
-                    Ok(form) => {
-                        errors.set(Vec::new());
-                        on_save.call(form);
-                    }
-                    Err(found) => errors.set(found),
-                }
-            },
-            label { class: "st-field",
-                span { {fl!(LANGUAGE_LOADER, "sites-form-name")} }
-                input {
-                    class: "st-input",
-                    r#type: "text",
-                    value: "{raw.read().name}",
-                    aria_invalid: has_error(SiteField::Name),
-                    oninput: move |e| raw.write().name = e.value(),
-                }
-                if has_error(SiteField::Name) {
-                    FieldError { field: SiteField::Name }
-                }
+        li { class: if editing { "st-row st-row-editing" } else { "st-row" },
+            span { class: "st-row-name",
+                strong { "{site.name}" }
+                span { class: "st-sub", "{site.address}" }
             }
-            label { class: "st-field",
-                span { {fl!(LANGUAGE_LOADER, "sites-form-address")} }
-                input {
-                    class: "st-input",
-                    r#type: "text",
-                    value: "{raw.read().address}",
-                    oninput: move |e| raw.write().address = e.value(),
+            span { class: "st-row-meta",
+                if site.active {
+                    span { class: "st-chip st-chip-ok",
+                        Icon { kind: IconKind::Check, size: 14 }
+                        {fl!(LANGUAGE_LOADER, "chip-active")}
+                    }
+                } else {
+                    span { class: "st-chip st-chip-neutral",
+                        Icon { kind: IconKind::Close, size: 14 }
+                        {fl!(LANGUAGE_LOADER, "chip-inactive")}
+                    }
                 }
+                span { class: "st-sub", {fl!(LANGUAGE_LOADER, "sites-radius-label", meters = site.radius_m.to_string())} }
             }
-            div { class: "st-grid",
-                label { class: "st-field",
-                    span { {fl!(LANGUAGE_LOADER, "sites-form-lat")} }
-                    input {
-                        class: "st-input",
-                        r#type: "text",
-                        inputmode: "decimal",
-                        value: "{raw.read().lat}",
-                        aria_invalid: has_error(SiteField::Lat),
-                        oninput: move |e| raw.write().lat = e.value(),
-                    }
-                    if has_error(SiteField::Lat) {
-                        FieldError { field: SiteField::Lat }
-                    }
-                }
-                label { class: "st-field",
-                    span { {fl!(LANGUAGE_LOADER, "sites-form-lng")} }
-                    input {
-                        class: "st-input",
-                        r#type: "text",
-                        inputmode: "decimal",
-                        value: "{raw.read().lng}",
-                        aria_invalid: has_error(SiteField::Lng),
-                        oninput: move |e| raw.write().lng = e.value(),
-                    }
-                    if has_error(SiteField::Lng) {
-                        FieldError { field: SiteField::Lng }
-                    }
-                }
-                label { class: "st-field",
-                    span { {fl!(LANGUAGE_LOADER, "sites-form-radius")} }
-                    input {
-                        class: "st-input",
-                        r#type: "text",
-                        inputmode: "numeric",
-                        value: "{raw.read().radius_m}",
-                        aria_invalid: has_error(SiteField::Radius),
-                        oninput: move |e| raw.write().radius_m = e.value(),
-                    }
-                    if has_error(SiteField::Radius) {
-                        FieldError { field: SiteField::Radius }
-                    }
-                }
-                label { class: "st-field",
-                    span { {fl!(LANGUAGE_LOADER, "sites-form-break-minutes")} }
-                    input {
-                        class: "st-input",
-                        r#type: "text",
-                        inputmode: "numeric",
-                        value: "{raw.read().break_minutes}",
-                        aria_invalid: has_error(SiteField::BreakMinutes),
-                        oninput: move |e| raw.write().break_minutes = e.value(),
-                    }
-                    if has_error(SiteField::BreakMinutes) {
-                        FieldError { field: SiteField::BreakMinutes }
-                    }
-                }
-                label { class: "st-field",
-                    span { {fl!(LANGUAGE_LOADER, "sites-form-break-after")} }
-                    input {
-                        class: "st-input",
-                        r#type: "text",
-                        inputmode: "numeric",
-                        value: "{raw.read().break_after_minutes}",
-                        aria_invalid: has_error(SiteField::BreakAfter),
-                        oninput: move |e| raw.write().break_after_minutes = e.value(),
-                    }
-                    if has_error(SiteField::BreakAfter) {
-                        FieldError { field: SiteField::BreakAfter }
-                    }
-                }
-            }
-            div { class: "st-inline",
-                button { class: "st-btn", r#type: "submit", {fl!(LANGUAGE_LOADER, "sites-form-save")} }
+            span { class: "st-row-actions",
                 button {
                     class: "st-btn st-btn-ghost",
                     r#type: "button",
-                    onclick: move |_| on_cancel.call(()),
-                    {fl!(LANGUAGE_LOADER, "sites-form-cancel")}
+                    aria_label: fl!(LANGUAGE_LOADER, "sites-edit-aria", name = site.name.as_str()),
+                    aria_current: if editing { "true" } else { "false" },
+                    onclick: move |_| on_edit.call(id),
+                    {fl!(LANGUAGE_LOADER, "sites-edit")}
+                }
+                button {
+                    class: "st-btn st-btn-ghost",
+                    r#type: "button",
+                    onclick: move |_| on_toggle_active.call(id),
+                    if site.active { {fl!(LANGUAGE_LOADER, "sites-deactivate")} } else { {fl!(LANGUAGE_LOADER, "sites-activate")} }
+                }
+            }
+        }
+    }
+}
+
+/// Side panel (full-screen sheet on phones) with the form of the one open school.
+#[component]
+fn SiteEditorPanel(
+    mut editor: Signal<SiteEditor>,
+    saving: bool,
+    on_switch: EventHandler<()>,
+    on_submit: EventHandler<SiteForm>,
+) -> Element {
+    let mut locating = use_signal(|| false);
+    let mut note = use_signal(|| None::<String>);
+    // Starts open for an empty form, collapsed once there are coordinates. Only the code below
+    // changes it, so typing in a field never collapses the section under the cursor.
+    let mut coords_open = use_signal(|| {
+        editor
+            .peek()
+            .form()
+            .is_none_or(|f| f.lat.trim().is_empty() && f.lng.trim().is_empty())
+    });
+    let state = editor.read().clone();
+    let Some(raw) = state.form().cloned() else {
+        return rsx! {};
+    };
+    let title = match state.saved_name() {
+        Some(name) => fl!(LANGUAGE_LOADER, "sites-edit-title", name = name),
+        None => fl!(LANGUAGE_LOADER, "sites-new-title"),
+    };
+    let errors = state.visible_errors();
+    let has_error = |field: SiteField| errors.contains(&field);
+    let locate_label = if locating() {
+        fl!(LANGUAGE_LOADER, "sites-locating")
+    } else {
+        fl!(LANGUAGE_LOADER, "sites-locate")
+    };
+    rsx! {
+        aside { class: "st-panel", aria_label: "{title}",
+            header { class: "st-panel-head",
+                h2 { "{title}" }
+                button {
+                    class: "st-icon-btn",
+                    r#type: "button",
+                    aria_label: fl!(LANGUAGE_LOADER, "panel-close"),
+                    onclick: move |_| editor.write().close(),
+                    Icon { kind: IconKind::Close, size: 20 }
+                }
+            }
+            if state.pending().is_some() {
+                div { class: "st-notice st-notice-warn", role: "alertdialog", aria_label: fl!(LANGUAGE_LOADER, "sites-discard-title"),
+                    Icon { kind: IconKind::Alert, size: 20 }
+                    div { class: "st-form",
+                        p { {fl!(LANGUAGE_LOADER, "sites-discard-body")} }
+                        div { class: "st-inline",
+                            button {
+                                class: "st-btn st-btn-danger",
+                                r#type: "button",
+                                onclick: move |_| on_switch.call(()),
+                                {fl!(LANGUAGE_LOADER, "sites-discard-confirm")}
+                            }
+                            button {
+                                class: "st-btn st-btn-ghost",
+                                r#type: "button",
+                                onclick: move |_| editor.write().keep_editing(),
+                                {fl!(LANGUAGE_LOADER, "sites-discard-keep")}
+                            }
+                        }
+                    }
+                }
+            }
+            form {
+                class: "st-form",
+                novalidate: true,
+                onsubmit: move |e| {
+                    e.prevent_default();
+                    let valid = editor.write().submit();
+                    if let Some(form) = valid {
+                        on_submit.call(form);
+                    } else {
+                        let errors = editor.read().visible_errors();
+                        if errors.contains(&SiteField::Lat) || errors.contains(&SiteField::Lng) {
+                            coords_open.set(true);
+                        }
+                    }
+                },
+                label { class: "st-field",
+                    span { {fl!(LANGUAGE_LOADER, "sites-form-name")} }
+                    input {
+                        class: "st-input",
+                        r#type: "text",
+                        autocomplete: "off",
+                        value: "{raw.name}",
+                        aria_invalid: has_error(SiteField::Name),
+                        oninput: move |e| {
+                            if let Some(form) = editor.write().form_mut() {
+                                form.name = e.value();
+                            }
+                        },
+                        onblur: move |_| editor.write().touch(SiteField::Name),
+                    }
+                    if has_error(SiteField::Name) {
+                        FieldError { field: SiteField::Name }
+                    }
+                }
+                AddressSearch {
+                    look: Look::Staff,
+                    label: fl!(LANGUAGE_LOADER, "sites-form-address"),
+                    value: raw.address.clone(),
+                    on_input: move |text: String| {
+                        if let Some(form) = editor.write().form_mut() {
+                            form.address = text;
+                        }
+                    },
+                    on_pick: move |suggestion: GeoSuggestion| {
+                        if let Some(form) = editor.write().form_mut() {
+                            form.apply_suggestion(&suggestion);
+                        }
+                        coords_open.set(false);
+                        note.set(Some(fl!(LANGUAGE_LOADER, "address-picked")));
+                    },
+                }
+                div { class: "st-locate",
+                    button {
+                        class: "st-btn st-btn-tonal",
+                        r#type: "button",
+                        disabled: locating(),
+                        onclick: move |_| {
+                            locating.set(true);
+                            note.set(None);
+                            spawn(async move {
+                                match platform::locate().await {
+                                    Ok((lat, lng)) => {
+                                        if let Some(form) = editor.write().form_mut() {
+                                            form.apply_position(lat, lng);
+                                        }
+                                        coords_open.set(false);
+                                        note.set(Some(fl!(LANGUAGE_LOADER, "sites-located")));
+                                    }
+                                    Err(LocateFailure::Denied) => {
+                                        note.set(Some(fl!(LANGUAGE_LOADER, "sites-locate-denied")));
+                                    }
+                                    Err(LocateFailure::Unavailable) => {
+                                        note.set(Some(fl!(LANGUAGE_LOADER, "sites-locate-unavailable")));
+                                    }
+                                }
+                                locating.set(false);
+                            });
+                        },
+                        {locate_label}
+                    }
+                    if let Some(text) = note() {
+                        p { class: "st-sub", role: "status", "{text}" }
+                    }
+                }
+                details { class: "st-coords", open: coords_open(),
+                    summary { {fl!(LANGUAGE_LOADER, "sites-coords-adjust")} }
+                    div { class: "st-grid",
+                        label { class: "st-field",
+                            span { {fl!(LANGUAGE_LOADER, "sites-form-lat")} }
+                            input {
+                                class: "st-input",
+                                r#type: "text",
+                                inputmode: "decimal",
+                                value: "{raw.lat}",
+                                aria_invalid: has_error(SiteField::Lat),
+                                oninput: move |e| {
+                                    if let Some(form) = editor.write().form_mut() {
+                                        form.lat = e.value();
+                                    }
+                                },
+                                onblur: move |_| editor.write().touch(SiteField::Lat),
+                            }
+                            if has_error(SiteField::Lat) {
+                                FieldError { field: SiteField::Lat }
+                            }
+                        }
+                        label { class: "st-field",
+                            span { {fl!(LANGUAGE_LOADER, "sites-form-lng")} }
+                            input {
+                                class: "st-input",
+                                r#type: "text",
+                                inputmode: "decimal",
+                                value: "{raw.lng}",
+                                aria_invalid: has_error(SiteField::Lng),
+                                oninput: move |e| {
+                                    if let Some(form) = editor.write().form_mut() {
+                                        form.lng = e.value();
+                                    }
+                                },
+                                onblur: move |_| editor.write().touch(SiteField::Lng),
+                            }
+                            if has_error(SiteField::Lng) {
+                                FieldError { field: SiteField::Lng }
+                            }
+                        }
+                    }
+                }
+                div { class: "st-grid",
+                    label { class: "st-field",
+                        span { {fl!(LANGUAGE_LOADER, "sites-form-radius")} }
+                        input {
+                            class: "st-input",
+                            r#type: "text",
+                            inputmode: "numeric",
+                            value: "{raw.radius_m}",
+                            aria_invalid: has_error(SiteField::Radius),
+                            oninput: move |e| {
+                                if let Some(form) = editor.write().form_mut() {
+                                    form.radius_m = e.value();
+                                }
+                            },
+                            onblur: move |_| editor.write().touch(SiteField::Radius),
+                        }
+                        if has_error(SiteField::Radius) {
+                            FieldError { field: SiteField::Radius }
+                        }
+                    }
+                    label { class: "st-field",
+                        span { {fl!(LANGUAGE_LOADER, "sites-form-break-minutes")} }
+                        input {
+                            class: "st-input",
+                            r#type: "text",
+                            inputmode: "numeric",
+                            value: "{raw.break_minutes}",
+                            aria_invalid: has_error(SiteField::BreakMinutes),
+                            oninput: move |e| {
+                                if let Some(form) = editor.write().form_mut() {
+                                    form.break_minutes = e.value();
+                                }
+                            },
+                            onblur: move |_| editor.write().touch(SiteField::BreakMinutes),
+                        }
+                        if has_error(SiteField::BreakMinutes) {
+                            FieldError { field: SiteField::BreakMinutes }
+                        }
+                    }
+                    label { class: "st-field",
+                        span { {fl!(LANGUAGE_LOADER, "sites-form-break-after")} }
+                        input {
+                            class: "st-input",
+                            r#type: "text",
+                            inputmode: "numeric",
+                            value: "{raw.break_after_minutes}",
+                            aria_invalid: has_error(SiteField::BreakAfter),
+                            oninput: move |e| {
+                                if let Some(form) = editor.write().form_mut() {
+                                    form.break_after_minutes = e.value();
+                                }
+                            },
+                            onblur: move |_| editor.write().touch(SiteField::BreakAfter),
+                        }
+                        if has_error(SiteField::BreakAfter) {
+                            FieldError { field: SiteField::BreakAfter }
+                        }
+                    }
+                }
+                div { class: "st-inline",
+                    button {
+                        class: "st-btn",
+                        r#type: "submit",
+                        disabled: saving,
+                        {fl!(LANGUAGE_LOADER, "sites-form-save")}
+                    }
+                    button {
+                        class: "st-btn st-btn-ghost",
+                        r#type: "button",
+                        onclick: move |_| editor.write().close(),
+                        {fl!(LANGUAGE_LOADER, "sites-form-cancel")}
+                    }
                 }
             }
         }
@@ -422,5 +786,157 @@ mod tests {
         let mut raw = valid();
         raw.lat = "NaN".into();
         assert_eq!(validate_site_form(&raw), Err(vec![SiteField::Lat]));
+    }
+
+    fn rows() -> Vec<SiteRow> {
+        [(1u128, "BS De Linde"), (2, "BS De Wilg")]
+            .into_iter()
+            .map(|(n, name)| SiteRow {
+                id: Uuid::from_u128(n),
+                name: name.into(),
+                address: format!("{name}straat 1"),
+                lat: 50.85,
+                lng: 4.35,
+                radius_m: 120,
+                break_minutes: 20,
+                break_after_minutes: 300,
+                active: true,
+            })
+            .collect()
+    }
+
+    fn edit(n: u128) -> Target {
+        Target::Edit(Uuid::from_u128(n))
+    }
+
+    #[test]
+    fn a_new_school_starts_with_defaults_and_no_errors() {
+        let raw = RawSiteForm::new_site();
+        assert_eq!(
+            (
+                raw.radius_m.as_str(),
+                raw.break_minutes.as_str(),
+                raw.break_after_minutes.as_str()
+            ),
+            ("150", "30", "360")
+        );
+        assert!(raw.name.is_empty() && raw.lat.is_empty());
+        assert_eq!(visible_errors(&raw, &[], false), vec![]);
+    }
+
+    #[test]
+    fn errors_show_after_leaving_a_field_or_after_a_save_attempt() {
+        let raw = RawSiteForm::new_site();
+        assert_eq!(
+            visible_errors(&raw, &[SiteField::Name], false),
+            vec![SiteField::Name]
+        );
+        assert_eq!(
+            visible_errors(&raw, &[], true),
+            vec![SiteField::Name, SiteField::Lat, SiteField::Lng]
+        );
+        // A touched field that is fine shows nothing.
+        assert_eq!(visible_errors(&valid(), &[SiteField::Name], false), vec![]);
+    }
+
+    #[test]
+    fn a_suggestion_fills_address_and_coordinates() {
+        let mut raw = RawSiteForm::new_site();
+        raw.apply_suggestion(&GeoSuggestion {
+            label: "Voorbeeldstraat 1, Voorbeeldstad".into(),
+            lat: 51.05437,
+            lng: 3.7174,
+        });
+        assert_eq!(raw.address, "Voorbeeldstraat 1, Voorbeeldstad");
+        assert_eq!(
+            (raw.lat.as_str(), raw.lng.as_str()),
+            ("51.054370", "3.717400")
+        );
+        raw.name = "School".into();
+        assert!(validate_site_form(&raw).is_ok());
+        raw.apply_suggestion(&GeoSuggestion {
+            label: "x".repeat(300),
+            lat: 0.0,
+            lng: 0.0,
+        });
+        assert_eq!(raw.address.chars().count(), 200);
+    }
+
+    #[test]
+    fn editor_opens_one_target_at_a_time() {
+        let sites = rows();
+        let mut editor = SiteEditor::default();
+        assert_eq!(editor.target(), None);
+        editor.request(edit(1), &sites);
+        assert_eq!(editor.target(), Some(edit(1)));
+        assert_eq!(editor.saved_name(), Some("BS De Linde"));
+        assert_eq!(editor.form().unwrap().radius_m, "120");
+        // Unchanged form: switching to a new school replaces it with an empty one.
+        editor.request(Target::New, &sites);
+        assert_eq!(editor.target(), Some(Target::New));
+        assert_eq!(editor.saved_name(), None);
+        assert_eq!(editor.form(), Some(&RawSiteForm::new_site()));
+        editor.request(edit(2), &sites);
+        assert_eq!(editor.form().unwrap().name, "BS De Wilg");
+    }
+
+    #[test]
+    fn switching_with_unsaved_changes_asks_first() {
+        let sites = rows();
+        let mut editor = SiteEditor::default();
+        editor.request(edit(1), &sites);
+        editor.form_mut().unwrap().name = "Aangepast".into();
+        assert!(editor.is_dirty());
+        editor.request(Target::New, &sites);
+        assert_eq!(editor.target(), Some(edit(1)), "still the same form");
+        assert_eq!(editor.pending(), Some(Target::New));
+        assert_eq!(editor.form().unwrap().name, "Aangepast");
+        editor.keep_editing();
+        assert_eq!(editor.pending(), None);
+        editor.request(Target::New, &sites);
+        editor.confirm_switch(&sites);
+        assert_eq!(editor.target(), Some(Target::New));
+        assert_eq!(editor.form(), Some(&RawSiteForm::new_site()));
+        assert!(!editor.is_dirty());
+        // Asking for the open target again changes nothing, not even the typed text.
+        editor.form_mut().unwrap().name = "Nieuw".into();
+        editor.request(Target::New, &sites);
+        assert_eq!(editor.form().unwrap().name, "Nieuw");
+        assert_eq!(editor.pending(), None);
+    }
+
+    #[test]
+    fn unknown_school_does_not_open_and_close_resets() {
+        let sites = rows();
+        let mut editor = SiteEditor::default();
+        editor.request(edit(9), &sites);
+        assert_eq!(editor.target(), None);
+        editor.request(Target::New, &sites);
+        editor.close();
+        assert_eq!(editor, SiteEditor::default());
+    }
+
+    #[test]
+    fn saving_validates_and_reveals_errors_then_closes() {
+        let sites = rows();
+        let mut editor = SiteEditor::default();
+        editor.request(Target::New, &sites);
+        assert_eq!(editor.visible_errors(), vec![]);
+        editor.touch(SiteField::Name);
+        assert_eq!(editor.visible_errors(), vec![SiteField::Name]);
+        assert_eq!(editor.submit(), None);
+        assert_eq!(
+            editor.visible_errors(),
+            vec![SiteField::Name, SiteField::Lat, SiteField::Lng]
+        );
+        let form = editor.form_mut().unwrap();
+        form.name = "Nieuwe school".into();
+        form.apply_position(51.0, 4.0);
+        let saved = editor.submit().expect("valid");
+        assert_eq!(saved.id, None);
+        assert_eq!(saved.name, "Nieuwe school");
+        editor.close();
+        assert_eq!(editor.target(), None);
+        assert_eq!(editor.visible_errors(), vec![]);
     }
 }

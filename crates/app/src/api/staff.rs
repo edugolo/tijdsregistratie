@@ -182,11 +182,19 @@ pub async fn set_person_sites(person_id: Uuid, site_ids: Vec<Uuid>) -> Result<()
 }
 
 #[post("/api/staff/members/add")]
-pub async fn add_member(site_id: Uuid, name: String) -> Result<TeamMemberDto, ServerFnError> {
+pub async fn add_member(
+    name: String,
+    role: RoleDto,
+    site_id: Option<Uuid>,
+) -> Result<TeamMemberDto, ServerFnError> {
     use crate::server::{app_state, auth, staff};
-    let scope = auth::require_manager_of(site_id).await?;
+    // Role and school scope are checked by the logic; this only needs a staff session.
+    let scope = auth::require_staff().await?;
     let state = app_state().await?;
-    Ok(staff::add_member(&staff::StaffEnv::new(&state), &scope, site_id, &name).await?)
+    Ok(
+        staff::add_person_with_role(&staff::StaffEnv::new(&state), &scope, &name, role, site_id)
+            .await?,
+    )
 }
 
 #[post("/api/staff/people/active")]

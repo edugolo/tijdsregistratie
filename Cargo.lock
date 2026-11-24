@@ -173,6 +173,7 @@ dependencies = [
  "i18n-embed-fl",
  "js-sys",
  "qrcode",
+ "reqwest",
  "rust-embed",
  "serde",
  "serde_json",

@@ -244,6 +244,56 @@ test('7. revoking the devices ends the session and the old passkey stops working
   await shot(page, '13-employee-login-refused');
 });
 
+test('7b. admin adds and edits a school in Instellingen', async () => {
+  const { page } = admin;
+  await page.goto('/beheer/instellingen');
+  await page.getByRole('button', { name: 'Scholen', exact: true }).click();
+  await page.getByRole('button', { name: 'School toevoegen' }).click();
+  await expect(page.getByRole('heading', { name: 'Nieuwe school' })).toBeVisible();
+
+  // An untouched new form has defaults and shows no errors.
+  await expect(page.getByLabel('Straal (meter)')).toHaveValue('150');
+  await expect(page.getByLabel('Pauze (minuten)')).toHaveValue('30');
+  await expect(page.getByLabel('Pauze na (minuten werk)')).toHaveValue('360');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+
+  // Trying to save shows what is missing.
+  await page.getByRole('button', { name: 'Opslaan' }).click();
+  await expect(page.getByText('Vul een naam in.')).toBeVisible();
+
+  await page.getByLabel('Naam').fill('Tweede School');
+  await page.getByLabel('Adres').fill('Voorbeeldlaan 2');
+  await page.getByLabel('Breedtegraad').fill('50,86');
+  await page.getByLabel('Lengtegraad').fill('4.36');
+  await page.getByRole('button', { name: 'Opslaan' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Opgeslagen' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Nieuwe school' })).toHaveCount(0);
+  await expect(row(page, 'Tweede School')).toBeVisible();
+  await shot(page, '14-admin-sites-desktop');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await shot(page, '15-admin-sites-390');
+  await page.setViewportSize({ width: 1280, height: 720 });
+
+  // Edit opens that school; switching to a new one replaces the form.
+  await page.getByRole('button', { name: 'Bewerken: Tweede School' }).click();
+  await expect(page.getByRole('heading', { name: 'School bewerken: Tweede School' })).toBeVisible();
+  await expect(page.getByLabel('Adres')).toHaveValue('Voorbeeldlaan 2');
+  await page.getByRole('button', { name: 'School toevoegen' }).click();
+  await expect(page.getByRole('heading', { name: 'Nieuwe school' })).toBeVisible();
+  await expect(page.getByLabel('Naam')).toHaveValue('');
+
+  // Unsaved changes are only discarded after confirmation.
+  await page.getByRole('button', { name: 'Bewerken: Tweede School' }).click();
+  await page.getByLabel('Naam').fill('Tweede School bis');
+  await page.getByRole('button', { name: 'School toevoegen' }).click();
+  await expect(page.getByRole('button', { name: 'Wijzigingen weggooien' })).toBeVisible();
+  await page.getByRole('button', { name: 'Verder bewerken' }).click();
+  await expect(page.getByLabel('Naam')).toHaveValue('Tweede School bis');
+  await page.getByRole('button', { name: 'Opslaan' }).click();
+  await expect(row(page, 'Tweede School bis')).toBeVisible();
+  await expect(page.getByRole('heading', { name: /School bewerken/ })).toHaveCount(0);
+});
+
 test('8. security headers and no CSP violations', async ({ request }) => {
   const res = await request.get(origin() + '/');
   const h = res.headers();

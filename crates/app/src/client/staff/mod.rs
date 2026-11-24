@@ -10,7 +10,7 @@ mod map;
 pub mod people;
 pub mod settings;
 pub mod sites;
-mod timing;
+pub(crate) mod timing;
 pub mod today;
 
 pub use layout::StaffLayout;

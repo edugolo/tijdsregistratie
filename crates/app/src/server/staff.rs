@@ -435,28 +435,39 @@ pub async fn today_overview(
     Ok(overview)
 }
 
-pub async fn add_member(
+/// Creates a person with a first role in one transaction (person, role assignment and audit
+/// rows). Managers may only add employees at their own sites; admins may also add managers
+/// (a school is required) and admins (no school).
+pub async fn add_person_with_role(
     env: &StaffEnv<'_>,
     scope: &StaffScope,
-    site_id: Uuid,
     name: &str,
+    new_role: RoleDto,
+    site_id: Option<Uuid>,
 ) -> Result<TeamMemberDto> {
-    check_site(scope, site_id)?;
+    let (role, site_id) = match (new_role, site_id) {
+        (RoleDto::Employee, Some(site)) => (Role::Employee, Some(site)),
+        (RoleDto::Manager, Some(site)) => (Role::Manager, Some(site)),
+        (RoleDto::Admin, None) => (Role::Admin, None),
+        (RoleDto::Admin, Some(_)) => return Err(StaffError::Invalid("site")),
+        (RoleDto::Employee | RoleDto::Manager, None) => return Err(StaffError::Invalid("site")),
+    };
+    if role != Role::Employee {
+        require_admin(scope)?;
+    }
+    if let Some(site_id) = site_id {
+        check_site(scope, site_id)?;
+    }
     let name = validate_name(name)?;
-    site::get_site(env.pool, env.keys, site_id)
-        .await?
-        .ok_or(StaffError::NotFound)?;
+    if let Some(site_id) = site_id {
+        site::get_site(env.pool, env.keys, site_id)
+            .await?
+            .ok_or(StaffError::NotFound)?;
+    }
     let mut tx = begin(env).await?;
     let p =
         person::create_person(&mut *tx, env.keys, env.blind, &name, Some(scope.person_id)).await?;
-    role::assign(
-        &mut *tx,
-        p.id,
-        Role::Employee,
-        Some(site_id),
-        Some(scope.person_id),
-    )
-    .await?;
+    role::assign(&mut *tx, p.id, role, site_id, Some(scope.person_id)).await?;
     audit(
         &mut *tx,
         scope,
@@ -466,6 +477,9 @@ pub async fn add_member(
         &["display_name", "role"],
     )
     .await?;
+    if role != Role::Employee {
+        audit(&mut *tx, scope, "role.changed", "person", p.id, &["role"]).await?;
+    }
     commit(tx).await?;
     Ok(member_dto(&p, false, TodayStatusDto::NotStarted))
 }
@@ -1204,6 +1218,144 @@ mod tests {
             people(&e, &s.mgr_a, Some(s.site_b)).await.unwrap_err(),
             StaffError::Forbidden
         );
+    }
+
+    /// Adds an employee, the old `add_member` call shape.
+    async fn add_member(
+        e: &StaffEnv<'_>,
+        scope: &StaffScope,
+        site: Uuid,
+        name: &str,
+    ) -> Result<TeamMemberDto> {
+        add_person_with_role(e, scope, name, RoleDto::Employee, Some(site)).await
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn admin_adds_a_manager_or_an_admin_in_one_transaction(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let m = add_person_with_role(
+            &e,
+            &s.admin,
+            "Mara Manager",
+            RoleDto::Manager,
+            Some(s.site_b),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            role::roles_of(&pool, m.id).await.unwrap(),
+            vec![role::RoleAssignment {
+                role: Role::Manager,
+                site_id: Some(s.site_b)
+            }]
+        );
+        let a = add_person_with_role(&e, &s.admin, "Adam Admin", RoleDto::Admin, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            role::roles_of(&pool, a.id).await.unwrap(),
+            vec![role::RoleAssignment {
+                role: Role::Admin,
+                site_id: None
+            }]
+        );
+        // Rows of one transaction share their timestamp, so compare without order.
+        let mut actions = audit_actions(&pool).await;
+        actions.sort();
+        assert_eq!(
+            actions,
+            vec![
+                "person.created",
+                "person.created",
+                "role.changed",
+                "role.changed"
+            ]
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn manager_may_only_add_employees_at_own_sites(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        for (role, site) in [(RoleDto::Manager, Some(s.site_a)), (RoleDto::Admin, None)] {
+            assert_eq!(
+                add_person_with_role(&e, &s.mgr_a, "Nina", role, site)
+                    .await
+                    .unwrap_err(),
+                StaffError::Forbidden
+            );
+        }
+        assert_eq!(
+            add_person_with_role(&e, &s.mgr_a, "Nina", RoleDto::Employee, Some(s.site_b))
+                .await
+                .unwrap_err(),
+            StaffError::Forbidden
+        );
+        assert!(audit_actions(&pool).await.is_empty());
+        let people: i64 = sqlx::query_scalar("SELECT count(*) FROM person WHERE created_by = $1")
+            .bind(s.mgr_a_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(people, 0, "nothing was created");
+        assert!(
+            add_person_with_role(&e, &s.mgr_a, "Nina", RoleDto::Employee, Some(s.site_a))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn school_rules_per_role(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        for role in [RoleDto::Employee, RoleDto::Manager] {
+            assert!(matches!(
+                add_person_with_role(&e, &s.admin, "Nina", role, None).await,
+                Err(StaffError::Invalid("site"))
+            ));
+        }
+        assert!(matches!(
+            add_person_with_role(&e, &s.admin, "Nina", RoleDto::Admin, Some(s.site_a)).await,
+            Err(StaffError::Invalid("site"))
+        ));
+        assert!(audit_actions(&pool).await.is_empty());
+        assert!(
+            add_person_with_role(&e, &s.admin, "Nina", RoleDto::Admin, None)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_failing_role_assignment_rolls_the_person_back(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM person")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        // Every new role assignment now fails, after the person row was inserted.
+        sqlx::query("ALTER TABLE role_assignment ADD CONSTRAINT no_roles CHECK (false) NOT VALID")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            add_person_with_role(&e, &s.admin, "Nina", RoleDto::Admin, None)
+                .await
+                .is_err()
+        );
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM person")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+        assert!(audit_actions(&pool).await.is_empty());
     }
 
     #[sqlx::test(migrations = "../../migrations")]

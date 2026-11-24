@@ -193,6 +193,31 @@ clients behind the proxy share one bucket and can lock each other out (for examp
 If no client address is available at all, per-client limiting is off, only a global cap of 600
 requests per minute applies and a warning is logged.
 
+## Address search (geocoder)
+
+The school editor (Instellingen > Scholen) and the setup wizard (step 3) can look up an address
+and fill in its coordinates. The **server** sends the search text to a Nominatim-compatible
+`/search` endpoint (OpenStreetMap open data); browsers never contact it, so the Content Security
+Policy stays `connect-src 'self'`. Only admins can search, and during first-run setup only a
+session that already entered a valid setup code. A school address is not personal data, but it
+does leave your server, so tell your data protection officer if you keep this on.
+
+- `GEOCODER_URL` is the geocoder's `/search` URL. Unset: the public instance
+  `https://nominatim.openstreetmap.org/search`. Empty or `off`: the search is switched off and the
+  forms only show the manual fields and "Gebruik mijn huidige locatie".
+- The app follows the public instance's usage policy: one request per second for the whole
+  server (further searches wait briefly, then are refused), identical searches are cached in
+  memory for 24 hours, requests time out after 5 seconds and carry the User-Agent
+  `Tijdsregistratie/<version> (+https://github.com/edugolo/tijdsregistratie)`. The public instance
+  is meant for light use only. A school group that sets up a handful of schools is fine.
+- For heavier or guaranteed use, host your own Nominatim (or another service that answers the
+  Nominatim `jsonv2` format) and set `GEOCODER_URL` to it, for example
+  `http://nominatim.internal:8080/search`. Photon is not compatible as is: its answers have a
+  different format.
+- Search text is never logged. Failures show the user a generic message.
+- `/api/geocode` is rate limited to 30 requests per minute and client address, on top of the
+  global one request per second upstream.
+
 ## Key file permissions and blob format
 
 The app logs a warning at startup, and the admin CLI prints one on stderr, when `DATA_KEY_FILE` or

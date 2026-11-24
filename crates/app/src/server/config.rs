@@ -19,6 +19,8 @@ const COOKIE_NAME: &str = "tr_session";
 const HOST_COOKIE_NAME: &str = "__Host-tr_session";
 /// Schools sit behind one NAT, so many employees share a client address.
 const DEFAULT_AUTH_RATE_LIMIT_PER_MINUTE: u32 = 60;
+/// Public OpenStreetMap geocoder, used when `GEOCODER_URL` is not set. Its usage policy applies.
+pub const DEFAULT_GEOCODER_URL: &str = "https://nominatim.openstreetmap.org/search";
 
 #[derive(Clone)]
 pub struct AppConfig {
@@ -38,6 +40,9 @@ pub struct AppConfig {
     /// Requests per minute and client address on `/api/auth/*`. Failed sign-ins are limited
     /// separately and more strictly.
     pub auth_rate_limit_per_minute: u32,
+    /// Nominatim-compatible `/search` endpoint for the address search; `None` switches the
+    /// feature off (`GEOCODER_URL` empty or `off`).
+    pub geocoder_url: Option<String>,
 }
 
 /// The database URL carries credentials and is left out.
@@ -56,8 +61,29 @@ impl std::fmt::Debug for AppConfig {
                 "auth_rate_limit_per_minute",
                 &self.auth_rate_limit_per_minute,
             )
+            .field("geocoder_url", &self.geocoder_url)
             .finish()
     }
+}
+
+/// `GEOCODER_URL`: unset means the public instance, empty or `off` disables the search,
+/// anything else must be an http(s) URL.
+fn parse_geocoder_url(value: Option<&str>) -> Result<Option<String>, ConfigError> {
+    let Some(value) = value.map(str::trim) else {
+        return Ok(Some(DEFAULT_GEOCODER_URL.to_string()));
+    };
+    if value.is_empty() || value.eq_ignore_ascii_case("off") {
+        return Ok(None);
+    }
+    let url = webauthn_rs::prelude::Url::parse(value)
+        .map_err(|_| ConfigError::Invalid("GEOCODER_URL", "not a valid URL"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(ConfigError::Invalid(
+            "GEOCODER_URL",
+            "must be an http or https URL",
+        ));
+    }
+    Ok(Some(url.to_string()))
 }
 
 fn parse_bool(name: &'static str, value: Option<&str>, default: bool) -> Result<bool, ConfigError> {
@@ -140,6 +166,7 @@ impl AppConfig {
                     "expected a positive number",
                 ))?,
         };
+        let geocoder_url = parse_geocoder_url(env.get("GEOCODER_URL").map(String::as_str))?;
         let ip = get("IP").unwrap_or("127.0.0.1");
         let port = get("PORT").unwrap_or("8080");
         let bind_addr = format!("{ip}:{port}")
@@ -157,6 +184,7 @@ impl AppConfig {
             bind_addr,
             trust_proxy_headers,
             auth_rate_limit_per_minute,
+            geocoder_url,
         })
     }
 }
@@ -184,6 +212,32 @@ mod tests {
         assert_eq!(c.rp_id, "tijd.example.org");
         assert!(c.cookie_secure);
         assert_eq!(c.bind_addr.to_string(), "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn geocoder_url_defaults_and_switches_off() {
+        let with = |value: Option<&str>| {
+            let mut m = base();
+            if let Some(v) = value {
+                m.insert("GEOCODER_URL".into(), v.into());
+            }
+            AppConfig::from_map(&m).map(|c| c.geocoder_url)
+        };
+        assert_eq!(
+            with(None),
+            Ok(Some(
+                "https://nominatim.openstreetmap.org/search".to_string()
+            ))
+        );
+        assert_eq!(with(Some("")), Ok(None));
+        assert_eq!(with(Some("off")), Ok(None));
+        assert_eq!(with(Some("OFF")), Ok(None));
+        assert_eq!(
+            with(Some("http://127.0.0.1:2322/search")),
+            Ok(Some("http://127.0.0.1:2322/search".to_string()))
+        );
+        assert!(with(Some("ftp://example.org/search")).is_err());
+        assert!(with(Some("not a url")).is_err());
     }
 
     #[test]

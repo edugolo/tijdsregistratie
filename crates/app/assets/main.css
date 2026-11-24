@@ -98,3 +98,14 @@ html, body { margin: 0; background: var(--md-surface); color: var(--md-on-surfac
 .phone-screen { width: 100%; height: 100%; border-radius: 26px; overflow: auto; background: var(--md-surface); }
 .phone-screen .app { min-height: 100%; }
 .preview-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* Address search suggestions (school editor and setup wizard). */
+.geo-wrap { position: relative; display: flex; flex-direction: column; gap: 4px; }
+.geo-list {
+  list-style: none; margin: 0; padding: 4px; max-height: 280px; overflow-y: auto;
+  background: var(--md-surface-container-lowest, #fff); color: var(--md-on-surface, #1b1b21);
+  border: 1px solid var(--md-outline-variant, #c6c6d0); border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+.geo-option { padding: 10px 12px; border-radius: 8px; cursor: pointer; font-size: 14px; line-height: 1.3; }
+.geo-option:hover, .geo-active { background: var(--md-secondary-container, #dde1f0); color: var(--md-on-secondary-container, #171b2c); }

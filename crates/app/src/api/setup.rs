@@ -131,7 +131,8 @@ pub async fn branding() -> Result<Branding> {
 #[post("/api/setup/check-code")]
 pub async fn check_setup_code(code: String) -> Result<bool> {
     let state = crate::server::app_state().await?;
-    crate::server::setup::check_code(&state.pool, &code)
+    let session = crate::server::session().await?;
+    crate::server::setup::check_code_in_session(&state.pool, &session, &code)
         .await
         .map_err(|e| ServerFnError::from(e).into())
 }

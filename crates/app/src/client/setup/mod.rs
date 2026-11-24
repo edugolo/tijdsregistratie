@@ -5,16 +5,18 @@
 //! expires. Setup mode ends on the server as soon as the passkey exists.
 
 mod color;
-mod form;
+pub(crate) mod form;
 mod org;
-mod platform;
+pub(crate) mod platform;
 
 use dioxus::prelude::*;
 
 use crate::api::auth::{begin_registration, finish_registration};
+use crate::api::geocode::GeoSuggestion;
 use crate::api::setup::{
-    OrgSettingsInput, SetupInput, check_name, check_setup_code, complete_setup,
+    MAX_ADDRESS_CHARS, OrgSettingsInput, SetupInput, check_name, check_setup_code, complete_setup,
 };
+use crate::client::address_search::{AddressSearch, Look};
 use crate::client::components::{Icon, PrimaryButton, SecondaryButton};
 use crate::client::i18n::LANGUAGE_LOADER;
 use color::{ColorPicker, ThemePreview};
@@ -93,6 +95,8 @@ struct Wizard {
     break_after: Signal<String>,
     locating: Signal<bool>,
     locate_note: Signal<Option<String>>,
+    /// Whether the coordinate fields are expanded: open while empty, collapsed after a fill.
+    coords_open: Signal<bool>,
     admin_name: Signal<String>,
     also_manager: Signal<bool>,
 }
@@ -128,6 +132,7 @@ impl Wizard {
             }),
             locating: use_signal(|| false),
             locate_note: use_signal(|| None),
+            coords_open: use_signal(|| true),
             admin_name: use_signal(String::new),
             also_manager: use_signal(|| true),
         }
@@ -185,7 +190,13 @@ impl Wizard {
             },
             Step::School => match self.site_fields().parse() {
                 Ok(_) => self.goto(Step::About),
-                Err(code) => self.fail(field_error(code)),
+                Err(code) => {
+                    if matches!(code, "lat" | "lng") {
+                        let mut open = self.coords_open;
+                        open.set(true);
+                    }
+                    self.fail(field_error(code))
+                }
             },
             Step::About => self.submit_setup(),
             Step::Key | Step::Done => {}
@@ -238,9 +249,22 @@ impl Wizard {
         });
     }
 
+    /// Fills address and coordinates from a chosen search result.
+    fn pick(self, suggestion: &GeoSuggestion) {
+        let (mut address, mut lat, mut lng, mut note) =
+            (self.address, self.lat, self.lng, self.locate_note);
+        let mut coords_open = self.coords_open;
+        coords_open.set(false);
+        address.set(suggestion.label.chars().take(MAX_ADDRESS_CHARS).collect());
+        lat.set(format_coordinate(suggestion.lat));
+        lng.set(format_coordinate(suggestion.lng));
+        note.set(Some(fl!(LANGUAGE_LOADER, "address-picked")));
+    }
+
     fn locate(self) {
         let (mut locating, mut note) = (self.locating, self.locate_note);
         let (mut lat, mut lng) = (self.lat, self.lng);
+        let mut coords_open = self.coords_open;
         locating.set(true);
         note.set(None);
         spawn(async move {
@@ -248,6 +272,7 @@ impl Wizard {
                 Ok((la, lo)) => {
                     lat.set(format_coordinate(la));
                     lng.set(format_coordinate(lo));
+                    coords_open.set(false);
                     note.set(Some(fl!(LANGUAGE_LOADER, "setup-s3-located")));
                 }
                 Err(LocateFailure::Denied) => {
@@ -417,11 +442,17 @@ fn SchoolStep(w: Wizard) -> Element {
     };
     rsx! {
         TextField { label: fl!(LANGUAGE_LOADER, "setup-s3-name"), value: w.site_name }
-        TextField {
+        AddressSearch {
+            look: Look::Wizard,
             label: fl!(LANGUAGE_LOADER, "setup-s3-address"),
-            value: w.address,
-            hint: fl!(LANGUAGE_LOADER, "setup-s3-address-hint"),
+            value: (w.address)(),
+            hint_off: fl!(LANGUAGE_LOADER, "setup-s3-address-hint"),
             autocomplete: "street-address",
+            on_input: move |text: String| {
+                let mut address = w.address;
+                address.set(text);
+            },
+            on_pick: move |suggestion: GeoSuggestion| w.pick(&suggestion),
         }
         div { class: "su-locate",
             button {
@@ -437,9 +468,12 @@ fn SchoolStep(w: Wizard) -> Element {
                 p { class: "su-hint", role: "status", "{note}" }
             }
         }
-        div { class: "su-grid",
-            TextField { label: fl!(LANGUAGE_LOADER, "setup-s3-lat"), value: w.lat, inputmode: "decimal" }
-            TextField { label: fl!(LANGUAGE_LOADER, "setup-s3-lng"), value: w.lng, inputmode: "decimal" }
+        details { class: "su-coords", open: (w.coords_open)(),
+            summary { {fl!(LANGUAGE_LOADER, "setup-s3-coords-adjust")} }
+            div { class: "su-grid",
+                TextField { label: fl!(LANGUAGE_LOADER, "setup-s3-lat"), value: w.lat, inputmode: "decimal" }
+                TextField { label: fl!(LANGUAGE_LOADER, "setup-s3-lng"), value: w.lng, inputmode: "decimal" }
+            }
         }
         TextField {
             label: fl!(LANGUAGE_LOADER, "setup-s3-radius"),

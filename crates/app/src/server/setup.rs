@@ -169,6 +169,25 @@ pub async fn check_code(pool: &PgPool, code: &str) -> Result<bool> {
     Ok(ok)
 }
 
+/// [`check_code`] that also remembers a valid code in the caller's session, so the wizard may
+/// use the admin-only address search.
+pub async fn check_code_in_session(
+    pool: &PgPool,
+    session: &tower_sessions::Session,
+    code: &str,
+) -> Result<bool> {
+    let ok = check_code(pool, code).await?;
+    if ok {
+        crate::server::session::mark_setup_code_ok(session)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "cannot store the setup flag in the session");
+                SetupFnError::Internal
+            })?;
+    }
+    Ok(ok)
+}
+
 /// Creates everything in one transaction and returns the raw enrollment token for the admin.
 pub async fn complete(
     pool: &PgPool,

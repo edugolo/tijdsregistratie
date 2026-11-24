@@ -5,7 +5,7 @@ use dioxus::prelude::*;
 use super::flow::{ErrorNotice, report_error};
 use super::load::{Skeleton, use_loaded};
 use super::map::{site_form_to_dto, site_from_dto};
-use super::sites::SitesPage;
+use super::sites::{SaveRequest, SitesPage};
 use crate::api::staff::{StaffContext, list_sites, save_site, set_site_active};
 use crate::client::components::AppearancePicker;
 use crate::client::i18n::LANGUAGE_LOADER;
@@ -87,11 +87,19 @@ fn SitesSection() -> Element {
         ErrorNotice { message }
         SitesPage {
             sites: list.into_iter().map(site_from_dto).collect(),
-            on_save: move |form| {
+            on_save: move |request: SaveRequest| {
+                let mut message = message;
+                message.set(None);
                 spawn(async move {
-                    match save_site(site_form_to_dto(form)).await {
-                        Ok(_) => sites.reload(),
-                        Err(e) => report_error(&e, message),
+                    match save_site(site_form_to_dto(request.form)).await {
+                        Ok(_) => {
+                            sites.reload();
+                            request.done.call(true);
+                        }
+                        Err(e) => {
+                            report_error(&e, message);
+                            request.done.call(false);
+                        }
                     }
                 });
             },

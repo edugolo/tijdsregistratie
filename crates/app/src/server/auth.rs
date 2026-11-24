@@ -72,11 +72,48 @@ pub async fn require_staff() -> Result<StaffScope, ServerFnError> {
 }
 
 pub async fn require_admin() -> Result<StaffScope, ServerFnError> {
-    let scope = require_staff().await?;
+    let state = app_state().await?;
+    admin_scope(&state.pool, &session().await?).await
+}
+
+/// The admin behind `session`; everyone else is refused.
+pub async fn admin_scope(
+    pool: &PgPool,
+    session: &tower_sessions::Session,
+) -> Result<StaffScope, ServerFnError> {
+    let user = session::current(pool, session)
+        .await
+        .map_err(internal)?
+        .ok_or_else(unauthorized)?;
+    admin_scope_of(pool, &user).await
+}
+
+async fn admin_scope_of(pool: &PgPool, user: &SessionUser) -> Result<StaffScope, ServerFnError> {
+    let scope = staff_scope_of(pool, user).await?;
     if scope.is_admin {
         Ok(scope)
     } else {
         Err(forbidden())
+    }
+}
+
+/// An admin, or, while the installation is still in setup mode, an anonymous session that
+/// already entered a valid setup code. Anyone else is refused.
+pub async fn require_admin_or_setup(
+    pool: &PgPool,
+    session: &tower_sessions::Session,
+) -> Result<(), ServerFnError> {
+    if let Some(user) = session::current(pool, session).await.map_err(internal)? {
+        return admin_scope_of(pool, &user).await.map(drop);
+    }
+    if session::setup_code_ok(session).await
+        && store::repo::setup::setup_required(pool)
+            .await
+            .map_err(internal)?
+    {
+        Ok(())
+    } else {
+        Err(unauthorized())
     }
 }
 
@@ -123,8 +160,15 @@ pub mod http {
     const SETUP_PREFIX: &str = "/api/setup/";
     const SETUP_PER_MINUTE: u32 = 10;
     /// Public reads every page load makes: generous, a school shares one address.
-    const PUBLIC_READS: [&str; 2] = ["/api/setup/required", "/api/branding"];
+    const PUBLIC_READS: [&str; 3] = [
+        "/api/setup/required",
+        "/api/branding",
+        "/api/geocode/enabled",
+    ];
     const PUBLIC_PER_MINUTE: u32 = 120;
+    /// Address search: every call may cost an upstream request, which is also limited globally.
+    const GEOCODE_PATH: &str = "/api/geocode";
+    const GEOCODE_PER_MINUTE: u32 = 30;
     /// Ceremony endpoints whose failures (400/401) are counted per client.
     const FINISH_PATHS: [&str; 2] = ["/api/auth/login/finish", "/api/auth/register/finish"];
     const FAILURES_PER_WINDOW: u32 = 10;
@@ -257,12 +301,15 @@ pub mod http {
         Auth,
         Setup,
         Public,
+        Geocode,
     }
 
     impl Class {
         fn of(path: &str) -> Option<Self> {
             if PUBLIC_READS.contains(&path) {
                 Some(Self::Public)
+            } else if path == GEOCODE_PATH {
+                Some(Self::Geocode)
             } else if path.starts_with(SETUP_PREFIX) {
                 Some(Self::Setup)
             } else if path.starts_with(AUTH_PREFIX) && path != AUTH_EXEMPT {
@@ -277,6 +324,7 @@ pub mod http {
                 Self::Auth => "auth",
                 Self::Setup => "setup",
                 Self::Public => "public",
+                Self::Geocode => "geocode",
             }
         }
     }
@@ -290,6 +338,7 @@ pub mod http {
         auth: Arc<RateLimiter>,
         setup: Arc<RateLimiter>,
         public: Arc<RateLimiter>,
+        geocode: Arc<RateLimiter>,
         failures: Arc<RateLimiter>,
         clock: Arc<RateLimiter>,
         global: Arc<RateLimiter>,
@@ -305,6 +354,7 @@ pub mod http {
                 auth: Arc::new(RateLimiter::new(config.auth_rate_limit_per_minute)),
                 setup: Arc::new(RateLimiter::new(SETUP_PER_MINUTE)),
                 public: Arc::new(RateLimiter::new(PUBLIC_PER_MINUTE)),
+                geocode: Arc::new(RateLimiter::new(GEOCODE_PER_MINUTE)),
                 failures: Arc::new(RateLimiter::with_window(
                     FAILURES_PER_WINDOW,
                     FAILURE_WINDOW,
@@ -354,6 +404,7 @@ pub mod http {
                 Class::Auth => &self.auth,
                 Class::Setup => &self.setup,
                 Class::Public => &self.public,
+                Class::Geocode => &self.geocode,
             }
         }
 

@@ -21,6 +21,8 @@ use super::config::AppConfig;
 use store::repo::{RepoError, person};
 
 const USER_KEY: &str = "user";
+/// Set once this session entered a valid setup code; lets the wizard use admin-only helpers.
+const SETUP_CODE_KEY: &str = "setup_code_ok";
 const ANONYMOUS_MINUTES: i64 = 10;
 const EMPLOYEE_INACTIVITY_DAYS: i64 = 30;
 const STAFF_MAX_HOURS: i64 = 12;
@@ -168,6 +170,22 @@ pub async fn set_user(
     session.cycle_id().await?;
     session.set_expiry(Some(expiry_for(Some(&user))));
     session.insert(USER_KEY, user).await
+}
+
+/// Remembers that this (anonymous) session entered a valid setup code. It lives and dies with
+/// the short anonymous session, and only counts while setup mode lasts.
+pub async fn mark_setup_code_ok(session: &Session) -> Result<(), tower_sessions::session::Error> {
+    session.insert(SETUP_CODE_KEY, true).await
+}
+
+/// Whether this session entered a valid setup code earlier.
+pub async fn setup_code_ok(session: &Session) -> bool {
+    session
+        .get::<bool>(SETUP_CODE_KEY)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
 }
 
 pub async fn clear(session: &Session) -> Result<(), tower_sessions::session::Error> {

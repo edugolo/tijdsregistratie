@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod clock;
 pub mod config;
+pub mod geocode;
 pub mod passkey;
 pub mod session;
 pub mod setup;
