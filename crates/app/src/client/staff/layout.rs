@@ -49,14 +49,11 @@ impl StaffNav {
     }
 }
 
-/// Destinations for a role: "Instellingen" for admins (everything) and HR (only "Weergave").
-/// Managers see their own sites in the other two.
-pub fn nav_items(is_admin: bool, is_hr: bool) -> Vec<StaffNav> {
-    let mut items = vec![StaffNav::Today, StaffNav::People];
-    if is_admin || is_hr {
-        items.push(StaffNav::Settings);
-    }
-    items
+/// Destinations for all staff. "Instellingen" holds everything for admins, "Weergave" and
+/// "Mijn toestellen" for HR and only "Mijn toestellen" for managers. Managers see their own
+/// sites in the other two.
+pub fn nav_items() -> Vec<StaffNav> {
+    vec![StaffNav::Today, StaffNav::People, StaffNav::Settings]
 }
 
 #[component]
@@ -64,10 +61,7 @@ pub fn StaffLayout() -> Element {
     let context = use_loaded(staff_context);
     let ctx = context.get();
     let active = StaffNav::of(&use_route::<Route>());
-    let items = nav_items(
-        ctx.as_ref().is_some_and(|c| c.is_admin),
-        ctx.as_ref().is_some_and(|c| c.is_hr),
-    );
+    let items = nav_items();
     let org_name = use_org_name();
     let initial = org_name
         .chars()
@@ -145,23 +139,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manager_sees_today_and_people() {
+    fn all_staff_see_today_people_and_settings() {
         assert_eq!(
-            nav_items(false, false),
-            vec![StaffNav::Today, StaffNav::People]
-        );
-    }
-
-    #[test]
-    fn admin_also_sees_settings() {
-        assert_eq!(
-            nav_items(true, false),
+            nav_items(),
             vec![StaffNav::Today, StaffNav::People, StaffNav::Settings]
         );
-    }
-
-    #[test]
-    fn hr_sees_settings_too_but_only_appearance_is_inside() {
-        assert_eq!(nav_items(false, true), nav_items(true, false));
     }
 }

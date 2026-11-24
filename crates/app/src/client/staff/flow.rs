@@ -7,7 +7,7 @@ use super::enroll::{EnrollPanel, EnrollState};
 use super::icons::{Icon, IconKind};
 use super::map::{enroll_state_from_dto, is_auth_error, seconds_left};
 use super::timing::{now_ms, sleep_ms};
-use crate::api::staff::{EnrollmentDto, enrollment_status, start_enrollment};
+use crate::api::staff::{EnrollmentDto, enrollment_status, start_enrollment, start_own_enrollment};
 use crate::client::i18n::LANGUAGE_LOADER;
 use i18n_embed_fl::fl;
 
@@ -44,6 +44,9 @@ pub fn EnrollFlow(
     person_name: String,
     on_close: EventHandler<()>,
     on_linked: EventHandler<()>,
+    /// Links one more device for the signed-in person themselves (`person_id` is their own id).
+    #[props(default)]
+    own: bool,
 ) -> Element {
     let mut enrollment = use_signal(|| None::<EnrollmentDto>);
     let mut state = use_signal(|| EnrollState::Waiting);
@@ -55,7 +58,12 @@ pub fn EnrollFlow(
     use_resource(move || async move {
         generation();
         enrollment.set(None);
-        match start_enrollment(person_id).await {
+        let started = if own {
+            start_own_enrollment().await
+        } else {
+            start_enrollment(person_id).await
+        };
+        match started {
             Ok(dto) => {
                 now.set(now_ms());
                 state.set(EnrollState::Waiting);
@@ -123,6 +131,7 @@ pub fn EnrollFlow(
             state: state(),
             on_cancel: move |_| on_close.call(()),
             on_new_code: move |_| generation += 1,
+            own,
         }
     }
 }

@@ -18,8 +18,9 @@ use uuid::Uuid;
 
 use super::AppState;
 use crate::api::staff::{
-    EnrollStateDto, EnrollmentDto, PersonRowDto, RoleDto, RoleRowDto, SiteFormDto, SiteOption,
-    SiteRowDto, StaffContext, TeamMemberDto, TodayOverviewDto, TodayRowDto, TodayStatusDto,
+    DeviceDto, EnrollStateDto, EnrollmentDto, PersonRowDto, RoleDto, RoleRowDto, SiteFormDto,
+    SiteOption, SiteRowDto, StaffContext, TeamMemberDto, TodayOverviewDto, TodayRowDto,
+    TodayStatusDto,
 };
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -249,6 +250,18 @@ async fn check_person(env: &StaffEnv<'_>, scope: &StaffScope, person_id: Uuid) -
     may_manage(scope, &roles)
         .then_some(())
         .ok_or(StaffError::Forbidden)
+}
+
+/// [`check_person`], except that staff may always look at and manage their own devices.
+async fn check_person_or_self(
+    env: &StaffEnv<'_>,
+    scope: &StaffScope,
+    person_id: Uuid,
+) -> Result<()> {
+    if person_id == scope.person_id {
+        return Ok(());
+    }
+    check_person(env, scope, person_id).await
 }
 
 /// The person check again, inside the mutation's transaction and after its lock, on freshly read
@@ -597,6 +610,20 @@ pub async fn start_enrollment(
     person_id: Uuid,
 ) -> Result<EnrollmentDto> {
     check_person(env, scope, person_id).await?;
+    issue_enrollment(env, scope, person_id).await
+}
+
+/// Enrollment code for the caller themselves, to link an additional device. Only staff have a
+/// scope, so employees and other people can never get here.
+pub async fn start_own_enrollment(env: &StaffEnv<'_>, scope: &StaffScope) -> Result<EnrollmentDto> {
+    issue_enrollment(env, scope, scope.person_id).await
+}
+
+async fn issue_enrollment(
+    env: &StaffEnv<'_>,
+    scope: &StaffScope,
+    person_id: Uuid,
+) -> Result<EnrollmentDto> {
     if !person::is_active(env.pool, person_id).await? {
         return Err(StaffError::Invalid("inactive"));
     }
@@ -628,6 +655,57 @@ pub async fn start_enrollment(
     })
 }
 
+/// The linked devices of a person in scope, or of the caller. `current` is left false; only the
+/// session knows which device is in use.
+pub async fn devices(
+    env: &StaffEnv<'_>,
+    scope: &StaffScope,
+    person_id: Uuid,
+) -> Result<Vec<DeviceDto>> {
+    check_person_or_self(env, scope, person_id).await?;
+    Ok(passkey::devices_of(env.pool, person_id)
+        .await?
+        .into_iter()
+        .map(|d| DeviceDto {
+            id: d.id,
+            label: d.label,
+            created_at: d.created_at.timestamp_millis(),
+            last_used_at: d.last_used_at.map(|t| t.timestamp_millis()),
+            current: false,
+        })
+        .collect())
+}
+
+/// Revokes one device. Same person rules as [`revoke_devices`] (staff may always revoke their
+/// own), and the last working admin keeps their last passkey. Only sessions signed in with that
+/// passkey end.
+pub async fn revoke_device(
+    env: &StaffEnv<'_>,
+    scope: &StaffScope,
+    person_id: Uuid,
+    passkey_id: Uuid,
+) -> Result<()> {
+    check_person_or_self(env, scope, person_id).await?;
+    let mut tx = begin(env).await?;
+    role::lock_admin_changes(&mut tx).await?;
+    if passkey::count_active_except(&mut *tx, person_id, passkey_id).await? == 0 {
+        keep_one_working_admin(&mut tx, person_id).await?;
+    }
+    if !passkey::revoke_one(&mut *tx, person_id, passkey_id, Some(scope.person_id)).await? {
+        return Err(StaffError::NotFound);
+    }
+    audit(
+        &mut *tx,
+        scope,
+        "passkey.revoked",
+        "passkey",
+        passkey_id,
+        &[],
+    )
+    .await?;
+    commit(tx).await
+}
+
 pub async fn enrollment_status(
     env: &StaffEnv<'_>,
     scope: &StaffScope,
@@ -635,7 +713,7 @@ pub async fn enrollment_status(
     issued_at_ms: i64,
     now: DateTime<Utc>,
 ) -> Result<EnrollStateDto> {
-    check_person(env, scope, person_id).await?;
+    check_person_or_self(env, scope, person_id).await?;
     let issued_at =
         DateTime::from_timestamp_millis(issued_at_ms).ok_or(StaffError::Invalid("issued_at"))?;
     if passkey::has_active_since(env.pool, person_id, issued_at).await? {
@@ -2878,5 +2956,173 @@ mod tests {
             );
         }
         assert_eq!(list_sites(&e, &s.admin).await.unwrap().len(), sites_before);
+    }
+
+    // --- several devices for staff ---
+
+    async fn add_passkey(pool: &PgPool, person_id: Uuid, cred: &[u8]) -> Uuid {
+        passkey::insert_labeled(pool, person_id, cred, serde_json::json!({}), Some("Test"))
+            .await
+            .unwrap()
+    }
+
+    async fn session_ok(pool: &PgPool, person_id: Uuid, passkey_id: Uuid) -> bool {
+        person::session_is_valid(pool, person_id, passkey_id, Utc::now())
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn revoking_one_device_ends_only_its_sessions(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let (a, b) = (
+            add_passkey(&pool, s.emp_a, b"a").await,
+            add_passkey(&pool, s.emp_a, b"b").await,
+        );
+        let other = add_passkey(&pool, s.emp_b, b"o").await;
+        assert!(session_ok(&pool, s.emp_a, a).await);
+        revoke_device(&e, &s.mgr_a, s.emp_a, a).await.unwrap();
+        assert!(!session_ok(&pool, s.emp_a, a).await);
+        assert!(session_ok(&pool, s.emp_a, b).await);
+        assert!(session_ok(&pool, s.emp_b, other).await);
+        let audit: Vec<(String, Option<Uuid>)> =
+            sqlx::query_as("SELECT action, entity_id FROM audit_log")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(audit, vec![("passkey.revoked".to_string(), Some(a))]);
+        // Already revoked, or not that person's passkey.
+        assert_eq!(
+            revoke_device(&e, &s.mgr_a, s.emp_a, a).await,
+            Err(StaffError::NotFound)
+        );
+        assert_eq!(
+            revoke_device(&e, &s.admin, s.emp_a, other).await,
+            Err(StaffError::NotFound)
+        );
+        // Person scope is the same as for revoking all devices.
+        assert_eq!(
+            revoke_device(&e, &s.mgr_a, s.emp_b, other).await,
+            Err(StaffError::Forbidden)
+        );
+        assert!(session_ok(&pool, s.emp_b, other).await);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn revoking_a_device_keeps_a_working_admin(pool: PgPool) {
+        let k = keys();
+        let e = env(&pool, &k);
+        let a = two_admins(&pool, &k).await;
+        let id = a.working.person_id;
+        let first: Uuid = passkey::devices_of(&pool, id).await.unwrap()[0].id;
+        // The only usable admin cannot lose the only passkey, by themselves or by another admin.
+        assert!(matches!(
+            revoke_device(&e, &a.working, id, first).await,
+            Err(StaffError::Invalid(_))
+        ));
+        assert!(matches!(
+            revoke_device(&e, &a.keyless, id, first).await,
+            Err(StaffError::Invalid(_))
+        ));
+        assert!(session_ok(&pool, id, first).await);
+        // With a second device one may go; the last one stays.
+        let second = add_passkey(&pool, id, b"second").await;
+        revoke_device(&e, &a.working, id, first).await.unwrap();
+        assert!(matches!(
+            revoke_device(&e, &a.working, id, second).await,
+            Err(StaffError::Invalid(_))
+        ));
+        assert!(session_ok(&pool, id, second).await);
+        assert!(audit_actions(&pool).await == vec!["passkey.revoked"]);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn staff_may_revoke_their_own_device_but_not_peers(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let (m1, m2) = (
+            add_passkey(&pool, s.mgr_a_id, b"m1").await,
+            add_passkey(&pool, s.mgr_a_id, b"m2").await,
+        );
+        let adm = add_passkey(&pool, s.admin.person_id, b"adm").await;
+        revoke_device(&e, &s.mgr_a, s.mgr_a_id, m1).await.unwrap();
+        assert!(session_ok(&pool, s.mgr_a_id, m2).await);
+        // A manager never touches an admin's devices.
+        assert_eq!(
+            revoke_device(&e, &s.mgr_a, s.admin.person_id, adm).await,
+            Err(StaffError::Forbidden)
+        );
+        assert!(session_ok(&pool, s.admin.person_id, adm).await);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn device_list_is_scoped(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let id = add_passkey(&pool, s.emp_a, b"a").await;
+        add_passkey(&pool, s.emp_b, b"b").await;
+        add_passkey(&pool, s.mgr_a_id, b"m").await;
+        let list = devices(&e, &s.mgr_a, s.emp_a).await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, id);
+        assert_eq!(list[0].label.as_deref(), Some("Test"));
+        assert_eq!(list[0].last_used_at, None);
+        assert_eq!(
+            devices(&e, &s.mgr_a, s.emp_b).await,
+            Err(StaffError::Forbidden)
+        );
+        assert_eq!(
+            devices(&e, &s.mgr_a, s.admin.person_id).await,
+            Err(StaffError::Forbidden)
+        );
+        assert_eq!(devices(&e, &s.mgr_a, s.mgr_a_id).await.unwrap().len(), 1);
+        assert_eq!(devices(&e, &s.admin, s.emp_b).await.unwrap().len(), 1);
+        // Revoked devices are not listed.
+        revoke_device(&e, &s.admin, s.emp_a, id).await.unwrap();
+        assert!(devices(&e, &s.admin, s.emp_a).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn staff_enroll_themselves_but_nobody_else_gets_that_path(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let dto = start_own_enrollment(&e, &s.mgr_a).await.unwrap();
+        assert!(dto.url.starts_with("https://tijd.example.org/koppel#"));
+        let raw = dto.url.rsplit('#').next().unwrap();
+        assert_eq!(
+            enrollment::peek_valid(&pool, raw).await.unwrap(),
+            Some(s.mgr_a_id)
+        );
+        assert_eq!(audit_actions(&pool).await, vec!["enrollment.issued"]);
+        // The polling status works for the caller's own person only.
+        let status = enrollment_status(&e, &s.mgr_a, s.mgr_a_id, dto.issued_at, Utc::now()).await;
+        assert_eq!(status, Ok(EnrollStateDto::Waiting));
+        // Employees have no staff scope at all, so no server function reaches this code.
+        assert!(
+            role::scope_from_roles(s.emp_a, &role::roles_of(&pool, s.emp_a).await.unwrap())
+                .is_none()
+        );
+        // Enrolling other staff or people outside the scope stays refused.
+        for target in [s.emp_b, s.admin.person_id] {
+            assert_eq!(
+                start_enrollment(&e, &s.mgr_a, target).await.unwrap_err(),
+                StaffError::Forbidden
+            );
+        }
+        assert_eq!(
+            enrollment_status(&e, &s.mgr_a, s.emp_b, dto.issued_at, Utc::now()).await,
+            Err(StaffError::Forbidden)
+        );
+        // A deactivated caller gets nothing.
+        person::set_active(&pool, s.mgr_a_id, false).await.unwrap();
+        assert!(matches!(
+            start_own_enrollment(&e, &s.mgr_a).await,
+            Err(StaffError::Invalid(_))
+        ));
     }
 }

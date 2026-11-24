@@ -78,6 +78,20 @@ pub struct EnrollmentDto {
     pub expires_at: i64,
 }
 
+/// One linked device (passkey) of a person. The label is a coarse, non-personal description
+/// derived from the browser at registration, absent when it could not be determined.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct DeviceDto {
+    pub id: Uuid,
+    pub label: Option<String>,
+    /// Unix milliseconds.
+    pub created_at: i64,
+    /// Unix milliseconds.
+    pub last_used_at: Option<i64>,
+    /// The device this request is signed in with (only ever set on the caller's own devices).
+    pub current: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum EnrollStateDto {
     Waiting,
@@ -221,6 +235,41 @@ pub async fn revoke_devices(person_id: Uuid) -> Result<(), ServerFnError> {
     let scope = auth::require_staff().await?;
     let state = app_state().await?;
     Ok(staff::revoke_devices(&staff::StaffEnv::new(&state), &scope, person_id).await?)
+}
+
+/// The linked devices of a person in the caller's scope, or of the caller themselves.
+#[post("/api/staff/devices")]
+pub async fn devices(person_id: Uuid) -> Result<Vec<DeviceDto>, ServerFnError> {
+    use crate::server::{app_state, auth, staff};
+    let scope = auth::require_staff().await?;
+    let user = auth::current_user().await?;
+    let state = app_state().await?;
+    let mut list = staff::devices(&staff::StaffEnv::new(&state), &scope, person_id).await?;
+    if person_id == user.person_id {
+        for d in &mut list {
+            d.current = d.id == user.passkey_id;
+        }
+    }
+    Ok(list)
+}
+
+/// Revokes one device; only sessions signed in with it end.
+#[post("/api/staff/devices/revoke-one")]
+pub async fn revoke_device(person_id: Uuid, passkey_id: Uuid) -> Result<(), ServerFnError> {
+    use crate::server::{app_state, auth, staff};
+    let scope = auth::require_staff().await?;
+    let state = app_state().await?;
+    let env = staff::StaffEnv::new(&state);
+    Ok(staff::revoke_device(&env, &scope, person_id, passkey_id).await?)
+}
+
+/// Enrollment code to link one more device for the signed-in staff member themselves.
+#[post("/api/staff/enrollment/start-own")]
+pub async fn start_own_enrollment() -> Result<EnrollmentDto, ServerFnError> {
+    use crate::server::{app_state, auth, staff};
+    let scope = auth::require_staff().await?;
+    let state = app_state().await?;
+    Ok(staff::start_own_enrollment(&staff::StaffEnv::new(&state), &scope).await?)
 }
 
 #[post("/api/staff/enrollment/start")]

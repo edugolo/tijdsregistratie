@@ -17,6 +17,15 @@ pub struct StoredPasskey {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
+/// A non-revoked passkey as shown in a device list.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct DeviceRow {
+    pub id: Uuid,
+    pub label: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
 /// Stores a new passkey. `credential_json` is the serialized public credential (no personal data).
 pub async fn insert<'e>(
     db: impl sqlx::PgExecutor<'e>,
@@ -24,12 +33,91 @@ pub async fn insert<'e>(
     credential_id: &[u8],
     credential_json: serde_json::Value,
 ) -> Result<Uuid> {
+    insert_labeled(db, person_id, credential_id, credential_json, None).await
+}
+
+/// Like [`insert`], with a non-personal device description (at most 60 characters).
+pub async fn insert_labeled<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    person_id: Uuid,
+    credential_id: &[u8],
+    credential_json: serde_json::Value,
+    label: Option<&str>,
+) -> Result<Uuid> {
     Ok(sqlx::query_scalar(
-        "INSERT INTO passkey (person_id, credential_id, credential) VALUES ($1, $2, $3) RETURNING id",
+        "INSERT INTO passkey (person_id, credential_id, credential, label) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(person_id)
     .bind(credential_id)
     .bind(credential_json)
+    .bind(label)
+    .fetch_one(db)
+    .await?)
+}
+
+/// Non-revoked passkeys of a person for the device list, oldest first.
+pub async fn devices_of(pool: &PgPool, person_id: Uuid) -> Result<Vec<DeviceRow>> {
+    Ok(sqlx::query_as(
+        "SELECT id, label, created_at, last_used_at FROM passkey \
+         WHERE person_id = $1 AND revoked_at IS NULL ORDER BY created_at, id",
+    )
+    .bind(person_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Revokes one active passkey of `person_id`. Sessions signed in with it end by themselves (a
+/// session is bound to its passkey); other devices stay signed in. Returns whether a passkey
+/// was revoked (false: unknown, someone else's or already revoked).
+pub async fn revoke_one<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    person_id: Uuid,
+    passkey_id: Uuid,
+    revoked_by: Option<Uuid>,
+) -> Result<bool> {
+    let done = sqlx::query(
+        "UPDATE passkey SET revoked_at = now(), revoked_by = $3 \
+         WHERE id = $2 AND person_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(person_id)
+    .bind(passkey_id)
+    .bind(revoked_by)
+    .execute(db)
+    .await?;
+    Ok(done.rows_affected() > 0)
+}
+
+/// Revokes every active passkey of a person except `keep` and returns their ids. Like
+/// [`revoke_one`] it ends only the sessions of those passkeys.
+pub async fn revoke_all_except<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    person_id: Uuid,
+    keep: Uuid,
+    revoked_by: Option<Uuid>,
+) -> Result<Vec<Uuid>> {
+    Ok(sqlx::query_scalar(
+        "UPDATE passkey SET revoked_at = now(), revoked_by = $3 \
+         WHERE person_id = $1 AND id <> $2 AND revoked_at IS NULL RETURNING id",
+    )
+    .bind(person_id)
+    .bind(keep)
+    .bind(revoked_by)
+    .fetch_all(db)
+    .await?)
+}
+
+/// Number of active passkeys of a person other than `except`.
+pub async fn count_active_except<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    person_id: Uuid,
+    except: Uuid,
+) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM passkey WHERE person_id = $1 AND id <> $2 AND revoked_at IS NULL",
+    )
+    .bind(person_id)
+    .bind(except)
     .fetch_one(db)
     .await?)
 }
@@ -340,5 +428,58 @@ mod tests {
         assert_eq!(revoke_all(&mut *tx, p, None).await.unwrap(), 1);
         tx.commit().await.unwrap();
         assert!(!session_valid(&pool, p, pk, before).await);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn revoke_one_ends_only_that_passkeys_sessions(pool: PgPool) {
+        let (a, b) = (person(&pool).await, person(&pool).await);
+        let a1 = insert_labeled(&pool, a, b"a1", json!({}), Some("iPhone – Safari"))
+            .await
+            .unwrap();
+        let a2 = insert(&pool, a, b"a2", json!({})).await.unwrap();
+        let b1 = insert(&pool, b, b"b1", json!({})).await.unwrap();
+        let before = Utc::now();
+        let devices = devices_of(&pool, a).await.unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].label.as_deref(), Some("iPhone – Safari"));
+        assert_eq!(devices[1].label, None);
+
+        // Someone else's passkey id never matches.
+        assert!(!revoke_one(&pool, b, a1, None).await.unwrap());
+        assert!(revoke_one(&pool, a, a1, Some(b)).await.unwrap());
+        assert!(!revoke_one(&pool, a, a1, Some(b)).await.unwrap());
+        assert!(!session_valid(&pool, a, a1, before).await);
+        assert!(session_valid(&pool, a, a2, before).await);
+        assert!(session_valid(&pool, b, b1, before).await);
+        assert_eq!(devices_of(&pool, a).await.unwrap().len(), 1);
+        assert_eq!(count_active_except(&pool, a, a2).await.unwrap(), 0);
+        assert_eq!(count_active_except(&pool, a, a1).await.unwrap(), 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn revoke_all_except_keeps_one(pool: PgPool) {
+        let (a, b) = (person(&pool).await, person(&pool).await);
+        let a1 = insert(&pool, a, b"a1", json!({})).await.unwrap();
+        let a2 = insert(&pool, a, b"a2", json!({})).await.unwrap();
+        let a3 = insert(&pool, a, b"a3", json!({})).await.unwrap();
+        insert(&pool, b, b"b1", json!({})).await.unwrap();
+        let mut gone = revoke_all_except(&pool, a, a3, None).await.unwrap();
+        gone.sort();
+        let mut expected = vec![a1, a2];
+        expected.sort();
+        assert_eq!(gone, expected);
+        assert_eq!(count_active(&pool, a).await.unwrap(), 1);
+        assert_eq!(count_active(&pool, b).await.unwrap(), 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn label_is_limited_to_sixty_characters(pool: PgPool) {
+        let p = person(&pool).await;
+        let long = "x".repeat(61);
+        assert!(
+            insert_labeled(&pool, p, b"c", json!({}), Some(&long))
+                .await
+                .is_err()
+        );
     }
 }

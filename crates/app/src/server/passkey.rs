@@ -226,10 +226,56 @@ async fn existing_passkeys(state: &AppState, person_id: Uuid) -> Result<Vec<Pass
         .collect()
 }
 
+/// Longest device label stored (the database enforces the same limit).
+const MAX_LABEL_CHARS: usize = 60;
+
+/// Non-personal description of a device like "iPhone – Safari", from its User-Agent. Only a
+/// coarse system and browser name is kept, never the raw header. `None` if neither is known.
+pub fn device_label(user_agent: &str) -> Option<String> {
+    let has = |needle: &str| user_agent.contains(needle);
+    let system = if has("iPhone") {
+        Some("iPhone")
+    } else if has("iPad") {
+        Some("iPad")
+    } else if has("Android") {
+        Some("Android")
+    } else if has("Windows") {
+        Some("Windows")
+    } else if has("CrOS") {
+        Some("ChromeOS")
+    } else if has("Macintosh") || has("Mac OS X") {
+        Some("Mac")
+    } else if has("Linux") || has("X11") {
+        Some("Linux")
+    } else {
+        None
+    };
+    let browser = if has("Edg/") || has("EdgA/") || has("EdgiOS/") {
+        Some("Edge")
+    } else if has("OPR/") {
+        Some("Opera")
+    } else if has("Firefox/") || has("FxiOS/") {
+        Some("Firefox")
+    } else if has("Chrome/") || has("CriOS/") {
+        Some("Chrome")
+    } else if has("Safari/") {
+        Some("Safari")
+    } else {
+        None
+    };
+    let label = match (system, browser) {
+        (Some(s), Some(b)) => format!("{s} – {b}"),
+        (Some(x), None) | (None, Some(x)) => x.to_string(),
+        (None, None) => return None,
+    };
+    Some(label.chars().take(MAX_LABEL_CHARS).collect())
+}
+
 pub async fn finish_registration(
     state: &AppState,
     session: &Session,
     credential: &RegisterPublicKeyCredential,
+    user_agent: Option<&str>,
 ) -> Result<Me> {
     let ceremony: RegistrationCeremony = session::take_ceremony(session, REGISTRATION_KEY)
         .await
@@ -258,12 +304,21 @@ pub async fn finish_registration(
         serde_json::to_value(&new_key).map_err(|e| internal("serialize passkey failed")(&e))?;
     // Token, passkey and audit row are written in one transaction: a failure leaves the token
     // unused so the person can retry.
+    // Staff may link several devices; employees keep exactly one (the new one replaces the old).
+    let (_, kind) = me_of(state, &p).await?;
+    let devices = match kind {
+        SessionKind::Staff => enrollment::Devices::AddToExisting,
+        SessionKind::Employee => enrollment::Devices::ReplaceExisting,
+    };
+    let label = user_agent.and_then(device_label);
     let passkey_id = enrollment::complete(
         &state.pool,
         &ceremony.token_hash,
         p.id,
         new_key.cred_id().as_ref(),
         json,
+        label.as_deref(),
+        devices,
     )
     .await
     .map_err(db)?
@@ -423,7 +478,10 @@ mod tests {
         let challenge = begin_registration(state, session, token).await.unwrap();
         let cred = auth.do_registration(origin(), challenge).unwrap();
         let id: Vec<u8> = cred.raw_id.clone();
-        (finish_registration(state, session, &cred).await, Some(id))
+        (
+            finish_registration(state, session, &cred, None).await,
+            Some(id),
+        )
     }
 
     /// Discoverable login as the browser would do it: the authenticator picks the credential.
@@ -475,7 +533,9 @@ mod tests {
         assert_ne!(p.user_handle, p.id.as_bytes().to_vec());
         let cred = auth.do_registration(origin(), challenge).unwrap();
         let credential_id: Vec<u8> = cred.raw_id.clone();
-        let me = finish_registration(&state, &session, &cred).await.unwrap();
+        let me = finish_registration(&state, &session, &cred, None)
+            .await
+            .unwrap();
         assert_eq!(me.person_id, p.id);
         assert_eq!(me.first_name, "Jan");
         assert!(!me.is_staff && !me.is_admin);
@@ -552,9 +612,11 @@ mod tests {
         let r2 = SoftPasskey::new(true)
             .do_registration(origin(), c2)
             .unwrap();
-        finish_registration(&state, &s1, &r1).await.unwrap();
+        finish_registration(&state, &s1, &r1, None).await.unwrap();
         assert_eq!(
-            finish_registration(&state, &s2, &r2).await.unwrap_err(),
+            finish_registration(&state, &s2, &r2, None)
+                .await
+                .unwrap_err(),
             AuthError::Token
         );
         assert!(me_none(&state, &s2).await);
@@ -735,7 +797,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            finish_registration(&state, &session, &cred)
+            finish_registration(&state, &session, &cred, None)
                 .await
                 .unwrap_err(),
             AuthError::Token
@@ -899,5 +961,133 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(stored.last_used_at.is_none(), "passkey update rolled back");
+    }
+
+    async fn second_device(
+        state: &AppState,
+        person_id: Uuid,
+        ua: Option<&str>,
+    ) -> (Session, Vec<u8>, SoftPasskey) {
+        let t = enrollment::issue_token(&state.pool, person_id, None, Duration::minutes(15))
+            .await
+            .unwrap();
+        let mut auth = SoftPasskey::new(true);
+        let session = new_session();
+        let challenge = begin_registration(state, &session, &t.raw).await.unwrap();
+        let cred = auth.do_registration(origin(), challenge).unwrap();
+        let id: Vec<u8> = cred.raw_id.clone();
+        finish_registration(state, &session, &cred, ua)
+            .await
+            .unwrap();
+        (session, id, auth)
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn employee_enrolling_again_replaces_the_old_device(pool: PgPool) {
+        let state = state(pool);
+        let (p, old_session, old_id, mut old_auth) = signed_in(&state, "Jan Peeters").await;
+        let (new_session_, new_id, mut new_auth) = second_device(&state, p.id, None).await;
+        assert_eq!(passkey::count_active(&state.pool, p.id).await.unwrap(), 1);
+        assert!(!signed_in_user(&state, &old_session).await);
+        assert!(signed_in_user(&state, &new_session_).await);
+        assert_eq!(
+            login(
+                &state,
+                &new_session(),
+                &mut old_auth,
+                &old_id,
+                &p.user_handle
+            )
+            .await
+            .unwrap_err(),
+            AuthError::Login
+        );
+        login(
+            &state,
+            &new_session(),
+            &mut new_auth,
+            &new_id,
+            &p.user_handle,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn staff_enrolling_again_keeps_both_devices(pool: PgPool) {
+        let state = state(pool);
+        let (p, token) = person_with_token(&state, "Els Manager").await;
+        role::assign(&state.pool, p.id, Role::Admin, None, None)
+            .await
+            .unwrap();
+        let mut first = SoftPasskey::new(true);
+        let first_session = new_session();
+        let (me, first_id) = register(&state, &first_session, &mut first, &token).await;
+        me.unwrap();
+        let (second_session, second_id, mut second) = second_device(
+            &state,
+            p.id,
+            Some("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"),
+        )
+        .await;
+        assert_eq!(passkey::count_active(&state.pool, p.id).await.unwrap(), 2);
+        assert!(signed_in_user(&state, &first_session).await);
+        assert!(signed_in_user(&state, &second_session).await);
+        let labels: Vec<Option<String>> = passkey::devices_of(&state.pool, p.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|d| d.label)
+            .collect();
+        assert_eq!(labels, vec![None, Some("iPhone – Safari".to_string())]);
+        login(
+            &state,
+            &new_session(),
+            &mut first,
+            &first_id.unwrap(),
+            &p.user_handle,
+        )
+        .await
+        .unwrap();
+        login(
+            &state,
+            &new_session(),
+            &mut second,
+            &second_id,
+            &p.user_handle,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn device_labels_are_coarse_and_bounded() {
+        let cases = [
+            (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1",
+                Some("iPhone – Safari"),
+            ),
+            (
+                "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36",
+                Some("Android – Chrome"),
+            ),
+            (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+                Some("Windows – Edge"),
+            ),
+            (
+                "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0",
+                Some("Linux – Firefox"),
+            ),
+            (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15",
+                Some("Mac – Safari"),
+            ),
+            ("curl/8.0", None),
+            ("", None),
+        ];
+        for (ua, expected) in cases {
+            assert_eq!(device_label(ua).as_deref(), expected, "{ua}");
+        }
     }
 }

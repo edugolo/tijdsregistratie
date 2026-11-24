@@ -54,9 +54,15 @@ pub async fn finish_registration(
 ) -> Result<Me, ServerFnError> {
     let state = crate::server::app_state().await?;
     let session = crate::server::session().await?;
-    crate::server::passkey::finish_registration(&state, &session, &credential)
-        .await
-        .map_err(ServerFnError::from)
+    let user_agent = crate::server::user_agent().await;
+    crate::server::passkey::finish_registration(
+        &state,
+        &session,
+        &credential,
+        user_agent.as_deref(),
+    )
+    .await
+    .map_err(ServerFnError::from)
 }
 
 /// Starts a discoverable (usernameless) passkey login.

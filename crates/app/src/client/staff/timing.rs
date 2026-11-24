@@ -43,3 +43,20 @@ pub fn today_label() -> String {
 pub fn today_label() -> String {
     String::new()
 }
+
+/// A date from unix milliseconds as "di 19 nov", from the browser clock.
+#[cfg(feature = "web")]
+pub fn date_label(ms: i64) -> String {
+    let options = js_sys::Object::new();
+    for (key, value) in [("weekday", "short"), ("day", "numeric"), ("month", "short")] {
+        let _ = js_sys::Reflect::set(&options, &key.into(), &value.into());
+    }
+    js_sys::Date::new(&(ms as f64).into())
+        .to_locale_date_string("nl-BE", &options)
+        .into()
+}
+
+#[cfg(not(feature = "web"))]
+pub fn date_label(_ms: i64) -> String {
+    String::new()
+}

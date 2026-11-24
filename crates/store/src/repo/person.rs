@@ -12,6 +12,7 @@ use crate::crypto_ext::{open_str, seal_str};
 
 const TABLE: &str = "person";
 const NAME_COLUMN: &str = "display_name";
+const PAYROLL_COLUMN: &str = "payroll_number";
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Person {
@@ -202,4 +203,76 @@ pub async fn list_all_people(pool: &PgPool, keys: &DataKeys) -> Result<Vec<Perso
             .fetch_all(pool)
             .await?;
     decrypt_sorted(rows, keys)
+}
+
+/// Blind index of a payroll number: trimmed and lowercased, with its own prefix so it can never
+/// collide with a name index.
+fn payroll_index(blind: &BlindIndexKey, number: &str) -> Vec<u8> {
+    blind
+        .index(&format!("payroll\u{1f}{}", number.trim().to_lowercase()))
+        .to_vec()
+}
+
+/// Sets or clears (`None`) the payroll number, stored encrypted with a blind index. Returns
+/// `false` without changing anything if another person already has that number (compared
+/// case-insensitively); the caller must then abandon its transaction, since the database has
+/// rejected a statement. Fails with `NotFound` if the person does not exist.
+pub async fn set_payroll_number<'e>(
+    db: impl PgExecutor<'e>,
+    keys: &DataKeys,
+    blind: &BlindIndexKey,
+    id: Uuid,
+    number: Option<&str>,
+) -> Result<bool> {
+    let enc = number
+        .map(|n| seal_str(keys, TABLE, PAYROLL_COLUMN, id, n.trim()))
+        .transpose()?;
+    let index = number.map(|n| payroll_index(blind, n));
+    let result = sqlx::query(
+        "UPDATE person SET payroll_number_enc = $2, payroll_number_index = $3 WHERE id = $1",
+    )
+    .bind(id)
+    .bind(enc)
+    .bind(index)
+    .execute(db)
+    .await;
+    match result {
+        Ok(done) if done.rows_affected() == 0 => Err(super::RepoError::NotFound),
+        Ok(_) => Ok(true),
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The decrypted payroll numbers of the given people (people without one are absent). Never log
+/// the result.
+pub async fn payroll_numbers<'e>(
+    db: impl PgExecutor<'e>,
+    keys: &DataKeys,
+    ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, String>> {
+    let rows: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(
+        "SELECT id, payroll_number_enc FROM person \
+         WHERE id = ANY($1) AND payroll_number_enc IS NOT NULL",
+    )
+    .bind(ids)
+    .fetch_all(db)
+    .await?;
+    rows.into_iter()
+        .map(|(id, blob)| Ok((id, open_str(keys, TABLE, PAYROLL_COLUMN, id, &blob)?)))
+        .collect()
+}
+
+/// The person with this payroll number, for API lookups.
+pub async fn find_by_payroll_number<'e>(
+    db: impl PgExecutor<'e>,
+    blind: &BlindIndexKey,
+    number: &str,
+) -> Result<Option<Uuid>> {
+    Ok(
+        sqlx::query_scalar("SELECT id FROM person WHERE payroll_number_index = $1")
+            .bind(payroll_index(blind, number))
+            .fetch_optional(db)
+            .await?,
+    )
 }

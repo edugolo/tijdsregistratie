@@ -3,6 +3,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
+use super::devices::DeviceList;
 use super::field::{Field, error_id};
 use super::flow::{EnrollFlow, ErrorNotice, report_error};
 use super::icons::{Icon, IconKind};
@@ -393,6 +394,8 @@ fn PersonPanel(
     let role = highest_role(&person);
     let chosen = person_sites(&person);
     let manageable = person.can_manage;
+    // Staff may have several devices (phone and desktop); employees keep exactly one.
+    let multiple_devices = role != RoleDto::Employee;
     // Only admins and HR change roles, and only on people they may manage. The current role is
     // always listed, also when the signed-in person may not hand it out.
     let can_set_roles = can_view_all && manageable;
@@ -436,9 +439,17 @@ fn PersonPanel(
             section { class: "st-panel-section",
                 h3 { {fl!(LANGUAGE_LOADER, "panel-device")} }
                 if person.device_linked {
-                    span { class: "st-chip st-chip-ok",
-                        Icon { kind: IconKind::Check, size: 14 }
-                        {fl!(LANGUAGE_LOADER, "chip-linked")}
+                    if multiple_devices {
+                        DeviceList {
+                            person_id: id,
+                            can_revoke: manageable || is_self,
+                            on_changed: move |_| on_changed.call(()),
+                        }
+                    } else {
+                        span { class: "st-chip st-chip-ok",
+                            Icon { kind: IconKind::Check, size: 14 }
+                            {fl!(LANGUAGE_LOADER, "chip-linked")}
+                        }
                     }
                 } else {
                     div { class: "st-notice st-notice-warn",
@@ -447,7 +458,7 @@ fn PersonPanel(
                     }
                 }
                 if manageable && person.active {
-                    if person.device_linked {
+                    if person.device_linked && !multiple_devices {
                         Confirmable {
                             label: fl!(LANGUAGE_LOADER, "panel-revoke"),
                             asking: pending() == Some(Pending::Revoke),
@@ -463,7 +474,11 @@ fn PersonPanel(
                             class: "st-btn st-btn-tonal",
                             r#type: "button",
                             onclick: move |_| linking.set(true),
-                            {fl!(LANGUAGE_LOADER, "panel-link")}
+                            if person.device_linked {
+                                {fl!(LANGUAGE_LOADER, "panel-link-more")}
+                            } else {
+                                {fl!(LANGUAGE_LOADER, "panel-link")}
+                            }
                         }
                     }
                 }
@@ -594,7 +609,7 @@ fn SiteToggle(name: String, on: bool, disabled: bool, on_toggle: EventHandler<bo
 
 /// A text button that asks "Zeker?" before it confirms.
 #[component]
-fn Confirmable(
+pub(super) fn Confirmable(
     label: String,
     asking: bool,
     on_ask: EventHandler<()>,

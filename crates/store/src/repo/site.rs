@@ -54,6 +54,8 @@ pub struct Site {
     pub zone_policy: ZonePolicy,
     pub active: bool,
     pub created_at: DateTime<Utc>,
+    /// Payroll cost centre (organisation configuration, not personal data).
+    pub cost_centre: Option<String>,
 }
 
 /// Editable fields of a site.
@@ -83,6 +85,7 @@ struct SiteRow {
     zone_policy: String,
     active: bool,
     created_at: DateTime<Utc>,
+    cost_centre: Option<String>,
 }
 
 impl SiteRow {
@@ -104,13 +107,14 @@ impl SiteRow {
             zone_policy: self.zone_policy.parse()?,
             active: self.active,
             created_at: self.created_at,
+            cost_centre: self.cost_centre,
         })
     }
 }
 
 macro_rules! site_columns {
     () => {
-        "id, name, address_enc, lat, lng, radius_m, break_minutes, break_after_minutes, zone_policy, active, created_at"
+        "id, name, address_enc, lat, lng, radius_m, break_minutes, break_after_minutes, zone_policy, active, created_at, cost_centre"
     };
 }
 
@@ -239,4 +243,22 @@ pub fn to_zone(site: &Site) -> Option<SiteZone> {
         },
         radius_m: site.radius_m,
     })
+}
+
+/// Sets or clears the cost centre. Fails with [`RepoError::NotFound`] if the site does not exist.
+/// Takes a pool or a transaction.
+pub async fn set_cost_centre<'e>(
+    db: impl PgExecutor<'e>,
+    id: Uuid,
+    cost_centre: Option<&str>,
+) -> Result<()> {
+    let done = sqlx::query("UPDATE site SET cost_centre = $2 WHERE id = $1")
+        .bind(id)
+        .bind(cost_centre)
+        .execute(db)
+        .await?;
+    if done.rows_affected() == 0 {
+        return Err(RepoError::NotFound);
+    }
+    Ok(())
 }

@@ -4,6 +4,8 @@
 pub mod auth;
 pub mod clock;
 pub mod geocode;
+pub mod hours;
+pub mod integrations;
 pub mod setup;
 pub mod staff;
 

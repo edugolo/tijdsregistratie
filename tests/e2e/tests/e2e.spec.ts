@@ -325,6 +325,69 @@ test('7c. admin adds an HR person (personeelsdienst) without a school', async ()
   await expect(panel.locator('header p')).toHaveText('Beheerder');
 });
 
+test('7d. admin links a second device in Mijn toestellen, both sign in, then one is revoked', async ({
+  browser,
+}) => {
+  const { page } = admin;
+  await page.goto('/beheer/instellingen');
+  await page.getByRole('button', { name: 'Mijn toestellen', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Mijn toestellen' })).toBeVisible();
+  const devices = page.locator('li.st-row');
+  await expect(devices).toHaveCount(1);
+  await expect(devices.first()).toContainText('Dit toestel');
+  await shot(page, '16-admin-my-devices');
+
+  await page.getByRole('button', { name: 'Nog een toestel koppelen', exact: true }).click();
+  const qr = page.getByRole('img', { name: 'QR-code om het toestel te koppelen' });
+  await expect(qr).toBeVisible();
+  const link = await readQrLink(qr);
+
+  // A second computer with its own virtual authenticator registers an additional passkey.
+  const second = await newDevice(browser);
+  early.push(second);
+  await second.page.goto(link);
+  await expect(second.page.getByRole('heading', { name: 'Welkom Beheerder' })).toBeVisible({
+    timeout: EMPLOYEE_PAGE_TIMEOUT,
+  });
+  await second.page.getByRole('button', { name: 'Verder' }).click();
+  await second.page.getByRole('button', { name: 'Sleutel aanmaken' }).click();
+  await expect(second.page).toHaveURL(/\/beheer/, { timeout: EMPLOYEE_PAGE_TIMEOUT });
+  await expect(page.getByText('Gekoppeld').first()).toBeVisible({ timeout: 15_000 });
+  await page.getByRole('button', { name: 'Klaar' }).click();
+
+  // The first device stays signed in and now lists both devices.
+  await expect(devices).toHaveCount(2);
+  await shot(page, '17-admin-two-devices');
+
+  // Both devices can sign in with their own passkey.
+  for (const d of [second, admin]) {
+    await d.context.clearCookies();
+    await d.page.goto('/');
+    await expect(d.page).toHaveURL(/\/aanmelden$/);
+    await d.page.getByRole('button', { name: 'Aanmelden' }).click();
+    await expect(d.page).toHaveURL(/\/beheer/, { timeout: EMPLOYEE_PAGE_TIMEOUT });
+  }
+
+  // Revoke the other device: only its sessions end.
+  await page.goto('/beheer/instellingen');
+  await page.getByRole('button', { name: 'Mijn toestellen', exact: true }).click();
+  await expect(devices).toHaveCount(2);
+  const other = devices.filter({ hasNotText: 'Dit toestel' });
+  await other.getByRole('button', { name: 'Intrekken' }).click();
+  await other.getByRole('button', { name: 'Ja', exact: true }).click();
+  await expect(devices).toHaveCount(1);
+  await expect(devices.first()).toContainText('Dit toestel');
+
+  await second.page.goto('/beheer');
+  await expect(second.page).toHaveURL(/\/aanmelden$/);
+  await second.page.getByRole('button', { name: 'Aanmelden' }).click();
+  await expect(second.page.getByText('Aanmelden is niet gelukt. Probeer opnieuw.')).toBeVisible();
+  // The first device is still signed in after a reload.
+  await page.reload();
+  await page.getByRole('button', { name: 'Mijn toestellen', exact: true }).click();
+  await expect(devices).toHaveCount(1);
+});
+
 test('8. security headers and no CSP violations', async ({ request }) => {
   const res = await request.get(origin() + '/');
   const h = res.headers();

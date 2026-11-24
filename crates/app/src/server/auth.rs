@@ -200,6 +200,9 @@ pub mod http {
         base-uri 'self'; \
         form-action 'self'; \
         frame-ancestors 'none'";
+    /// The public REST API authenticates with a Bearer key only (see `api_v1::auth`): it never
+    /// reads cookies, so the cross-site check and the session guard do not apply to it.
+    const PUBLIC_API_PREFIX: &str = "/api/v1/";
     const PERMISSIONS_POLICY: &str = "geolocation=(self), camera=(), microphone=()";
     const HSTS: &str = "max-age=31536000; includeSubDomains";
 
@@ -489,6 +492,7 @@ pub mod http {
         next: Next,
     ) -> Response {
         if req.uri().path().starts_with("/api/")
+            && !req.uri().path().starts_with(PUBLIC_API_PREFIX)
             && !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS)
         {
             let headers = req.headers();
@@ -559,6 +563,9 @@ pub mod http {
     }
 
     async fn session_guard(State(guard): State<HttpGuard>, req: Request, next: Next) -> Response {
+        if req.uri().path().starts_with(PUBLIC_API_PREFIX) {
+            return next.run(req).await;
+        }
         let user = match req.extensions().get::<Session>() {
             Some(session) => session::refresh_expiry(session).await,
             None => None,
@@ -631,6 +638,7 @@ pub mod http {
                     .route("/api/auth/login/begin", post(|| async { "ok" }))
                     .route("/api/auth/me", get(|| async { "me" }))
                     .route("/api/clock", post(|| async { "ok" }))
+                    .route("/api/v1/things", post(|| async { "ok" }))
                     .route("/api/branding", get(|| async { "branding" }))
                     .route("/api/setup/required", get(|| async { "required" }))
                     .route("/api/setup/check-code", post(|| async { "ok" }))
@@ -1159,6 +1167,33 @@ pub mod http {
             assert_eq!(r.status(), StatusCode::NOT_FOUND);
             assert!(r.headers().contains_key("x-frame-options"));
             assert!(!r.headers().contains_key(STRICT_TRANSPORT_SECURITY));
+        }
+
+        #[tokio::test]
+        async fn public_api_requests_skip_the_cross_site_check() {
+            // Bearer clients have no cookies to protect: any origin or content type passes the
+            // guard (the API itself requires a key and JSON where it takes a body).
+            let app = app(guard("https://tijd.example.org", false, 100));
+            let r = send(
+                &app,
+                "POST",
+                "/api/v1/things",
+                &[
+                    ("origin", "https://hr.example.com"),
+                    ("content-type", "text/csv"),
+                    ("authorization", "Bearer tr_live_x"),
+                ],
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::OK);
+            let r = send(
+                &app,
+                "POST",
+                "/api/clock",
+                &[("origin", "https://hr.example.com")],
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::FORBIDDEN);
         }
 
         #[tokio::test]

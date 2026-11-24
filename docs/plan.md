@@ -110,6 +110,10 @@ i18n: i18n-embed + `fl!`. Messages live in `crates/app/i18n/<locale>/app.ftl`; a
 - Login: discoverable passkey authentication, one tap.
 - Sessions: employees 90 days sliding; managers and admins one working day (max 12 h).
 - New or lost phone: same flow; managers and admins can revoke passkeys.
+- Devices: employees have exactly one device (a new enrollment revokes the previous passkey in the
+  same transaction). Managers, HR and admins may link several (phone and desktop): enrolling adds a
+  passkey, each can be revoked on its own (only its sessions end; the last working admin passkey
+  stays), and staff link another device for themselves under Instellingen, "Mijn toestellen".
 - WebAuthn user handle is a random id, never the name. The display name is sent to the
   authenticator (it lives on the person's own device) but never stored in plaintext on the server.
 
@@ -207,19 +211,30 @@ Encrypted columns marked 🔒.
 - `organisation_settings` — single row: display name, short name, brand colour, logo (bytea, nullable),
   time zone, retention days, zone defaults, setup_completed_at
 - `setup_code` — code_hash, created_at, used_at (only while in setup mode)
-- `site` — id, name, address 🔒, lat, lng, radius_m, break_minutes, zone_policy, active
+- `site` — id, name, address 🔒, lat, lng, radius_m, break_minutes, zone_policy, active, cost_centre (plain text)
   *(site location is not personal data and is needed in plaintext for the zone check)*
-- `person` — id, webauthn_user_handle, display_name 🔒, email 🔒, active, created_by, created_at
+- `person` — id, webauthn_user_handle, display_name 🔒, email 🔒, payroll_number 🔒 (+ blind index
+  `payroll_number_index`, unique when present, for API lookups), active, created_by, created_at
 - `role_assignment` — person_id, role, site_id (nullable), created_by, created_at
 - `enrollment_token` — token_hash, person_id, issued_by, expires_at, used_at
-- `passkey` — id, person_id, credential (JSONB), created_at, last_used_at, revoked_at, revoked_by
+- `passkey` — id, person_id, credential (JSONB), label (coarse device description from the User-Agent, max 60 chars), created_at, last_used_at, revoked_at, revoked_by
 - `session` — managed by the `tower-sessions` store
 - `time_event` — id, person_id, kind (start|stop), server_ts, client_ts, site_id, location 🔒
   (lat, lng, accuracy as one encrypted blob, nullable after purge), zone_status, source, created_at
   — **append-only**
 - `audit_log` — id, actor_id, action, entity, entity_id, changed_fields, at (no plaintext personal data)
-- Reserved for next steps: `correction`, `work_schedule`, `contract_type`, `validation`,
-  `export_batch`, `message`.
+- `work_schedule` — person_id, weekday (1 = Monday .. 7), minutes: contract minutes per weekday
+- `correction` — id, time_event_id | target_correction_id | neither, person_id, kind, corrected_ts,
+  reason 🔒, created_by, created_at, voids_event — **append-only**. A correction replaces the time of an
+  event, voids it, or (no target) adds a missing event; an addition can itself be replaced or voided
+  through `target_correction_id`. The latest correction per target wins; `time_event` is never touched.
+  A correction keeps its target on the same local day. Audit rows never contain the reason.
+- `period_validation` — id, site_id, period_start, period_end (inclusive), validated_by, validated_at,
+  reopened_by, reopened_at. Rows are never deleted; reopening only fills the `reopened_*` columns
+  (trigger). The repository refuses overlapping active validations of a site (per-site advisory lock).
+  Corrections on a day inside an active validation of any of the person's sites are refused until HR
+  or an admin reopens it.
+- Reserved for next steps: `contract_type`, `export_batch`, `message`.
 
 ## 10. Repository layout
 
@@ -287,7 +302,9 @@ Security-relevant tasks (T2, T4, T5, T8) get an independent review before merge.
 
 ## 14. Payroll export and integrations (decided 2026-11-24, not built yet)
 
-Depends on Uren (hours overview), corrections and validation.
+Depends on Uren (hours overview), corrections and validation. The backend of these exists
+(`server::hours`, `api::hours`: overview, day detail, corrections, period validation, contract
+minutes, payroll number, site cost centre; schema in §9); the screens and the export are still to do.
 
 - **Neutral export model**: per person per day from validated periods: payroll/contract number
   (encrypted), site code (cost centre), date, start, stop, break, worked minutes, contract minutes,

@@ -1,6 +1,9 @@
 //! Repository: typed access to the database. Personal data is encrypted and decrypted here.
 
+pub mod api_key;
 pub mod audit;
+pub mod contract;
+pub mod correction;
 pub mod enrollment;
 pub mod passkey;
 pub mod person;
@@ -11,6 +14,7 @@ pub mod site;
 #[cfg(test)]
 mod tests;
 pub mod time_event;
+pub mod validation;
 
 /// Repository errors. None of the variants carries personal data.
 #[derive(Debug, thiserror::Error)]

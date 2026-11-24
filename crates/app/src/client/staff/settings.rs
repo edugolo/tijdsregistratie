@@ -1,7 +1,9 @@
-//! "Instellingen": organisation, schools and appearance for admins; HR only sees appearance.
+//! "Instellingen": organisation, schools and appearance for admins; HR sees appearance. Every
+//! staff member has "Mijn toestellen".
 
 use dioxus::prelude::*;
 
+use super::devices::MyDevices;
 use super::flow::{ErrorNotice, report_error};
 use super::load::{Skeleton, use_loaded};
 use super::map::{site_form_to_dto, site_from_dto};
@@ -17,17 +19,25 @@ enum Section {
     Organisation,
     Sites,
     Appearance,
+    Devices,
 }
 
 impl Section {
-    const ALL: [Self; 3] = [Self::Organisation, Self::Sites, Self::Appearance];
+    const ALL: [Self; 4] = [
+        Self::Organisation,
+        Self::Sites,
+        Self::Appearance,
+        Self::Devices,
+    ];
 
-    /// Admins get every section; everyone else (HR) only "Weergave".
-    fn available(is_admin: bool) -> Vec<Self> {
+    /// Admins get every section, HR "Weergave" and "Mijn toestellen", managers only the latter.
+    fn available(is_admin: bool, is_hr: bool) -> Vec<Self> {
         if is_admin {
             Self::ALL.to_vec()
+        } else if is_hr {
+            vec![Self::Appearance, Self::Devices]
         } else {
-            vec![Self::Appearance]
+            vec![Self::Devices]
         }
     }
 
@@ -36,6 +46,7 @@ impl Section {
             Self::Organisation => fl!(LANGUAGE_LOADER, "settings-org"),
             Self::Sites => fl!(LANGUAGE_LOADER, "settings-sites"),
             Self::Appearance => fl!(LANGUAGE_LOADER, "settings-appearance"),
+            Self::Devices => fl!(LANGUAGE_LOADER, "settings-devices"),
         }
     }
 }
@@ -44,23 +55,20 @@ impl Section {
 #[component]
 pub fn StaffSettingsPage() -> Element {
     let ctx = use_context::<StaffContext>();
-    let mut section = use_signal(|| Section::available(ctx.is_admin)[0]);
-    if !ctx.is_admin && !ctx.is_hr {
-        navigator().replace("/beheer");
-        return rsx! {};
-    }
-    // The server refuses everything else for HR; the section is also never rendered for them.
-    let current = if ctx.is_admin {
+    let available = Section::available(ctx.is_admin, ctx.is_hr);
+    let mut section = use_signal(|| available[0]);
+    // The server refuses the other sections; they are also never rendered for this role.
+    let current = if available.contains(&section()) {
         section()
     } else {
-        Section::Appearance
+        available[0]
     };
     rsx! {
         section { class: "st-page",
             h1 { {fl!(LANGUAGE_LOADER, "settings-title")} }
             div { class: "st-settings",
                 nav { class: "st-settings-nav", aria_label: fl!(LANGUAGE_LOADER, "settings-nav-label"),
-                    for item in Section::available(ctx.is_admin) {
+                    for item in available.iter().copied() {
                         button {
                             key: "{item.label()}",
                             r#type: "button",
@@ -78,6 +86,9 @@ pub fn StaffSettingsPage() -> Element {
                         Section::Appearance => rsx! {
                             h2 { {fl!(LANGUAGE_LOADER, "settings-appearance")} }
                             div { class: "st-card", AppearancePicker {} }
+                        },
+                        Section::Devices => rsx! {
+                            MyDevices { person_id: ctx.person_id, first_name: ctx.first_name.clone() }
                         },
                     }
                 }
@@ -139,8 +150,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hr_only_gets_appearance() {
-        assert_eq!(Section::available(false), vec![Section::Appearance]);
-        assert_eq!(Section::available(true), Section::ALL.to_vec());
+    fn sections_per_role() {
+        assert_eq!(Section::available(true, false), Section::ALL.to_vec());
+        assert_eq!(
+            Section::available(false, true),
+            vec![Section::Appearance, Section::Devices]
+        );
+        assert_eq!(Section::available(false, false), vec![Section::Devices]);
     }
 }

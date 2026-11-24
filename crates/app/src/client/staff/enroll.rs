@@ -27,6 +27,9 @@ pub fn EnrollPanel(
     state: EnrollState,
     on_cancel: EventHandler<()>,
     on_new_code: EventHandler<()>,
+    /// The signed-in person links one more device of their own.
+    #[props(default)]
+    own: bool,
 ) -> Element {
     rsx! {
         section { class: "st-page",
@@ -41,8 +44,12 @@ pub fn EnrollPanel(
                         }
                         div { class: "st-enroll-body",
                             h1 { "{person_name}" }
-                            p { class: "st-sub", {fl!(LANGUAGE_LOADER, "enroll-hint")} }
-                            p { class: "st-sub", {fl!(LANGUAGE_LOADER, "enroll-check")} }
+                            if own {
+                                p { class: "st-sub", {fl!(LANGUAGE_LOADER, "enroll-hint-own")} }
+                            } else {
+                                p { class: "st-sub", {fl!(LANGUAGE_LOADER, "enroll-hint")} }
+                                p { class: "st-sub", {fl!(LANGUAGE_LOADER, "enroll-check")} }
+                            }
                             div { class: "st-inline",
                                 span { class: "st-chip st-chip-brand", role: "timer",
                                     {fl!(LANGUAGE_LOADER, "enroll-countdown", time = format_countdown(seconds_left))}
@@ -77,7 +84,11 @@ pub fn EnrollPanel(
                             h1 { "{person_name}" }
                             div { class: "st-notice st-notice-warn",
                                 Icon { kind: IconKind::Alert, size: 20 }
-                                p { {fl!(LANGUAGE_LOADER, "enroll-expired")} }
+                                if own {
+                                    p { {fl!(LANGUAGE_LOADER, "enroll-expired-own")} }
+                                } else {
+                                    p { {fl!(LANGUAGE_LOADER, "enroll-expired")} }
+                                }
                             }
                             div { class: "st-inline",
                                 button {

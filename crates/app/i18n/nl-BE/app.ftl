@@ -307,3 +307,19 @@ address-searching = Even zoeken
 address-no-results = Geen resultaten
 address-search-failed = Zoeken lukt nu niet. Vul de coördinaten zelf in.
 address-picked = Adres en coördinaten ingevuld.
+
+# Devices of staff members (several per person) and "Mijn toestellen"
+panel-link-more = Nog een toestel koppelen
+settings-devices = Mijn toestellen
+devices-title = Mijn toestellen
+devices-hint = Hier zie je op welke toestellen je aanmeldt. Koppel er een bij, bijvoorbeeld je computer.
+devices-link-more = Nog een toestel koppelen
+devices-revoke = Intrekken
+devices-current = Dit toestel
+devices-unknown = Onbekend toestel
+devices-linked-on = Gekoppeld op { $date }
+devices-last-used = laatst gebruikt op { $date }
+devices-never-used = nog niet gebruikt
+devices-err-last = Je kan je laatste toestel niet intrekken als je de enige beheerder bent.
+enroll-hint-own = Scan deze code met de camera van het toestel dat je wil koppelen.
+enroll-expired-own = Deze code werkt niet meer. Maak een nieuwe code.

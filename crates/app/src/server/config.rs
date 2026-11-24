@@ -43,6 +43,8 @@ pub struct AppConfig {
     /// Nominatim-compatible `/search` endpoint for the address search; `None` switches the
     /// feature off (`GEOCODER_URL` empty or `off`).
     pub geocoder_url: Option<String>,
+    /// Serve the interactive API reference and `openapi.json` under `/api/v1` (`API_DOCS`).
+    pub api_docs: bool,
 }
 
 /// The database URL carries credentials and the geocoder URL may carry a key: both are left out.
@@ -65,6 +67,7 @@ impl std::fmt::Debug for AppConfig {
                 "geocoder_url",
                 &self.geocoder_url.as_ref().map(|_| "<redacted>"),
             )
+            .field("api_docs", &self.api_docs)
             .finish()
     }
 }
@@ -175,6 +178,11 @@ impl AppConfig {
                     "expected a positive number",
                 ))?,
         };
+        let api_docs = match get("API_DOCS") {
+            None | Some("on") => true,
+            Some("off") => false,
+            Some(_) => return Err(ConfigError::Invalid("API_DOCS", "expected on or off")),
+        };
         let geocoder_url = parse_geocoder_url(env.get("GEOCODER_URL").map(String::as_str))?;
         let ip = get("IP").unwrap_or("127.0.0.1");
         let port = get("PORT").unwrap_or("8080");
@@ -194,6 +202,7 @@ impl AppConfig {
             trust_proxy_headers,
             auth_rate_limit_per_minute,
             geocoder_url,
+            api_docs,
         })
     }
 }
@@ -221,6 +230,21 @@ mod tests {
         assert_eq!(c.rp_id, "tijd.example.org");
         assert!(c.cookie_secure);
         assert_eq!(c.bind_addr.to_string(), "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn api_docs_default_on_and_switchable() {
+        let with = |value: Option<&str>| {
+            let mut m = base();
+            if let Some(v) = value {
+                m.insert("API_DOCS".into(), v.into());
+            }
+            AppConfig::from_map(&m).map(|c| c.api_docs)
+        };
+        assert_eq!(with(None), Ok(true));
+        assert_eq!(with(Some("on")), Ok(true));
+        assert_eq!(with(Some("off")), Ok(false));
+        assert!(with(Some("maybe")).is_err());
     }
 
     #[test]

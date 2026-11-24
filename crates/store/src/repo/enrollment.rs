@@ -110,23 +110,36 @@ pub async fn consume_by_hash<'e>(
     .await?)
 }
 
+/// What happens to the person's earlier passkeys when an enrollment completes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Devices {
+    /// One device per person: earlier passkeys are revoked in the same transaction.
+    ReplaceExisting,
+    /// Several devices per person: the new passkey is added next to the existing ones.
+    AddToExisting,
+}
+
 /// Finishes an enrollment in one transaction: consume the token (it must belong to `person_id`),
-/// store the passkey and write the audit row. Returns the new passkey id, or `None` (and changes
-/// nothing) if the token is unknown, used, expired or belongs to someone else. Any error rolls
-/// back, leaving the token unused.
+/// store the passkey (with its non-personal device `label`), revoke earlier passkeys when
+/// `devices` says so and write the audit rows. Returns the new passkey id, or `None` (and
+/// changes nothing) if the token is unknown, used, expired or belongs to someone else. Any error
+/// rolls back, leaving the token unused.
 pub async fn complete(
     pool: &PgPool,
     hash: &[u8],
     person_id: Uuid,
     credential_id: &[u8],
     credential_json: serde_json::Value,
+    label: Option<&str>,
+    devices: Devices,
 ) -> Result<Option<Uuid>> {
     let mut tx = pool.begin().await?;
     if consume_by_hash(&mut *tx, hash).await? != Some(person_id) {
         return Ok(None);
     }
     let passkey_id =
-        super::passkey::insert(&mut *tx, person_id, credential_id, credential_json).await?;
+        super::passkey::insert_labeled(&mut *tx, person_id, credential_id, credential_json, label)
+            .await?;
     super::audit::record(
         &mut *tx,
         Some(person_id),
@@ -136,6 +149,21 @@ pub async fn complete(
         &[],
     )
     .await?;
+    if devices == Devices::ReplaceExisting {
+        let replaced =
+            super::passkey::revoke_all_except(&mut *tx, person_id, passkey_id, None).await?;
+        for id in replaced {
+            super::audit::record(
+                &mut *tx,
+                Some(person_id),
+                "passkey.revoked",
+                "passkey",
+                Some(id),
+                &[],
+            )
+            .await?;
+        }
+    }
     tx.commit().await?;
     Ok(Some(passkey_id))
 }
@@ -236,10 +264,18 @@ mod tests {
             .await
             .unwrap();
         let h = token_hash(&t.raw);
-        let id = complete(&pool, &h, p, b"cred-1", serde_json::json!({}))
-            .await
-            .unwrap()
-            .unwrap();
+        let id = complete(
+            &pool,
+            &h,
+            p,
+            b"cred-1",
+            serde_json::json!({}),
+            None,
+            Devices::AddToExisting,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(peek_valid(&pool, &t.raw).await.unwrap(), None);
         let stored = super::super::passkey::find_by_credential_id(&pool, b"cred-1")
             .await
@@ -256,10 +292,18 @@ mod tests {
         assert_eq!(audit, 1);
         // Second use: nothing happens.
         assert!(
-            complete(&pool, &h, p, b"cred-2", serde_json::json!({}))
-                .await
-                .unwrap()
-                .is_none()
+            complete(
+                &pool,
+                &h,
+                p,
+                b"cred-2",
+                serde_json::json!({}),
+                None,
+                Devices::AddToExisting
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
     }
 
@@ -275,17 +319,33 @@ mod tests {
         let h = token_hash(&t.raw);
         // Passkey insert fails (credential id taken): the token must not be burnt.
         assert!(
-            complete(&pool, &h, a, b"dup", serde_json::json!({}))
-                .await
-                .is_err()
+            complete(
+                &pool,
+                &h,
+                a,
+                b"dup",
+                serde_json::json!({}),
+                None,
+                Devices::AddToExisting
+            )
+            .await
+            .is_err()
         );
         assert_eq!(peek_valid(&pool, &t.raw).await.unwrap(), Some(a));
         // Token of another person than the ceremony's: rejected, token untouched.
         assert!(
-            complete(&pool, &h, b, b"fresh", serde_json::json!({}))
-                .await
-                .unwrap()
-                .is_none()
+            complete(
+                &pool,
+                &h,
+                b,
+                b"fresh",
+                serde_json::json!({}),
+                None,
+                Devices::AddToExisting
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
         assert_eq!(peek_valid(&pool, &t.raw).await.unwrap(), Some(a));
         let audit: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log")
@@ -314,5 +374,79 @@ mod tests {
             }
         }
         assert_eq!(winners, 1);
+    }
+
+    async fn enroll(pool: &PgPool, p: Uuid, cred: &[u8], devices: Devices) -> Uuid {
+        let t = issue_token(pool, p, None, Duration::minutes(15))
+            .await
+            .unwrap();
+        complete(
+            pool,
+            &token_hash(&t.raw),
+            p,
+            cred,
+            serde_json::json!({}),
+            Some("Android – Chrome"),
+            devices,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn replacing_enrollment_revokes_the_previous_passkeys(pool: PgPool) {
+        let (p, other) = (person(&pool).await, person(&pool).await);
+        let other_pk = enroll(&pool, other, b"o1", Devices::ReplaceExisting).await;
+        let old = enroll(&pool, p, b"c1", Devices::ReplaceExisting).await;
+        let new = enroll(&pool, p, b"c2", Devices::ReplaceExisting).await;
+        let active = super::super::passkey::devices_of(&pool, p).await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, new);
+        assert_eq!(active[0].label.as_deref(), Some("Android – Chrome"));
+        let before = Utc::now();
+        assert!(
+            !super::super::person::session_is_valid(&pool, p, old, before)
+                .await
+                .unwrap()
+        );
+        // The new device and other people are untouched.
+        assert!(
+            super::super::person::session_is_valid(&pool, p, new, Utc::now())
+                .await
+                .unwrap()
+        );
+        assert!(
+            super::super::person::session_is_valid(&pool, other, other_pk, before)
+                .await
+                .unwrap()
+        );
+        let revoked: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_log WHERE action = 'passkey.revoked' AND entity_id = $1",
+        )
+        .bind(old)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(revoked, 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn adding_enrollment_keeps_the_previous_passkeys(pool: PgPool) {
+        let p = person(&pool).await;
+        let first = enroll(&pool, p, b"c1", Devices::AddToExisting).await;
+        let second = enroll(&pool, p, b"c2", Devices::AddToExisting).await;
+        let ids: Vec<Uuid> = super::super::passkey::devices_of(&pool, p)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(ids, vec![first, second]);
+        assert!(
+            super::super::person::session_is_valid(&pool, p, first, Utc::now())
+                .await
+                .unwrap()
+        );
     }
 }

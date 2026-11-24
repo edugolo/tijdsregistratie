@@ -1,9 +1,11 @@
 //! Server-only code: auth, sessions. The repository lives in the `store` crate. Server function declarations live in `crate::api`.
 
+pub mod api_v1;
 pub mod auth;
 pub mod clock;
 pub mod config;
 pub mod geocode;
+pub mod hours;
 pub mod passkey;
 pub mod session;
 pub mod setup;
@@ -49,6 +51,18 @@ pub async fn app_state() -> Result<AppState, ServerFnError> {
 /// Fetches the request's `Session` from the current server function request.
 pub async fn session() -> Result<Session, ServerFnError> {
     FullstackContext::extract::<Session, _>().await
+}
+
+/// The `User-Agent` header of the current server function request, if present and readable.
+pub async fn user_agent() -> Option<String> {
+    let headers = FullstackContext::extract::<axum::http::HeaderMap, _>()
+        .await
+        .ok()?;
+    headers
+        .get(axum::http::header::USER_AGENT)?
+        .to_str()
+        .ok()
+        .map(str::to_string)
 }
 
 /// Runs the app: binds `IP`/`PORT` (default 127.0.0.1:8080) and serves the router with the peer
@@ -134,6 +148,7 @@ pub async fn build_router(app: fn() -> dioxus::prelude::Element) -> anyhow::Resu
     let state = AppState::new(pool, config, keys, blind)?;
     let router = dioxus::server::router(app)
         .route("/theme.css", axum::routing::get(theme::theme_css))
+        .merge(api_v1::router(state.clone()))
         .layer(Extension(state));
     let router = auth::http::with_session(router, session_layer, guard.clone());
     Ok(auth::http::protect(router, guard))
