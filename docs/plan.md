@@ -293,8 +293,8 @@ Depends on Uren (hours overview), corrections and validation.
   - Endpoints: `GET /people`, `PUT /people/{external_id}` (HR sync upsert), `GET /hours`,
     `GET /exports/{profile}`, `GET /periods`. Webhooks later (e.g. period validated).
   - **OpenAPI** generated from code with `utoipa` (+ `utoipa-axum`), served at `/api/v1/openapi.json`;
-    interactive docs with **RapiDoc** via `utoipa-rapidoc` at `/api/v1/docs`. The RapiDoc script is
-    vendored in `public/` (no CDN) so the strict CSP stays intact; the docs page can be disabled by
-    configuration.
+    interactive docs with **Scalar** via `utoipa-scalar` at `/api/v1/docs` (owner's choice over
+    RapiDoc). The Scalar script is vendored in `public/` (no CDN) so the strict CSP stays intact; the
+    docs page can be disabled by configuration.
 - **Outbound connectors**: "send directly" next to "download" (e.g. Acerta REST API if access is
   granted); connector credentials stored encrypted with the data key.
