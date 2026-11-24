@@ -7,3 +7,5 @@ node_modules
 # e2e browser tests
 tests/e2e/node_modules
 tests/e2e/artifacts
+tests/e2e/test-results
+tests/e2e/playwright-report

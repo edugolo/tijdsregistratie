@@ -1,4 +1,4 @@
-import { expect, test, Browser, Page } from '@playwright/test';
+import { expect, test, Browser, Page, Request } from '@playwright/test';
 import { Client } from 'pg';
 import {
   AT_SCHOOL,
@@ -197,12 +197,19 @@ test('2. admin adds Fatima, links her phone through the enrollment link', async 
 test('3. employee in the zone: one START event, then STOP gives the day summary', async () => {
   const { page } = fatima;
   const before = await countEvents();
+  // Both clicks of the double click run before dblclick() returns, so every clock request that
+  // the app sends for them is already on the wire; the responses settle the count.
+  const clockRequests: Promise<unknown>[] = [];
+  const onRequest = (r: Request) => {
+    if (r.url().endsWith('/api/clock')) clockRequests.push(r.response());
+  };
+  page.on('request', onRequest);
   await page.getByRole('button', { name: 'Start je dag' }).dblclick();
   await expect(page.getByText(/Gestart om \d{2}:\d{2}/)).toBeVisible();
   await shot(page, '07-employee-working');
-  // Give a possible second request time to land before counting.
-  await expect.poll(countEvents, { timeout: 5000 }).toBe(before + 1);
-  await page.waitForTimeout(1500);
+  await Promise.all(clockRequests);
+  page.off('request', onRequest);
+  expect(clockRequests).toHaveLength(1);
   expect(await countEvents()).toBe(before + 1);
 
   await openToday(admin.page);
@@ -426,6 +433,15 @@ test('7d. admin links a second device in Mijn toestellen, both sign in, then one
   await expect(devices).toHaveCount(1);
 });
 
+/** The day label of the Uren table ("ma 24 nov") for an ISO date. */
+function dayLabel(iso: string): string {
+  const days = ['zo', 'ma', 'di', 'wo', 'do', 'vr', 'za'];
+  const months = ['jan', 'feb', 'mrt', 'apr', 'mei', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec'];
+  const [y, m, d] = iso.split('-').map(Number);
+  const weekday = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  return `${days[weekday]} ${d} ${months[m - 1]}`;
+}
+
 /** Hours and minutes of "now" in the browser time zone, as `<input type="time">` writes them. */
 async function nowClock(page: Page): Promise<string> {
   return page.evaluate(() =>
@@ -480,7 +496,10 @@ test('7e. admin follows up the hours: correct a day, validate the period, a corr
   const yesterday = await orgYesterday(page);
   await page.locator('#hours-from').fill(yesterday);
   await page.locator('#hours-to').fill(yesterday);
-  await expect(card('Amira Test')).toBeVisible();
+  // The card of the earlier period stays on screen until the new period has loaded: wait for the
+  // day row of yesterday, which only exists after the change applied.
+  await expect(card('Amira Test').locator('tbody tr')).toHaveCount(1);
+  await expect(card('Amira Test').locator('button.st-link')).toHaveText(dayLabel(yesterday));
 
   // Validate the period: the confirmation lists the open points. The day panel stays open.
   const [dayResponse] = await Promise.all([

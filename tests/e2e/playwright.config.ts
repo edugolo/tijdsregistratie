@@ -16,6 +16,8 @@ export default defineConfig({
   reporter: [['list']],
   use: {
     headless: true,
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
     locale: 'nl-BE',
     timezoneId: 'Europe/Brussels',
     launchOptions: {
