@@ -1,5 +1,5 @@
 /* Tijdsregistratie service worker. Bump CACHE_VERSION to invalidate all caches. */
-const CACHE_VERSION = "v2";
+const CACHE_VERSION = "v3";
 const CACHE = `tijdsregistratie-${CACHE_VERSION}`;
 const SHELL = [
   "/",
@@ -36,12 +36,32 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+// Content-hashed files (Dioxus "-dxh<hash>" assets) never change under the same URL: cache-first.
+function isImmutableAsset(url) {
+  return url.pathname.startsWith("/assets/") && /-dxh[0-9a-f]+\./.test(url.pathname);
+}
+
+// Everything else static keeps its URL across builds (e.g. /wasm/app.js and app_bg.wasm, which must
+// stay in step with the server-rendered HTML): network-first, cache only as offline fallback.
 function isStaticAsset(url) {
   return (
     url.pathname.startsWith("/assets/") ||
     url.pathname.startsWith("/wasm/") ||
     /\.(?:wasm|js|css|png|svg|ico|webp|woff2?|webmanifest)$/.test(url.pathname)
   );
+}
+
+async function networkFirstAsset(request) {
+  const cache = await caches.open(CACHE);
+  try {
+    const response = await fetch(request);
+    if (response.ok && response.type === "basic") cache.put(request, response.clone());
+    return response;
+  } catch (err) {
+    const cached = await cache.match(request);
+    if (cached) return cached;
+    throw err;
+  }
 }
 
 async function networkFirstNavigation(request) {
@@ -89,7 +109,9 @@ self.addEventListener("fetch", (event) => {
 
   if (request.mode === "navigate") {
     event.respondWith(networkFirstNavigation(request));
-  } else if (isStaticAsset(url)) {
+  } else if (isImmutableAsset(url)) {
     event.respondWith(cacheFirstWithRefresh(event));
+  } else if (isStaticAsset(url)) {
+    event.respondWith(networkFirstAsset(request));
   }
 });
