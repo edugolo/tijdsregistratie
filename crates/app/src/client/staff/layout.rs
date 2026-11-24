@@ -1,4 +1,4 @@
-//! Persistent shell of the manager and admin pages: app bar with the three destinations and the
+//! Persistent shell of the manager, HR and admin pages: app bar with the three destinations and the
 //! signed-in person. It is the layout route of the staff pages, so it stays mounted while the
 //! content below it changes, and it loads the [`StaffContext`] once for all of them.
 
@@ -49,11 +49,11 @@ impl StaffNav {
     }
 }
 
-/// Destinations for a role: "Instellingen" for admins only. Managers see their own sites in the
-/// other two.
-pub fn nav_items(is_admin: bool) -> Vec<StaffNav> {
+/// Destinations for a role: "Instellingen" for admins (everything) and HR (only "Weergave").
+/// Managers see their own sites in the other two.
+pub fn nav_items(is_admin: bool, is_hr: bool) -> Vec<StaffNav> {
     let mut items = vec![StaffNav::Today, StaffNav::People];
-    if is_admin {
+    if is_admin || is_hr {
         items.push(StaffNav::Settings);
     }
     items
@@ -64,7 +64,10 @@ pub fn StaffLayout() -> Element {
     let context = use_loaded(staff_context);
     let ctx = context.get();
     let active = StaffNav::of(&use_route::<Route>());
-    let items = nav_items(ctx.as_ref().is_some_and(|c| c.is_admin));
+    let items = nav_items(
+        ctx.as_ref().is_some_and(|c| c.is_admin),
+        ctx.as_ref().is_some_and(|c| c.is_hr),
+    );
     let org_name = use_org_name();
     let initial = org_name
         .chars()
@@ -143,14 +146,22 @@ mod tests {
 
     #[test]
     fn manager_sees_today_and_people() {
-        assert_eq!(nav_items(false), vec![StaffNav::Today, StaffNav::People]);
+        assert_eq!(
+            nav_items(false, false),
+            vec![StaffNav::Today, StaffNav::People]
+        );
     }
 
     #[test]
     fn admin_also_sees_settings() {
         assert_eq!(
-            nav_items(true),
+            nav_items(true, false),
             vec![StaffNav::Today, StaffNav::People, StaffNav::Settings]
         );
+    }
+
+    #[test]
+    fn hr_sees_settings_too_but_only_appearance_is_inside() {
+        assert_eq!(nav_items(false, true), nav_items(true, false));
     }
 }

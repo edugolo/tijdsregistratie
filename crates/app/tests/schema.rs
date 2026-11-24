@@ -113,6 +113,21 @@ async fn admin_requires_null_site_others_require_site(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
+async fn hr_requires_null_site_like_admin(pool: PgPool) {
+    let p = person(&pool).await;
+    let s = site(&pool).await;
+    assert!(role(&pool, p, "hr", Some(s)).await.is_err());
+    assert!(role(&pool, p, "hr", None).await.is_ok());
+    // The unique index treats the missing site as one value: a second hr row is a duplicate.
+    assert!(role(&pool, p, "hr", None).await.is_err());
+    // Other roles keep their rules.
+    assert!(role(&pool, p, "manager", None).await.is_err());
+    assert!(role(&pool, p, "employee", Some(s)).await.is_ok());
+    assert!(role(&pool, p, "admin", Some(s)).await.is_err());
+    assert!(role(&pool, p, "janitor", None).await.is_err());
+}
+
+#[sqlx::test(migrations = "../../migrations")]
 async fn duplicate_roles_rejected(pool: PgPool) {
     let p = person(&pool).await;
     let s = site(&pool).await;

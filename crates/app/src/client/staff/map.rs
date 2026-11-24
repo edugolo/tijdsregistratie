@@ -16,16 +16,39 @@ pub fn role_label(role: RoleDto) -> String {
     match role {
         RoleDto::Employee => fl!(LANGUAGE_LOADER, "role-employee"),
         RoleDto::Manager => fl!(LANGUAGE_LOADER, "role-manager"),
+        RoleDto::Hr => fl!(LANGUAGE_LOADER, "role-hr"),
         RoleDto::Admin => fl!(LANGUAGE_LOADER, "role-admin"),
     }
 }
 
 /// The single role shown for a person: the highest one, employee when they have none.
 pub fn highest_role(person: &PersonRowDto) -> RoleDto {
-    [RoleDto::Admin, RoleDto::Manager]
+    [RoleDto::Admin, RoleDto::Hr, RoleDto::Manager]
         .into_iter()
         .find(|wanted| person.roles.iter().any(|r| r.role == *wanted))
         .unwrap_or(RoleDto::Employee)
+}
+
+/// Admin and HR work for the whole organisation: they have no school.
+pub fn is_organisation_role(role: RoleDto) -> bool {
+    matches!(role, RoleDto::Admin | RoleDto::Hr)
+}
+
+/// Roles the signed-in person may hand out, in display order. Admins all of them, HR only
+/// employee and manager, a manager only employee (the server checks again).
+pub fn grantable_roles(is_admin: bool, is_hr: bool) -> Vec<RoleDto> {
+    if is_admin {
+        vec![
+            RoleDto::Employee,
+            RoleDto::Manager,
+            RoleDto::Hr,
+            RoleDto::Admin,
+        ]
+    } else if is_hr {
+        vec![RoleDto::Employee, RoleDto::Manager]
+    } else {
+        vec![RoleDto::Employee]
+    }
 }
 
 /// Ids of the schools a person works or manages at, without duplicates.
@@ -45,6 +68,15 @@ pub fn school_names(person: &PersonRowDto) -> String {
         }
     }
     names.join(", ")
+}
+
+/// The schools shown next to the role: none for admin and HR, who have no school.
+pub fn shown_schools(person: &PersonRowDto) -> String {
+    if is_organisation_role(highest_role(person)) {
+        String::new()
+    } else {
+        school_names(person)
+    }
 }
 
 /// Case-insensitive "contains" on the name; an empty query matches everyone.
@@ -148,6 +180,56 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn hr_ranks_between_admin_and_manager() {
+        let hr = person(vec![
+            (RoleDto::Employee, Some(1), Some("Linde")),
+            (RoleDto::Hr, None, None),
+            (RoleDto::Manager, Some(2), Some("Wilg")),
+        ]);
+        assert_eq!(highest_role(&hr), RoleDto::Hr);
+        let admin = person(vec![
+            (RoleDto::Hr, None, None),
+            (RoleDto::Admin, None, None),
+        ]);
+        assert_eq!(highest_role(&admin), RoleDto::Admin);
+    }
+
+    #[test]
+    fn admin_and_hr_show_no_school() {
+        let admin = person(vec![
+            (RoleDto::Admin, None, None),
+            (RoleDto::Manager, Some(1), Some("Linde")),
+        ]);
+        assert_eq!(shown_schools(&admin), "");
+        let hr = person(vec![
+            (RoleDto::Hr, None, None),
+            (RoleDto::Employee, Some(1), Some("Linde")),
+        ]);
+        assert_eq!(shown_schools(&hr), "");
+        let manager = person(vec![(RoleDto::Manager, Some(1), Some("Linde"))]);
+        assert_eq!(shown_schools(&manager), "Linde");
+        assert!(is_organisation_role(RoleDto::Hr) && !is_organisation_role(RoleDto::Manager));
+    }
+
+    #[test]
+    fn only_admins_grant_admin_and_hr() {
+        assert_eq!(
+            grantable_roles(true, false),
+            vec![
+                RoleDto::Employee,
+                RoleDto::Manager,
+                RoleDto::Hr,
+                RoleDto::Admin
+            ]
+        );
+        assert_eq!(
+            grantable_roles(false, true),
+            vec![RoleDto::Employee, RoleDto::Manager]
+        );
+        assert_eq!(grantable_roles(false, false), vec![RoleDto::Employee]);
     }
 
     #[test]

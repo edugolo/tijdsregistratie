@@ -123,6 +123,13 @@ i18n: i18n-embed + `fl!`. Messages live in `crates/app/i18n/<locale>/app.ftl`; a
   views, corrects and exports hours for all sites; adds people and links devices for employees and
   managers at any site; cannot grant the admin or HR role, cannot change settings, sites or branding.
   Only admins grant admin/HR.
+  Implementation: HR may set a person's role between employee and manager and their sites, link and
+  revoke devices and deactivate, but not for people who hold the admin or HR role (those are
+  view-only for HR). Settings, sites, branding and geocoding stay admin only; HR only gets
+  "Weergave" under Instellingen. HR does not count as a working admin for the lockout protection.
+  The scope is `StaffScope { kind: Admin | Hr | Manager, site_ids }` with `can_view_all_sites()`,
+  `can_manage_settings()` and `can_grant_role(role)`; future hour views and exports for all sites
+  check `can_view_all_sites()`.
 - Every server function checks scope on the server.
 - Every manager/admin mutation writes an audit row (who, what, when; ids only, no plaintext personal data).
 

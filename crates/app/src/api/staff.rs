@@ -1,5 +1,5 @@
-//! Server functions for managers and admins.
-//! Staff operations: manager and admin views, enrollment and site management.
+//! Server functions for managers, HR and admins.
+//! Staff operations: manager, HR and admin views, enrollment and site management.
 //!
 //! The DTOs are shaped so the staff UI components can be fed directly. Timestamps are unix
 //! milliseconds (the web target has no chrono). The logic lives in `crate::server::staff`.
@@ -19,6 +19,8 @@ pub struct StaffContext {
     pub person_id: Uuid,
     pub first_name: String,
     pub is_admin: bool,
+    /// Personeelsdienst: all sites like an admin, but no settings and no admin or HR changes.
+    pub is_hr: bool,
     pub sites: Vec<SiteOption>,
 }
 
@@ -87,6 +89,7 @@ pub enum EnrollStateDto {
 pub enum RoleDto {
     Employee,
     Manager,
+    Hr,
     Admin,
 }
 
@@ -134,6 +137,12 @@ pub struct PersonRowDto {
     pub roles: Vec<RoleRowDto>,
 }
 
+impl StaffContext {
+    pub fn can_view_all_sites(&self) -> bool {
+        self.is_admin || self.is_hr
+    }
+}
+
 #[post("/api/staff/context")]
 pub async fn staff_context() -> Result<StaffContext, ServerFnError> {
     use crate::server::{app_state, auth, staff};
@@ -161,17 +170,17 @@ pub async fn people(site_filter: Option<Uuid>) -> Result<Vec<PersonRowDto>, Serv
     Ok(staff::people(&staff::StaffEnv::new(&state), &scope, site_filter).await?)
 }
 
-/// Admin only.
-#[post("/api/admin/people/role")]
+/// Admins and HR; the logic limits which roles each may give and to whom.
+#[post("/api/staff/people/role")]
 pub async fn set_person_role(person_id: Uuid, role: RoleDto) -> Result<(), ServerFnError> {
     use crate::server::{app_state, auth, staff};
-    let scope = auth::require_admin().await?;
+    let scope = auth::require_staff().await?;
     let state = app_state().await?;
     let env = staff::StaffEnv::new(&state);
     Ok(staff::set_person_role(&env, &scope, person_id, role).await?)
 }
 
-/// Admins for any sites, managers for sites and employees in their own scope.
+/// Admins and HR for any sites, managers for sites and employees in their own scope.
 #[post("/api/staff/people/sites")]
 pub async fn set_person_sites(person_id: Uuid, site_ids: Vec<Uuid>) -> Result<(), ServerFnError> {
     use crate::server::{app_state, auth, staff};

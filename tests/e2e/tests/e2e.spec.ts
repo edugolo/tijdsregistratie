@@ -261,7 +261,7 @@ test('7b. admin adds and edits a school in Instellingen', async () => {
   await page.getByRole('button', { name: 'Opslaan' }).click();
   await expect(page.getByText('Vul een naam in.')).toBeVisible();
 
-  await page.getByLabel('Naam').fill('Tweede School');
+  await page.getByLabel('Naam', { exact: true }).fill('Tweede School');
   await page.getByLabel('Adres').fill('Voorbeeldlaan 2');
   await page.getByLabel('Breedtegraad').fill('50,86');
   await page.getByLabel('Lengtegraad').fill('4.36');
@@ -280,18 +280,49 @@ test('7b. admin adds and edits a school in Instellingen', async () => {
   await expect(page.getByLabel('Adres')).toHaveValue('Voorbeeldlaan 2');
   await page.getByRole('button', { name: 'School toevoegen' }).click();
   await expect(page.getByRole('heading', { name: 'Nieuwe school' })).toBeVisible();
-  await expect(page.getByLabel('Naam')).toHaveValue('');
+  await expect(page.getByLabel('Naam', { exact: true })).toHaveValue('');
 
   // Unsaved changes are only discarded after confirmation.
   await page.getByRole('button', { name: 'Bewerken: Tweede School' }).click();
-  await page.getByLabel('Naam').fill('Tweede School bis');
+  await page.getByLabel('Naam', { exact: true }).fill('Tweede School bis');
   await page.getByRole('button', { name: 'School toevoegen' }).click();
   await expect(page.getByRole('button', { name: 'Wijzigingen weggooien' })).toBeVisible();
   await page.getByRole('button', { name: 'Verder bewerken' }).click();
-  await expect(page.getByLabel('Naam')).toHaveValue('Tweede School bis');
+  await expect(page.getByLabel('Naam', { exact: true })).toHaveValue('Tweede School bis');
   await page.getByRole('button', { name: 'Opslaan' }).click();
   await expect(row(page, 'Tweede School bis')).toBeVisible();
   await expect(page.getByRole('heading', { name: /School bewerken/ })).toHaveCount(0);
+});
+
+test('7c. admin adds an HR person (personeelsdienst) without a school', async () => {
+  const { page } = admin;
+  await openPeople(page);
+  await page.getByRole('button', { name: 'Persoon toevoegen' }).click();
+
+  // The validation message sits outside the label: the field keeps its plain accessible name.
+  await page.getByRole('button', { name: 'Toevoegen', exact: true }).click();
+  await expect(page.getByRole('alert').filter({ hasText: 'Vul een naam in.' })).toBeVisible();
+  await expect(page.getByLabel('Naam', { exact: true })).toHaveAttribute('aria-invalid', 'true');
+
+  await page.getByLabel('Naam', { exact: true }).fill('Hanne Personeel');
+  await expect(page.getByLabel('School', { exact: true })).toBeVisible();
+  await page.locator('label.st-seg', { hasText: 'Personeelsdienst' }).click();
+  // HR works for the whole organisation: no school to choose.
+  await expect(page.getByLabel('School', { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Toevoegen', exact: true }).click();
+
+  const hr = row(page, 'Hanne Personeel');
+  await expect(hr).toBeVisible();
+  await expect(hr).toContainText('Personeelsdienst');
+  await expect(hr).not.toContainText('Basisschool Voorbeeld');
+  const panel = page.locator('aside.st-panel');
+  await expect(panel.getByRole('heading', { name: 'Hanne Personeel' })).toBeVisible();
+  await expect(panel).toContainText('Personeelsdienst');
+  await expect(panel.locator('header p')).not.toContainText('·');
+
+  // An admin who is also manager of a school shows "Beheerder" only, not the school.
+  await row(page, 'Beheerder Test').getByRole('button').click();
+  await expect(panel.locator('header p')).toHaveText('Beheerder');
 });
 
 test('8. security headers and no CSP violations', async ({ request }) => {

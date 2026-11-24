@@ -3,11 +3,13 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
+use super::field::{Field, error_id};
 use super::flow::{EnrollFlow, ErrorNotice, report_error};
 use super::icons::{Icon, IconKind};
 use super::load::{Skeleton, use_loaded};
 use super::map::{
-    highest_role, matches_query, person_sites, role_label, school_names, toggle_site,
+    grantable_roles, highest_role, is_organisation_role, matches_query, person_sites, role_label,
+    shown_schools, toggle_site,
 };
 use crate::api::staff::{
     PersonRowDto, RoleDto, SiteOption, StaffContext, add_member, people as fetch_people,
@@ -20,6 +22,7 @@ use i18n_embed_fl::fl;
 #[component]
 pub fn StaffPeoplePage(open: String) -> Element {
     let ctx = use_context::<StaffContext>();
+    let grantable = grantable_roles(ctx.is_admin, ctx.is_hr);
     let mut site_filter = use_signal(|| None::<Uuid>);
     let mut query = use_signal(String::new);
     let mut selected = use_signal(|| Uuid::parse_str(&open).ok());
@@ -41,7 +44,7 @@ pub fn StaffPeoplePage(open: String) -> Element {
         section { class: "st-page",
             div { class: "st-page-head",
                 h1 { {fl!(LANGUAGE_LOADER, "people-title")} }
-                if ctx.is_admin || !ctx.sites.is_empty() {
+                if ctx.can_view_all_sites() || !ctx.sites.is_empty() {
                     button {
                         class: "st-btn",
                         r#type: "button",
@@ -54,7 +57,7 @@ pub fn StaffPeoplePage(open: String) -> Element {
             if adding() {
                 AddPerson {
                     sites: ctx.sites.clone(),
-                    is_admin: ctx.is_admin,
+                    grantable: grantable.clone(),
                     on_close: move |_| adding.set(false),
                     // Open the new person's panel: linking a device is the next step.
                     on_added: move |id| {
@@ -113,7 +116,8 @@ pub fn StaffPeoplePage(open: String) -> Element {
                         is_self: person.id == ctx.person_id,
                         person,
                         sites: ctx.sites.clone(),
-                        is_admin: ctx.is_admin,
+                        grantable,
+                        can_view_all: ctx.can_view_all_sites(),
                         on_close: move |_| selected.set(None),
                         on_changed: move |_| list.reload(),
                     }
@@ -175,10 +179,11 @@ fn PeopleList(
 fn PersonRow(person: PersonRowDto, selected: bool, on_select: EventHandler<Uuid>) -> Element {
     let id = person.id;
     let role = highest_role(&person);
-    let schools = school_names(&person);
+    let schools = shown_schools(&person);
     let role_class = match role {
         RoleDto::Employee => "st-chip st-chip-neutral",
         RoleDto::Manager => "st-chip st-chip-secondary",
+        RoleDto::Hr => "st-chip st-chip-hr",
         RoleDto::Admin => "st-chip st-chip-brand",
     };
     rsx! {
@@ -218,24 +223,28 @@ enum NewPersonError {
     School,
 }
 
-/// Whether the role comes with a school: admins work for the whole organisation.
+/// Whether the role comes with a school: admin and HR work for the whole organisation.
 fn needs_school(role: RoleDto) -> bool {
-    role != RoleDto::Admin
+    !is_organisation_role(role)
 }
 
-/// Checks the form. Only admins choose a role; for everyone else the role is employee. A
-/// manager or employee needs a school, an admin has none.
+/// Checks the form. Only a role the signed-in person may grant is used, otherwise the role is
+/// employee. An employee or manager needs a school, admin and HR have none.
 fn check_new_person(
     name: &str,
     role: RoleDto,
     site: Option<Uuid>,
-    is_admin: bool,
+    grantable: &[RoleDto],
 ) -> Result<(String, RoleDto, Option<Uuid>), NewPersonError> {
     let name = name.trim();
     if name.is_empty() {
         return Err(NewPersonError::Name);
     }
-    let role = if is_admin { role } else { RoleDto::Employee };
+    let role = if grantable.contains(&role) {
+        role
+    } else {
+        RoleDto::Employee
+    };
     if !needs_school(role) {
         return Ok((name.to_string(), role, None));
     }
@@ -246,7 +255,7 @@ fn check_new_person(
 #[component]
 fn AddPerson(
     sites: Vec<SiteOption>,
-    is_admin: bool,
+    grantable: Vec<RoleDto>,
     on_close: EventHandler<()>,
     on_added: EventHandler<Uuid>,
 ) -> Element {
@@ -262,7 +271,7 @@ fn AddPerson(
             novalidate: true,
             onsubmit: move |e| {
                 e.prevent_default();
-                match check_new_person(&name.read(), role(), site(), is_admin) {
+                match check_new_person(&name.read(), role(), site(), &grantable) {
                     Err(found) => problem.set(Some(found)),
                     Ok((typed, chosen, school)) => {
                         problem.set(None);
@@ -278,28 +287,28 @@ fn AddPerson(
                 }
             },
             ErrorNotice { message }
-            label { class: "st-field",
-                span { {fl!(LANGUAGE_LOADER, "people-add-name")} }
+            Field {
+                control_id: "person-name",
+                label: fl!(LANGUAGE_LOADER, "people-add-name"),
+                error: (problem() == Some(NewPersonError::Name))
+                    .then(|| fl!(LANGUAGE_LOADER, "people-add-err-name")),
                 input {
+                    id: "person-name",
                     class: "st-input",
                     r#type: "text",
                     autocomplete: "off",
                     aria_invalid: problem() == Some(NewPersonError::Name),
+                    aria_describedby: (problem() == Some(NewPersonError::Name))
+                        .then(|| error_id("person-name")),
                     value: "{name}",
                     oninput: move |e| name.set(e.value()),
                 }
-                if problem() == Some(NewPersonError::Name) {
-                    span { class: "st-error", role: "alert",
-                        Icon { kind: IconKind::Alert, size: 14 }
-                        {fl!(LANGUAGE_LOADER, "people-add-err-name")}
-                    }
-                }
             }
-            if is_admin {
+            if grantable.len() > 1 {
                 div { class: "st-field", role: "radiogroup", aria_label: fl!(LANGUAGE_LOADER, "people-add-role"),
                     span { {fl!(LANGUAGE_LOADER, "people-add-role")} }
                     div { class: "st-segmented",
-                        for option in [RoleDto::Employee, RoleDto::Manager, RoleDto::Admin] {
+                        for option in grantable.iter().copied() {
                             label {
                                 key: "{option:?}",
                                 class: if option == role() { "st-seg st-seg-on" } else { "st-seg" },
@@ -319,11 +328,17 @@ fn AddPerson(
                 }
             }
             if needs_school(role()) {
-                label { class: "st-field",
-                    span { {fl!(LANGUAGE_LOADER, "people-add-site")} }
+                Field {
+                    control_id: "person-school",
+                    label: fl!(LANGUAGE_LOADER, "people-add-site"),
+                    error: (problem() == Some(NewPersonError::School))
+                        .then(|| fl!(LANGUAGE_LOADER, "people-add-err-school")),
                     select {
+                        id: "person-school",
                         class: "st-input",
                         aria_invalid: problem() == Some(NewPersonError::School),
+                        aria_describedby: (problem() == Some(NewPersonError::School))
+                            .then(|| error_id("person-school")),
                         onchange: move |e| site.set(Uuid::parse_str(&e.value()).ok()),
                         for option in sites.iter() {
                             option {
@@ -332,12 +347,6 @@ fn AddPerson(
                                 selected: site() == Some(option.id),
                                 "{option.name}"
                             }
-                        }
-                    }
-                    if problem() == Some(NewPersonError::School) {
-                        span { class: "st-error", role: "alert",
-                            Icon { kind: IconKind::Alert, size: 14 }
-                            {fl!(LANGUAGE_LOADER, "people-add-err-school")}
                         }
                     }
                 }
@@ -371,7 +380,8 @@ enum Pending {
 fn PersonPanel(
     person: PersonRowDto,
     sites: Vec<SiteOption>,
-    is_admin: bool,
+    grantable: Vec<RoleDto>,
+    can_view_all: bool,
     is_self: bool,
     on_close: EventHandler<()>,
     on_changed: EventHandler<()>,
@@ -383,11 +393,18 @@ fn PersonPanel(
     let role = highest_role(&person);
     let chosen = person_sites(&person);
     let manageable = person.can_manage;
+    // Only admins and HR change roles, and only on people they may manage. The current role is
+    // always listed, also when the signed-in person may not hand it out.
+    let can_set_roles = can_view_all && manageable;
+    let mut role_options = grantable.clone();
+    if !role_options.contains(&role) {
+        role_options.push(role);
+    }
 
     if linking() {
         return rsx! {
             aside { class: "st-panel",
-                PanelHead { name: person.name.clone(), role, schools: school_names(&person), on_close }
+                PanelHead { name: person.name.clone(), role, schools: shown_schools(&person), on_close }
                 EnrollFlow {
                     person_id: id,
                     person_name: person.name.clone(),
@@ -410,7 +427,7 @@ fn PersonPanel(
     };
     rsx! {
         aside { class: "st-panel",
-            PanelHead { name: person.name.clone(), role, schools: school_names(&person), on_close }
+            PanelHead { name: person.name.clone(), role, schools: shown_schools(&person), on_close }
             ErrorNotice { message }
             if !manageable {
                 p { class: "st-sub", {fl!(LANGUAGE_LOADER, "panel-read-only")} }
@@ -455,13 +472,14 @@ fn PersonPanel(
             section { class: "st-panel-section",
                 h3 { {fl!(LANGUAGE_LOADER, "panel-role")} }
                 div { class: "st-radios", role: "radiogroup", aria_label: fl!(LANGUAGE_LOADER, "panel-role"),
-                    for option in [RoleDto::Employee, RoleDto::Manager, RoleDto::Admin] {
+                    for option in role_options {
                         label { key: "{option:?}", class: "st-radio",
                             input {
                                 r#type: "radio",
                                 name: "role",
                                 checked: option == role,
-                                disabled: !is_admin
+                                disabled: !can_set_roles
+                                    || !grantable.contains(&option)
                                     || is_self
                                     || (option == RoleDto::Manager && chosen.is_empty()),
                                 onchange: move |_| {
@@ -472,14 +490,14 @@ fn PersonPanel(
                         }
                     }
                 }
-                if !is_admin {
+                if !can_view_all {
                     p { class: "st-sub", {fl!(LANGUAGE_LOADER, "panel-role-admin-only")} }
                 }
             }
 
             section { class: "st-panel-section",
                 h3 { {fl!(LANGUAGE_LOADER, "panel-sites")} }
-                if role == RoleDto::Admin {
+                if is_organisation_role(role) {
                     p { class: "st-sub", {fl!(LANGUAGE_LOADER, "panel-admin-sites")} }
                 } else {
                     div { class: "st-chips",
@@ -491,7 +509,7 @@ fn PersonPanel(
                                 // A manager cannot remove the last school: the person would
                                 // leave their view.
                                 disabled: !manageable
-                                    || (!is_admin && chosen == [site.id]),
+                                    || (!can_view_all && chosen == [site.id]),
                                 on_toggle: {
                                     let (site_id, chosen) = (site.id, chosen.clone());
                                     move |on| {
@@ -620,39 +638,69 @@ mod tests {
         Some(Uuid::from_u128(1))
     }
 
+    fn admin() -> Vec<RoleDto> {
+        grantable_roles(true, false)
+    }
+
+    fn hr() -> Vec<RoleDto> {
+        grantable_roles(false, true)
+    }
+
+    fn manager() -> Vec<RoleDto> {
+        grantable_roles(false, false)
+    }
+
     #[test]
-    fn admins_choose_the_role_everyone_else_adds_employees() {
+    fn the_role_is_limited_to_what_the_signed_in_person_may_grant() {
         assert_eq!(
-            check_new_person(" Nina ", RoleDto::Manager, site(), true),
+            check_new_person(" Nina ", RoleDto::Manager, site(), &admin()),
             Ok(("Nina".to_string(), RoleDto::Manager, site()))
         );
         assert_eq!(
-            check_new_person("Nina", RoleDto::Admin, site(), false),
+            check_new_person("Nina", RoleDto::Manager, site(), &hr()),
+            Ok(("Nina".to_string(), RoleDto::Manager, site()))
+        );
+        // HR cannot add HR or admin people, a manager only employees.
+        assert_eq!(
+            check_new_person("Nina", RoleDto::Hr, None, &hr()),
+            Err(NewPersonError::School)
+        );
+        assert_eq!(
+            check_new_person("Nina", RoleDto::Admin, site(), &hr()),
+            Ok(("Nina".to_string(), RoleDto::Employee, site()))
+        );
+        assert_eq!(
+            check_new_person("Nina", RoleDto::Manager, site(), &manager()),
             Ok(("Nina".to_string(), RoleDto::Employee, site()))
         );
     }
 
     #[test]
-    fn an_admin_has_no_school_and_the_others_need_one() {
+    fn admin_and_hr_have_no_school_and_the_others_need_one() {
         assert_eq!(
-            check_new_person("Nina", RoleDto::Admin, site(), true),
+            check_new_person("Nina", RoleDto::Admin, site(), &admin()),
             Ok(("Nina".to_string(), RoleDto::Admin, None))
         );
         assert_eq!(
-            check_new_person("Nina", RoleDto::Manager, None, true),
+            check_new_person("Nina", RoleDto::Hr, site(), &admin()),
+            Ok(("Nina".to_string(), RoleDto::Hr, None))
+        );
+        assert_eq!(
+            check_new_person("Nina", RoleDto::Manager, None, &admin()),
             Err(NewPersonError::School)
         );
         assert_eq!(
-            check_new_person("Nina", RoleDto::Employee, None, false),
+            check_new_person("Nina", RoleDto::Employee, None, &manager()),
             Err(NewPersonError::School)
         );
-        assert!(!needs_school(RoleDto::Admin) && needs_school(RoleDto::Manager));
+        assert!(!needs_school(RoleDto::Admin) && !needs_school(RoleDto::Hr));
+        assert!(needs_school(RoleDto::Manager));
     }
 
     #[test]
     fn a_name_is_required() {
         assert_eq!(
-            check_new_person("  ", RoleDto::Admin, None, true),
+            check_new_person("  ", RoleDto::Admin, None, &admin()),
             Err(NewPersonError::Name)
         );
     }

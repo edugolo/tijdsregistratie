@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::role::{self, Role};
-use super::role::{StaffScope, scope_allows_sites, scope_from_roles};
+use super::role::{ScopeKind, StaffScope, scope_allows_sites, scope_from_roles};
 use super::site::{self, SiteInput, ZonePolicy};
 use super::{audit, person, settings};
 
@@ -288,6 +288,23 @@ async fn roles_assign_revoke_duplicate(pool: PgPool) {
     assert!(!role::revoke(&pool, p.id, Role::Admin, None).await.unwrap());
     assert!(!role::is_admin(&pool, p.id).await.unwrap());
     assert!(
+        role::assign(&pool, p.id, Role::Hr, Some(s.id), None)
+            .await
+            .is_err()
+    );
+    assert!(
+        role::assign(&pool, p.id, Role::Hr, None, None)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !role::assign(&pool, p.id, Role::Hr, None, None)
+            .await
+            .unwrap()
+    );
+    assert!(!role::is_admin(&pool, p.id).await.unwrap());
+    assert!(role::revoke(&pool, p.id, Role::Hr, None).await.unwrap());
+    assert!(
         role::revoke(&pool, p.id, Role::Manager, Some(s.id))
             .await
             .unwrap()
@@ -300,6 +317,7 @@ fn role_strings_match_db() {
     for (r, s) in [
         (Role::Employee, "employee"),
         (Role::Manager, "manager"),
+        (Role::Hr, "hr"),
         (Role::Admin, "admin"),
     ] {
         assert_eq!(r.as_str(), s);
@@ -379,29 +397,59 @@ fn scope_from_roles_cases() {
         &[ra(Role::Manager, Some(s1)), ra(Role::Employee, Some(s2))],
     )
     .unwrap();
-    assert!(!m.is_admin);
+    assert_eq!(m.kind, ScopeKind::Manager);
     assert_eq!(m.site_ids, vec![s1]);
     assert_eq!(m.person_id, p);
 
     let a = scope_from_roles(p, &[ra(Role::Admin, None)]).unwrap();
-    assert!(a.is_admin && a.site_ids.is_empty());
+    assert!(a.is_admin() && a.site_ids.is_empty());
+
+    let h = scope_from_roles(p, &[ra(Role::Hr, None), ra(Role::Employee, Some(s1))]).unwrap();
+    assert!(h.is_hr() && !h.is_admin() && h.site_ids.is_empty());
+    // A manager who is also HR keeps the managed sites but reaches every site as HR.
+    let hm = scope_from_roles(p, &[ra(Role::Manager, Some(s1)), ra(Role::Hr, None)]).unwrap();
+    assert_eq!(hm.kind, ScopeKind::Hr);
+    assert_eq!(hm.site_ids, vec![s1]);
+    // Admin outranks HR.
+    let ah = scope_from_roles(p, &[ra(Role::Hr, None), ra(Role::Admin, None)]).unwrap();
+    assert_eq!(ah.kind, ScopeKind::Admin);
+}
+
+fn scope(kind: ScopeKind, sites: Vec<Uuid>) -> StaffScope {
+    StaffScope {
+        person_id: Uuid::new_v4(),
+        kind,
+        site_ids: sites,
+    }
+}
+
+#[test]
+fn scope_capabilities_per_kind() {
+    let s1 = Uuid::new_v4();
+    let admin = scope(ScopeKind::Admin, vec![]);
+    let hr = scope(ScopeKind::Hr, vec![]);
+    let mgr = scope(ScopeKind::Manager, vec![s1]);
+    assert!(admin.can_view_all_sites() && hr.can_view_all_sites() && !mgr.can_view_all_sites());
+    assert!(admin.can_manage_settings() && !hr.can_manage_settings() && !mgr.can_manage_settings());
+    for role in [Role::Employee, Role::Manager, Role::Hr, Role::Admin] {
+        assert!(admin.can_grant_role(role), "admin grants {role:?}");
+    }
+    assert!(hr.can_grant_role(Role::Employee) && hr.can_grant_role(Role::Manager));
+    assert!(!hr.can_grant_role(Role::Hr) && !hr.can_grant_role(Role::Admin));
+    assert!(mgr.can_grant_role(Role::Employee));
+    assert!(!mgr.can_grant_role(Role::Manager));
+    assert!(!mgr.can_grant_role(Role::Hr) && !mgr.can_grant_role(Role::Admin));
 }
 
 #[test]
 fn scope_allows_sites_cases() {
     let (s1, s2) = (Uuid::new_v4(), Uuid::new_v4());
-    let mgr = StaffScope {
-        person_id: Uuid::new_v4(),
-        is_admin: false,
-        site_ids: vec![s1],
-    };
-    let admin = StaffScope {
-        person_id: Uuid::new_v4(),
-        is_admin: true,
-        site_ids: vec![],
-    };
+    let mgr = scope(ScopeKind::Manager, vec![s1]);
+    let admin = scope(ScopeKind::Admin, vec![]);
+    let hr = scope(ScopeKind::Hr, vec![]);
     assert!(scope_allows_sites(&mgr, &[s2, s1]));
     assert!(!scope_allows_sites(&mgr, &[s2]));
     assert!(!scope_allows_sites(&mgr, &[]));
     assert!(scope_allows_sites(&admin, &[]));
+    assert!(scope_allows_sites(&hr, &[]));
 }

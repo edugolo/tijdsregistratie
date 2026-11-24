@@ -3,6 +3,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
+use super::field::{Field, error_id};
 use super::icons::{Icon, IconKind};
 use crate::api::geocode::GeoSuggestion;
 use crate::client::address_search::{AddressSearch, Look};
@@ -523,23 +524,24 @@ fn SiteEditorPanel(
                         }
                     }
                 },
-                label { class: "st-field",
-                    span { {fl!(LANGUAGE_LOADER, "sites-form-name")} }
+                Field {
+                    control_id: "site-name",
+                    label: fl!(LANGUAGE_LOADER, "sites-form-name"),
+                    error: has_error(SiteField::Name).then(|| SiteField::Name.error()),
                     input {
+                        id: "site-name",
                         class: "st-input",
                         r#type: "text",
                         autocomplete: "off",
                         value: "{raw.name}",
                         aria_invalid: has_error(SiteField::Name),
+                        aria_describedby: has_error(SiteField::Name).then(|| error_id("site-name")),
                         oninput: move |e| {
                             if let Some(form) = editor.write().form_mut() {
                                 form.name = e.value();
                             }
                         },
                         onblur: move |_| editor.write().touch(SiteField::Name),
-                    }
-                    if has_error(SiteField::Name) {
-                        FieldError { field: SiteField::Name }
                     }
                 }
                 AddressSearch {
@@ -595,14 +597,18 @@ fn SiteEditorPanel(
                 details { class: "st-coords", open: coords_open(),
                     summary { {fl!(LANGUAGE_LOADER, "sites-coords-adjust")} }
                     div { class: "st-grid",
-                        label { class: "st-field",
-                            span { {fl!(LANGUAGE_LOADER, "sites-form-lat")} }
+                        Field {
+                            control_id: "site-lat",
+                            label: fl!(LANGUAGE_LOADER, "sites-form-lat"),
+                            error: has_error(SiteField::Lat).then(|| SiteField::Lat.error()),
                             input {
+                                id: "site-lat",
                                 class: "st-input",
                                 r#type: "text",
                                 inputmode: "decimal",
                                 value: "{raw.lat}",
                                 aria_invalid: has_error(SiteField::Lat),
+                                aria_describedby: has_error(SiteField::Lat).then(|| error_id("site-lat")),
                                 oninput: move |e| {
                                     if let Some(form) = editor.write().form_mut() {
                                         form.lat = e.value();
@@ -610,18 +616,19 @@ fn SiteEditorPanel(
                                 },
                                 onblur: move |_| editor.write().touch(SiteField::Lat),
                             }
-                            if has_error(SiteField::Lat) {
-                                FieldError { field: SiteField::Lat }
-                            }
                         }
-                        label { class: "st-field",
-                            span { {fl!(LANGUAGE_LOADER, "sites-form-lng")} }
+                        Field {
+                            control_id: "site-lng",
+                            label: fl!(LANGUAGE_LOADER, "sites-form-lng"),
+                            error: has_error(SiteField::Lng).then(|| SiteField::Lng.error()),
                             input {
+                                id: "site-lng",
                                 class: "st-input",
                                 r#type: "text",
                                 inputmode: "decimal",
                                 value: "{raw.lng}",
                                 aria_invalid: has_error(SiteField::Lng),
+                                aria_describedby: has_error(SiteField::Lng).then(|| error_id("site-lng")),
                                 oninput: move |e| {
                                     if let Some(form) = editor.write().form_mut() {
                                         form.lng = e.value();
@@ -629,21 +636,22 @@ fn SiteEditorPanel(
                                 },
                                 onblur: move |_| editor.write().touch(SiteField::Lng),
                             }
-                            if has_error(SiteField::Lng) {
-                                FieldError { field: SiteField::Lng }
-                            }
                         }
                     }
                 }
                 div { class: "st-grid",
-                    label { class: "st-field",
-                        span { {fl!(LANGUAGE_LOADER, "sites-form-radius")} }
+                    Field {
+                        control_id: "site-radius",
+                        label: fl!(LANGUAGE_LOADER, "sites-form-radius"),
+                        error: has_error(SiteField::Radius).then(|| SiteField::Radius.error()),
                         input {
+                            id: "site-radius",
                             class: "st-input",
                             r#type: "text",
                             inputmode: "numeric",
                             value: "{raw.radius_m}",
                             aria_invalid: has_error(SiteField::Radius),
+                            aria_describedby: has_error(SiteField::Radius).then(|| error_id("site-radius")),
                             oninput: move |e| {
                                 if let Some(form) = editor.write().form_mut() {
                                     form.radius_m = e.value();
@@ -651,18 +659,19 @@ fn SiteEditorPanel(
                             },
                             onblur: move |_| editor.write().touch(SiteField::Radius),
                         }
-                        if has_error(SiteField::Radius) {
-                            FieldError { field: SiteField::Radius }
-                        }
                     }
-                    label { class: "st-field",
-                        span { {fl!(LANGUAGE_LOADER, "sites-form-break-minutes")} }
+                    Field {
+                        control_id: "site-break-minutes",
+                        label: fl!(LANGUAGE_LOADER, "sites-form-break-minutes"),
+                        error: has_error(SiteField::BreakMinutes).then(|| SiteField::BreakMinutes.error()),
                         input {
+                            id: "site-break-minutes",
                             class: "st-input",
                             r#type: "text",
                             inputmode: "numeric",
                             value: "{raw.break_minutes}",
                             aria_invalid: has_error(SiteField::BreakMinutes),
+                            aria_describedby: has_error(SiteField::BreakMinutes).then(|| error_id("site-break-minutes")),
                             oninput: move |e| {
                                 if let Some(form) = editor.write().form_mut() {
                                     form.break_minutes = e.value();
@@ -670,27 +679,25 @@ fn SiteEditorPanel(
                             },
                             onblur: move |_| editor.write().touch(SiteField::BreakMinutes),
                         }
-                        if has_error(SiteField::BreakMinutes) {
-                            FieldError { field: SiteField::BreakMinutes }
-                        }
                     }
-                    label { class: "st-field",
-                        span { {fl!(LANGUAGE_LOADER, "sites-form-break-after")} }
+                    Field {
+                        control_id: "site-break-after",
+                        label: fl!(LANGUAGE_LOADER, "sites-form-break-after"),
+                        error: has_error(SiteField::BreakAfter).then(|| SiteField::BreakAfter.error()),
                         input {
+                            id: "site-break-after",
                             class: "st-input",
                             r#type: "text",
                             inputmode: "numeric",
                             value: "{raw.break_after_minutes}",
                             aria_invalid: has_error(SiteField::BreakAfter),
+                            aria_describedby: has_error(SiteField::BreakAfter).then(|| error_id("site-break-after")),
                             oninput: move |e| {
                                 if let Some(form) = editor.write().form_mut() {
                                     form.break_after_minutes = e.value();
                                 }
                             },
                             onblur: move |_| editor.write().touch(SiteField::BreakAfter),
-                        }
-                        if has_error(SiteField::BreakAfter) {
-                            FieldError { field: SiteField::BreakAfter }
                         }
                     }
                 }
@@ -709,16 +716,6 @@ fn SiteEditorPanel(
                     }
                 }
             }
-        }
-    }
-}
-
-#[component]
-fn FieldError(field: SiteField) -> Element {
-    rsx! {
-        span { class: "st-error", role: "alert",
-            Icon { kind: IconKind::Alert, size: 14 }
-            {field.error()}
         }
     }
 }

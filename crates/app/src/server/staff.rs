@@ -10,7 +10,7 @@ use crypto::{BlindIndexKey, DataKeys};
 use dioxus::prelude::ServerFnError;
 use domain::{EventKind, ZoneStatus};
 use sqlx::{PgConnection, PgExecutor, PgPool, Postgres, Transaction};
-use store::repo::role::{self, Role, StaffScope};
+use store::repo::role::{self, Role, ScopeKind, StaffScope};
 use store::repo::site::{self, Site, SiteInput, ZonePolicy};
 use store::repo::time_event::{self, EventRow};
 use store::repo::{audit, enrollment, passkey, person, settings};
@@ -205,39 +205,45 @@ pub fn qr_svg(url: &str) -> Result<String> {
 // --- guards ---
 
 fn require_admin(scope: &StaffScope) -> Result<()> {
-    scope.is_admin.then_some(()).ok_or(StaffError::Forbidden)
-}
-
-fn check_site(scope: &StaffScope, site_id: Uuid) -> Result<()> {
-    (scope.is_admin || scope.site_ids.contains(&site_id))
+    scope
+        .can_manage_settings()
         .then_some(())
         .ok_or(StaffError::Forbidden)
 }
 
-/// Pure part of the person check for managers: a plain employee (no manager or admin role) whose
-/// employee sites are ALL managed by the scope. People who also work at another site are
-/// admin-only. Admins always pass.
-fn may_manage(scope: &StaffScope, roles: &[role::RoleAssignment]) -> bool {
-    if scope.is_admin {
-        return true;
-    }
-    if roles.iter().any(|r| r.role != Role::Employee) {
-        return false;
-    }
-    let sites: Vec<Uuid> = roles.iter().filter_map(|r| r.site_id).collect();
-    role::scope_covers_all_sites(scope, &sites)
+fn check_site(scope: &StaffScope, site_id: Uuid) -> Result<()> {
+    (scope.can_view_all_sites() || scope.site_ids.contains(&site_id))
+        .then_some(())
+        .ok_or(StaffError::Forbidden)
 }
 
-/// Person scope: admins may act on anyone who exists. Managers only on plain employees whose
-/// employee sites are ALL managed by them (never on a manager or admin, and not on people who also
-/// work at another site: those are admin-only). Unknown people look the same as out-of-scope ones
-/// for managers.
+/// Pure part of the person check. Admins act on anyone. HR acts on anyone who holds neither the
+/// admin nor the HR role (only admins touch those). Managers only on a plain employee (no
+/// manager, HR or admin role) whose employee sites are ALL managed by the scope; people who also
+/// work at another site are admin and HR only.
+fn may_manage(scope: &StaffScope, roles: &[role::RoleAssignment]) -> bool {
+    match scope.kind {
+        ScopeKind::Admin => true,
+        ScopeKind::Hr => !roles
+            .iter()
+            .any(|r| matches!(r.role, Role::Admin | Role::Hr)),
+        ScopeKind::Manager => {
+            if roles.iter().any(|r| r.role != Role::Employee) {
+                return false;
+            }
+            let sites: Vec<Uuid> = roles.iter().filter_map(|r| r.site_id).collect();
+            role::scope_covers_all_sites(scope, &sites)
+        }
+    }
+}
+
+/// Person scope, see [`may_manage`]. Unknown people are `NotFound` for admins and HR (who see
+/// everyone) and look the same as out-of-scope ones for managers.
 async fn check_person(env: &StaffEnv<'_>, scope: &StaffScope, person_id: Uuid) -> Result<()> {
-    if scope.is_admin {
-        return person::get_person(env.pool, env.keys, person_id)
+    if scope.can_view_all_sites() {
+        person::get_person(env.pool, env.keys, person_id)
             .await?
-            .map(|_| ())
-            .ok_or(StaffError::NotFound);
+            .ok_or(StaffError::NotFound)?;
     }
     let roles = role::roles_of(env.pool, person_id).await?;
     may_manage(scope, &roles)
@@ -303,10 +309,20 @@ fn site_row(site: &Site) -> SiteRowDto {
     }
 }
 
+fn role_of_dto(role: RoleDto) -> Role {
+    match role {
+        RoleDto::Employee => Role::Employee,
+        RoleDto::Manager => Role::Manager,
+        RoleDto::Hr => Role::Hr,
+        RoleDto::Admin => Role::Admin,
+    }
+}
+
 fn role_dto(role: Role) -> RoleDto {
     match role {
         Role::Employee => RoleDto::Employee,
         Role::Manager => RoleDto::Manager,
+        Role::Hr => RoleDto::Hr,
         Role::Admin => RoleDto::Admin,
     }
 }
@@ -320,7 +336,7 @@ pub async fn staff_context(env: &StaffEnv<'_>, scope: &StaffScope) -> Result<Sta
     let sites = site::list_sites(env.pool, env.keys, true)
         .await?
         .iter()
-        .filter(|s| scope.is_admin || scope.site_ids.contains(&s.id))
+        .filter(|s| scope.can_view_all_sites() || scope.site_ids.contains(&s.id))
         .map(site_option)
         .collect();
     Ok(StaffContext {
@@ -331,7 +347,8 @@ pub async fn staff_context(env: &StaffEnv<'_>, scope: &StaffScope) -> Result<Sta
             .next()
             .unwrap_or_default()
             .to_string(),
-        is_admin: scope.is_admin,
+        is_admin: scope.is_admin(),
+        is_hr: scope.is_hr(),
         sites,
     })
 }
@@ -390,7 +407,7 @@ pub async fn today_overview(
             check_site(scope, id)?;
             vec![id]
         }
-        None if scope.is_admin => site::list_sites(env.pool, env.keys, true)
+        None if scope.can_view_all_sites() => site::list_sites(env.pool, env.keys, true)
             .await?
             .iter()
             .map(|s| s.id)
@@ -436,8 +453,8 @@ pub async fn today_overview(
 }
 
 /// Creates a person with a first role in one transaction (person, role assignment and audit
-/// rows). Managers may only add employees at their own sites; admins may also add managers
-/// (a school is required) and admins (no school).
+/// rows). Managers may only add employees at their own sites; HR also managers at any site
+/// (a school is required); only admins add HR and admins (no school).
 pub async fn add_person_with_role(
     env: &StaffEnv<'_>,
     scope: &StaffScope,
@@ -449,11 +466,12 @@ pub async fn add_person_with_role(
         (RoleDto::Employee, Some(site)) => (Role::Employee, Some(site)),
         (RoleDto::Manager, Some(site)) => (Role::Manager, Some(site)),
         (RoleDto::Admin, None) => (Role::Admin, None),
-        (RoleDto::Admin, Some(_)) => return Err(StaffError::Invalid("site")),
+        (RoleDto::Hr, None) => (Role::Hr, None),
+        (RoleDto::Admin | RoleDto::Hr, Some(_)) => return Err(StaffError::Invalid("site")),
         (RoleDto::Employee | RoleDto::Manager, None) => return Err(StaffError::Invalid("site")),
     };
-    if role != Role::Employee {
-        require_admin(scope)?;
+    if !scope.can_grant_role(role) {
+        return Err(StaffError::Forbidden);
     }
     if let Some(site_id) = site_id {
         check_site(scope, site_id)?;
@@ -672,7 +690,7 @@ async fn site_names(env: &StaffEnv<'_>) -> Result<HashMap<Uuid, String>> {
         .collect())
 }
 
-/// Everyone in scope, optionally limited to one site. Admins see all people; managers see the
+/// Everyone in scope, optionally limited to one site. Admins and HR see all people; managers see the
 /// people with any role at one of their sites. `can_manage` tells whether the caller may run
 /// identity actions on that person (the server checks again on every action).
 pub async fn people(
@@ -688,7 +706,7 @@ pub async fn people(
     for p in person::list_all_people(env.pool, env.keys).await? {
         let roles = role::roles_of(env.pool, p.id).await?;
         let at = |site: Uuid| roles.iter().any(|r| r.site_id == Some(site));
-        if !scope.is_admin && !scope.site_ids.iter().any(|s| at(*s)) {
+        if !scope.can_view_all_sites() && !scope.site_ids.iter().any(|s| at(*s)) {
             continue;
         }
         if site_filter.is_some_and(|id| !at(id)) {
@@ -713,26 +731,26 @@ pub async fn people(
     Ok(rows)
 }
 
-/// Sets the single role of a person (admin only). The sites of the person stay: switching to
-/// employee or manager turns every site role into that role, admin only adds the
-/// organisation-wide role. A manager needs at least one site.
+/// Sets the single role of a person. Admins may set any role; HR only employee or manager, and
+/// never on someone who holds the admin or HR role (see [`may_manage`]); managers never change
+/// roles. The sites of the person stay: switching to employee or manager turns every site role
+/// into that role (and drops admin and HR), admin and HR only add the organisation-wide role
+/// (one replaces the other). A manager needs at least one site.
 pub async fn set_person_role(
     env: &StaffEnv<'_>,
     scope: &StaffScope,
     person_id: Uuid,
     new: RoleDto,
 ) -> Result<()> {
-    require_admin(scope)?;
+    if !scope.can_view_all_sites() || !scope.can_grant_role(role_of_dto(new)) {
+        return Err(StaffError::Forbidden);
+    }
     check_person(env, scope, person_id).await?;
     if new != RoleDto::Admin && person_id == scope.person_id {
         return Err(StaffError::Invalid("self"));
     }
     let current = role::roles_of(env.pool, person_id).await?;
-    let mut sites: Vec<Uuid> = current
-        .iter()
-        .filter(|r| r.role != Role::Admin)
-        .filter_map(|r| r.site_id)
-        .collect();
+    let mut sites: Vec<Uuid> = current.iter().filter_map(|r| r.site_id).collect();
     sites.sort();
     sites.dedup();
     if new == RoleDto::Manager && sites.is_empty() {
@@ -744,6 +762,12 @@ pub async fn set_person_role(
     match new {
         RoleDto::Admin => {
             role::assign(&mut *tx, person_id, Role::Admin, None, by).await?;
+            role::revoke(&mut *tx, person_id, Role::Hr, None).await?;
+        }
+        RoleDto::Hr => {
+            keep_one_working_admin(&mut tx, person_id).await?;
+            role::revoke(&mut *tx, person_id, Role::Admin, None).await?;
+            role::assign(&mut *tx, person_id, Role::Hr, None, by).await?;
         }
         RoleDto::Employee | RoleDto::Manager => {
             keep_one_working_admin(&mut tx, person_id).await?;
@@ -753,6 +777,7 @@ pub async fn set_person_role(
                 (Role::Employee, Role::Manager)
             };
             role::revoke(&mut *tx, person_id, Role::Admin, None).await?;
+            role::revoke(&mut *tx, person_id, Role::Hr, None).await?;
             for site in &sites {
                 role::revoke(&mut *tx, person_id, drop, Some(*site)).await?;
                 role::assign(&mut *tx, person_id, keep, Some(*site), by).await?;
@@ -771,7 +796,7 @@ pub async fn set_person_role(
     commit(tx).await
 }
 
-/// Replaces the schools of a person. Admins may set any existing sites; managers only sites they
+/// Replaces the schools of a person. Admins and HR may set any existing sites; managers only sites they
 /// manage, on employees they may manage, and never an empty set (that would hide the person
 /// from them). New schools get the person's current site role (manager if they have one,
 /// otherwise employee).
@@ -791,7 +816,7 @@ pub async fn set_person_sites(
             .ok_or(StaffError::NotFound)?;
     }
     check_person(env, scope, person_id).await?;
-    if !scope.is_admin && wanted.is_empty() {
+    if !scope.can_view_all_sites() && wanted.is_empty() {
         return Err(StaffError::Invalid("site"));
     }
     let current = role::roles_of(env.pool, person_id).await?;
@@ -1085,7 +1110,7 @@ mod tests {
         let e = env(&pool, &k);
         let ctx = staff_context(&e, &s.mgr_a).await.unwrap();
         assert_eq!(ctx.first_name, "Mia");
-        assert!(!ctx.is_admin);
+        assert!(!ctx.is_admin && !ctx.is_hr);
         assert_eq!(ctx.sites.len(), 1);
         assert_eq!(ctx.sites[0].id, s.site_a);
         let ctx = staff_context(&e, &s.admin).await.unwrap();
@@ -2139,5 +2164,387 @@ mod tests {
             "raw HTML sink outside the allow-list (CSP allows inline scripts): {offenders:?}"
         );
         assert_eq!(seen_allowed, ALLOWED.len(), "allow-list is stale");
+    }
+
+    // --- permission matrix (HR / personeelsdienst) ---
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Actor {
+        Admin,
+        Hr,
+        ManagerOwnSite,
+        ManagerOtherSite,
+        Employee,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Target {
+        Employee,
+        Manager,
+        Hr,
+        Admin,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Act {
+        ViewToday,
+        ListPeople,
+        AddEmployee,
+        AddManager,
+        AddHr,
+        AddAdmin,
+        SetRoleEmployee,
+        SetRoleManager,
+        SetRoleHr,
+        SetRoleAdmin,
+        SetSitesOwn,
+        SetSitesBoth,
+        Deactivate,
+        RevokeDevices,
+        StartEnrollment,
+        EnrollmentStatus,
+        ListSites,
+        SaveSite,
+        SetSiteActive,
+    }
+
+    /// Acts on a person (as opposed to the organisation or a list).
+    fn targeted(act: Act) -> bool {
+        use Act::*;
+        matches!(
+            act,
+            SetRoleEmployee
+                | SetRoleManager
+                | SetRoleHr
+                | SetRoleAdmin
+                | SetSitesOwn
+                | SetSitesBoth
+                | Deactivate
+                | RevokeDevices
+                | StartEnrollment
+                | EnrollmentStatus
+        )
+    }
+
+    /// The plan (section 4.2): the single place that states who may do what. `site A` is the
+    /// school of `ManagerOwnSite` and of every target; `ManagerOtherSite` manages school B.
+    fn expected(actor: Actor, act: Act, target: Target) -> bool {
+        use Act::*;
+        if targeted(act) && actor != Actor::Admin {
+            let plain = target == Target::Employee;
+            match actor {
+                Actor::Hr => {
+                    if matches!(target, Target::Hr | Target::Admin) {
+                        return false;
+                    }
+                }
+                Actor::ManagerOwnSite => {
+                    if !plain {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        match actor {
+            Actor::Admin => true,
+            Actor::Hr => !matches!(
+                act,
+                AddHr | AddAdmin | SetRoleHr | SetRoleAdmin | ListSites | SaveSite | SetSiteActive
+            ),
+            Actor::ManagerOwnSite => matches!(
+                act,
+                ViewToday
+                    | ListPeople
+                    | AddEmployee
+                    | SetSitesOwn
+                    | Deactivate
+                    | RevokeDevices
+                    | StartEnrollment
+                    | EnrollmentStatus
+            ),
+            Actor::ManagerOtherSite => matches!(act, ListPeople),
+            Actor::Employee => false,
+        }
+    }
+
+    struct World {
+        s: Seed,
+        hr: StaffScope,
+        mgr_b: StaffScope,
+        employee: Uuid,
+    }
+
+    async fn world(pool: &PgPool, k: &Keys) -> World {
+        let s = seed(pool, k).await;
+        let scope_of = |id: Uuid| async move {
+            role::scope_from_roles(id, &role::roles_of(pool, id).await.unwrap())
+        };
+        let hr_id = mk_person(pool, k, "Hanne Personeel").await;
+        role::assign(pool, hr_id, Role::Hr, None, None)
+            .await
+            .unwrap();
+        let mgr_b_id = mk_person(pool, k, "Bart Beheer").await;
+        role::assign(pool, mgr_b_id, Role::Manager, Some(s.site_b), None)
+            .await
+            .unwrap();
+        World {
+            hr: scope_of(hr_id).await.unwrap(),
+            mgr_b: scope_of(mgr_b_id).await.unwrap(),
+            employee: s.emp_a,
+            s,
+        }
+    }
+
+    /// A new person of this kind at school A (admin and HR people also work at A, so a role
+    /// switch to employee or manager has a school to keep).
+    async fn fresh_target(pool: &PgPool, k: &Keys, w: &World, kind: Target) -> Uuid {
+        let id = mk_person(pool, k, "Doel Persoon").await;
+        let (role, site) = match kind {
+            Target::Employee => (Role::Employee, Some(w.s.site_a)),
+            Target::Manager => (Role::Manager, Some(w.s.site_a)),
+            Target::Hr => (Role::Hr, None),
+            Target::Admin => (Role::Admin, None),
+        };
+        role::assign(pool, id, role, site, None).await.unwrap();
+        if site.is_none() {
+            role::assign(pool, id, Role::Employee, Some(w.s.site_a), None)
+                .await
+                .unwrap();
+        }
+        id
+    }
+
+    async fn run_act(
+        e: &StaffEnv<'_>,
+        w: &World,
+        scope: &StaffScope,
+        act: Act,
+        target: Uuid,
+    ) -> Result<()> {
+        let site_a = w.s.site_a;
+        let add = |role, site| add_person_with_role(e, scope, "Nieuw Persoon", role, site);
+        match act {
+            Act::ViewToday => today_overview(e, scope, Some(site_a), Utc::now())
+                .await
+                .map(drop),
+            Act::ListPeople => people(e, scope, None).await.map(drop),
+            Act::AddEmployee => add(RoleDto::Employee, Some(site_a)).await.map(drop),
+            Act::AddManager => add(RoleDto::Manager, Some(site_a)).await.map(drop),
+            Act::AddHr => add(RoleDto::Hr, None).await.map(drop),
+            Act::AddAdmin => add(RoleDto::Admin, None).await.map(drop),
+            Act::SetRoleEmployee => set_person_role(e, scope, target, RoleDto::Employee).await,
+            Act::SetRoleManager => set_person_role(e, scope, target, RoleDto::Manager).await,
+            Act::SetRoleHr => set_person_role(e, scope, target, RoleDto::Hr).await,
+            Act::SetRoleAdmin => set_person_role(e, scope, target, RoleDto::Admin).await,
+            Act::SetSitesOwn => set_person_sites(e, scope, target, vec![site_a]).await,
+            Act::SetSitesBoth => set_person_sites(e, scope, target, vec![site_a, w.s.site_b]).await,
+            Act::Deactivate => set_person_active(e, scope, target, false).await,
+            Act::RevokeDevices => revoke_devices(e, scope, target).await,
+            Act::StartEnrollment => start_enrollment(e, scope, target).await.map(drop),
+            Act::EnrollmentStatus => {
+                enrollment_status(e, scope, target, Utc::now().timestamp_millis(), Utc::now())
+                    .await
+                    .map(drop)
+            }
+            Act::ListSites => list_sites(e, scope).await.map(drop),
+            Act::SaveSite => save_site(e, scope, form("School Z")).await.map(drop),
+            Act::SetSiteActive => set_site_active(e, scope, site_a, true).await,
+        }
+    }
+
+    const ALL_ACTS: [Act; 19] = [
+        Act::ViewToday,
+        Act::ListPeople,
+        Act::AddEmployee,
+        Act::AddManager,
+        Act::AddHr,
+        Act::AddAdmin,
+        Act::SetRoleEmployee,
+        Act::SetRoleManager,
+        Act::SetRoleHr,
+        Act::SetRoleAdmin,
+        Act::SetSitesOwn,
+        Act::SetSitesBoth,
+        Act::Deactivate,
+        Act::RevokeDevices,
+        Act::StartEnrollment,
+        Act::EnrollmentStatus,
+        Act::ListSites,
+        Act::SaveSite,
+        Act::SetSiteActive,
+    ];
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn permission_matrix(pool: PgPool) {
+        let k = keys();
+        let w = world(&pool, &k).await;
+        let e = env(&pool, &k);
+        // An employee gets no staff scope at all, so every staff guard refuses them.
+        assert!(
+            role::scope_from_roles(
+                w.employee,
+                &role::roles_of(&pool, w.employee).await.unwrap()
+            )
+            .is_none()
+        );
+        let actors = [
+            (Actor::Admin, Some(&w.s.admin)),
+            (Actor::Hr, Some(&w.hr)),
+            (Actor::ManagerOwnSite, Some(&w.s.mgr_a)),
+            (Actor::ManagerOtherSite, Some(&w.mgr_b)),
+            (Actor::Employee, None),
+        ];
+        let targets = [Target::Employee, Target::Manager, Target::Hr, Target::Admin];
+        for (actor, scope) in actors {
+            for act in ALL_ACTS {
+                let kinds: &[Target] = if targeted(act) {
+                    &targets
+                } else {
+                    &[Target::Employee]
+                };
+                for &kind in kinds {
+                    let want = expected(actor, act, kind);
+                    let Some(scope) = scope else {
+                        assert!(!want);
+                        continue;
+                    };
+                    let target = fresh_target(&pool, &k, &w, kind).await;
+                    let audits = audit_actions(&pool).await.len();
+                    let got = run_act(&e, &w, scope, act, target).await;
+                    let case = format!("{actor:?} {act:?} on {kind:?}: {got:?}");
+                    if want {
+                        assert!(got.is_ok(), "should be allowed: {case}");
+                    } else {
+                        assert_eq!(
+                            got,
+                            Err(StaffError::Forbidden),
+                            "should be forbidden: {case}"
+                        );
+                        assert_eq!(
+                            audit_actions(&pool).await.len(),
+                            audits,
+                            "a refused action leaves no audit row: {case}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn hr_sees_every_site_but_is_no_admin(pool: PgPool) {
+        let k = keys();
+        let w = world(&pool, &k).await;
+        let e = env(&pool, &k);
+        let ctx = staff_context(&e, &w.hr).await.unwrap();
+        assert!(ctx.is_hr && !ctx.is_admin && ctx.can_view_all_sites());
+        assert_eq!(ctx.sites.len(), 2);
+        let today = today_overview(&e, &w.hr, None, Utc::now()).await.unwrap();
+        assert_eq!(today.not_started, 2, "both schools' employees are counted");
+        let all = people(&e, &w.hr, None).await.unwrap();
+        let hr_row = all.iter().find(|p| p.id == w.hr.person_id).unwrap();
+        assert!(!hr_row.can_manage, "HR may view but not manage HR people");
+        let emp_row = all.iter().find(|p| p.id == w.s.emp_b).unwrap();
+        assert!(emp_row.can_manage);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn hr_switches_people_between_employee_and_manager_with_audit(pool: PgPool) {
+        let k = keys();
+        let w = world(&pool, &k).await;
+        let e = env(&pool, &k);
+        set_person_role(&e, &w.hr, w.s.emp_b, RoleDto::Manager)
+            .await
+            .unwrap();
+        assert_eq!(
+            role::roles_of(&pool, w.s.emp_b).await.unwrap(),
+            vec![role::RoleAssignment {
+                role: Role::Manager,
+                site_id: Some(w.s.site_b)
+            }]
+        );
+        set_person_role(&e, &w.hr, w.s.emp_b, RoleDto::Employee)
+            .await
+            .unwrap();
+        set_person_sites(&e, &w.hr, w.s.emp_b, vec![w.s.site_a])
+            .await
+            .unwrap();
+        assert_eq!(audit_actions(&pool).await.len(), 3);
+        let added =
+            add_person_with_role(&e, &w.hr, "Mia Nieuw", RoleDto::Manager, Some(w.s.site_b))
+                .await
+                .unwrap();
+        assert_eq!(
+            role::managed_sites(&pool, added.id).await.unwrap(),
+            vec![w.s.site_b]
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn admin_grants_and_revokes_hr_without_a_school(pool: PgPool) {
+        let k = keys();
+        let w = world(&pool, &k).await;
+        let e = env(&pool, &k);
+        let added = add_person_with_role(&e, &w.s.admin, "Hugo Personeel", RoleDto::Hr, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            role::roles_of(&pool, added.id).await.unwrap(),
+            vec![role::RoleAssignment {
+                role: Role::Hr,
+                site_id: None
+            }]
+        );
+        assert!(matches!(
+            add_person_with_role(&e, &w.s.admin, "X", RoleDto::Hr, Some(w.s.site_a)).await,
+            Err(StaffError::Invalid(_))
+        ));
+        set_person_role(&e, &w.s.admin, w.s.emp_a, RoleDto::Hr)
+            .await
+            .unwrap();
+        let roles = role::roles_of(&pool, w.s.emp_a).await.unwrap();
+        assert!(roles.iter().any(|r| r.role == Role::Hr));
+        // Admin replaces HR (admin outranks it), then back to a plain employee.
+        set_person_role(&e, &w.s.admin, w.s.emp_a, RoleDto::Admin)
+            .await
+            .unwrap();
+        let roles = role::roles_of(&pool, w.s.emp_a).await.unwrap();
+        assert!(roles.iter().all(|r| r.role != Role::Hr));
+        assert!(role::is_admin(&pool, w.s.emp_a).await.unwrap());
+        set_person_role(&e, &w.s.admin, w.s.emp_a, RoleDto::Employee)
+            .await
+            .unwrap();
+        let roles = role::roles_of(&pool, w.s.emp_a).await.unwrap();
+        assert!(roles.iter().all(|r| r.role == Role::Employee));
+        // An admin cannot demote themselves to HR.
+        assert_eq!(
+            set_person_role(&e, &w.s.admin, w.s.admin.person_id, RoleDto::Hr).await,
+            Err(StaffError::Invalid("self"))
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn hr_does_not_count_as_a_working_admin(pool: PgPool) {
+        let k = keys();
+        let e = env(&pool, &k);
+        let a = two_admins(&pool, &k).await;
+        let hr_id = mk_person(&pool, &k, "Hanne Personeel").await;
+        role::assign(&pool, hr_id, Role::Hr, None, None)
+            .await
+            .unwrap();
+        passkey::insert(&pool, hr_id, hr_id.as_bytes(), serde_json::json!({}))
+            .await
+            .unwrap();
+        // A signed-in HR person is no second admin: the only working admin stays protected.
+        assert!(matches!(
+            revoke_devices(&e, &a.working, a.working.person_id).await,
+            Err(StaffError::Invalid(_))
+        ));
+        assert!(matches!(
+            set_person_role(&e, &a.keyless, a.working.person_id, RoleDto::Hr).await,
+            Err(StaffError::Invalid(_))
+        ));
+        assert!(role::is_admin(&pool, a.working.person_id).await.unwrap());
     }
 }

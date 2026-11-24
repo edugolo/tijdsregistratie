@@ -123,7 +123,7 @@ async fn me_of(state: &AppState, p: &Person) -> Result<(Me, SessionKind)> {
         person_id: p.id,
         first_name: first_name(&p.display_name),
         is_staff,
-        is_admin: scope.is_some_and(|s| s.is_admin),
+        is_admin: scope.is_some_and(|s| s.is_admin()),
         employee_site_ids,
     };
     let kind = if is_staff {

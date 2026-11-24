@@ -34,7 +34,7 @@ pub async fn scope_allows_person(
     scope: &StaffScope,
     person_id: Uuid,
 ) -> Result<bool, ServerFnError> {
-    if scope.is_admin {
+    if scope.can_view_all_sites() {
         return Ok(true);
     }
     let state = app_state().await?;
@@ -64,7 +64,7 @@ async fn staff_scope_of(pool: &PgPool, user: &SessionUser) -> Result<StaffScope,
     scope_from_roles(user.person_id, &roles).ok_or_else(forbidden)
 }
 
-/// Manager of any site, or admin. Requires a staff session.
+/// Manager of any site, HR or admin. Requires a staff session.
 pub async fn require_staff() -> Result<StaffScope, ServerFnError> {
     let user = current_user().await?;
     let state = app_state().await?;
@@ -90,7 +90,7 @@ pub async fn admin_scope(
 
 async fn admin_scope_of(pool: &PgPool, user: &SessionUser) -> Result<StaffScope, ServerFnError> {
     let scope = staff_scope_of(pool, user).await?;
-    if scope.is_admin {
+    if scope.can_manage_settings() {
         Ok(scope)
     } else {
         Err(forbidden())
@@ -117,10 +117,10 @@ pub async fn require_admin_or_setup(
     }
 }
 
-/// Manager of `site_id`; admins pass for every site.
+/// Manager of `site_id`; admins and HR pass for every site.
 pub async fn require_manager_of(site_id: Uuid) -> Result<StaffScope, ServerFnError> {
     let scope = require_staff().await?;
-    if scope.is_admin || scope.site_ids.contains(&site_id) {
+    if scope.can_view_all_sites() || scope.site_ids.contains(&site_id) {
         Ok(scope)
     } else {
         Err(forbidden())

@@ -139,6 +139,8 @@
 .st-chip-brand { background: var(--st-tertiary-container); color: var(--st-on-tertiary-container); }
 .st-chip-brand[role="timer"] { background: var(--st-secondary-container); color: var(--st-on-secondary-container); }
 .st-chip-secondary { background: var(--st-secondary-container); color: var(--st-on-secondary-container); }
+/* HR (personeelsdienst) uses the primary pair: distinct from manager (secondary) and admin (tertiary). */
+.st-chip-hr { background: var(--st-primary-container); color: var(--st-on-primary-container); }
 .st-icon { flex: none; }
 
 /* Filter and toggle chips */

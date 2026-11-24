@@ -1,4 +1,4 @@
-//! "Instellingen" (admins only): organisation, schools and appearance.
+//! "Instellingen": organisation, schools and appearance for admins; HR only sees appearance.
 
 use dioxus::prelude::*;
 
@@ -22,6 +22,15 @@ enum Section {
 impl Section {
     const ALL: [Self; 3] = [Self::Organisation, Self::Sites, Self::Appearance];
 
+    /// Admins get every section; everyone else (HR) only "Weergave".
+    fn available(is_admin: bool) -> Vec<Self> {
+        if is_admin {
+            Self::ALL.to_vec()
+        } else {
+            vec![Self::Appearance]
+        }
+    }
+
     fn label(self) -> String {
         match self {
             Self::Organisation => fl!(LANGUAGE_LOADER, "settings-org"),
@@ -35,29 +44,35 @@ impl Section {
 #[component]
 pub fn StaffSettingsPage() -> Element {
     let ctx = use_context::<StaffContext>();
-    let mut section = use_signal(|| Section::Organisation);
-    if !ctx.is_admin {
+    let mut section = use_signal(|| Section::available(ctx.is_admin)[0]);
+    if !ctx.is_admin && !ctx.is_hr {
         navigator().replace("/beheer");
         return rsx! {};
     }
+    // The server refuses everything else for HR; the section is also never rendered for them.
+    let current = if ctx.is_admin {
+        section()
+    } else {
+        Section::Appearance
+    };
     rsx! {
         section { class: "st-page",
             h1 { {fl!(LANGUAGE_LOADER, "settings-title")} }
             div { class: "st-settings",
                 nav { class: "st-settings-nav", aria_label: fl!(LANGUAGE_LOADER, "settings-nav-label"),
-                    for item in Section::ALL {
+                    for item in Section::available(ctx.is_admin) {
                         button {
                             key: "{item.label()}",
                             r#type: "button",
-                            class: if item == section() { "st-filter st-filter-active" } else { "st-filter" },
-                            aria_current: if item == section() { "page" } else { "false" },
+                            class: if item == current { "st-filter st-filter-active" } else { "st-filter" },
+                            aria_current: if item == current { "page" } else { "false" },
                             onclick: move |_| section.set(item),
                             {item.label()}
                         }
                     }
                 }
                 div { class: "st-settings-body",
-                    match section() {
+                    match current {
                         Section::Organisation => rsx! { OrgSettingsPage {} },
                         Section::Sites => rsx! { SitesSection {} },
                         Section::Appearance => rsx! {
@@ -116,5 +131,16 @@ fn SitesSection() -> Element {
                 });
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hr_only_gets_appearance() {
+        assert_eq!(Section::available(false), vec![Section::Appearance]);
+        assert_eq!(Section::available(true), Section::ALL.to_vec());
     }
 }

@@ -1,7 +1,8 @@
-//! Manager and admin screens: a persistent shell (`layout`) around Vandaag, Mensen and
+//! Manager, HR and admin screens: a persistent shell (`layout`) around Vandaag, Mensen and
 //! Instellingen.
 
 pub mod enroll;
+mod field;
 mod flow;
 mod icons;
 pub mod layout;

@@ -1,4 +1,5 @@
-//! Role assignments: employee and manager are per site, admin is organisation-wide.
+//! Role assignments: employee and manager are per site, admin and hr (personeelsdienst) are
+//! organisation-wide.
 
 use std::str::FromStr;
 
@@ -11,6 +12,7 @@ use super::{RepoError, Result};
 pub enum Role {
     Employee,
     Manager,
+    Hr,
     Admin,
 }
 
@@ -19,6 +21,7 @@ impl Role {
         match self {
             Role::Employee => "employee",
             Role::Manager => "manager",
+            Role::Hr => "hr",
             Role::Admin => "admin",
         }
     }
@@ -31,6 +34,7 @@ impl FromStr for Role {
         match s {
             "employee" => Ok(Role::Employee),
             "manager" => Ok(Role::Manager),
+            "hr" => Ok(Role::Hr),
             "admin" => Ok(Role::Admin),
             _ => Err(RepoError::InvalidValue("role")),
         }
@@ -44,7 +48,7 @@ pub struct RoleAssignment {
 }
 
 /// Returns false if the person already had this role (the database check constraints reject an
-/// admin with a site and a site role without one).
+/// admin or hr with a site and a site role without one).
 pub async fn assign<'e>(
     executor: impl PgExecutor<'e>,
     person_id: Uuid,
@@ -129,34 +133,82 @@ pub async fn is_admin(pool: &PgPool, person_id: Uuid) -> Result<bool> {
     .await?)
 }
 
-/// What a manager or admin may see: all sites (admin) or the sites they manage.
+/// How far a staff member reaches. Admin outranks HR, HR outranks manager.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeKind {
+    Admin,
+    Hr,
+    Manager,
+}
+
+/// What a manager, HR member or admin may see and do: all sites (admin, HR) or the sites they
+/// manage. `site_ids` are the managed sites, also kept for admin and HR who manage some.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaffScope {
     pub person_id: Uuid,
-    pub is_admin: bool,
+    pub kind: ScopeKind,
     pub site_ids: Vec<Uuid>,
 }
 
+impl StaffScope {
+    pub fn is_admin(&self) -> bool {
+        self.kind == ScopeKind::Admin
+    }
+
+    pub fn is_hr(&self) -> bool {
+        self.kind == ScopeKind::Hr
+    }
+
+    /// Admin and HR see and (where allowed) act on every site.
+    pub fn can_view_all_sites(&self) -> bool {
+        matches!(self.kind, ScopeKind::Admin | ScopeKind::Hr)
+    }
+
+    /// Organisation settings, sites, branding and geocoding: admin only.
+    pub fn can_manage_settings(&self) -> bool {
+        self.is_admin()
+    }
+
+    /// Which role a caller may give to someone (or take the person back to). Only admins grant
+    /// admin and HR; HR moves people between employee and manager; a manager adds employees.
+    pub fn can_grant_role(&self, role: Role) -> bool {
+        match self.kind {
+            ScopeKind::Admin => true,
+            ScopeKind::Hr => matches!(role, Role::Employee | Role::Manager),
+            ScopeKind::Manager => role == Role::Employee,
+        }
+    }
+}
+
 /// Pure part of the staff guard: derives the scope from a person's roles, `None` if they are
-/// neither admin nor manager of any site.
+/// neither admin, HR nor manager of any site.
 pub fn scope_from_roles(person_id: Uuid, roles: &[RoleAssignment]) -> Option<StaffScope> {
-    let is_admin = roles.iter().any(|r| r.role == Role::Admin);
     let site_ids: Vec<Uuid> = roles
         .iter()
         .filter(|r| r.role == Role::Manager)
         .filter_map(|r| r.site_id)
         .collect();
-    (is_admin || !site_ids.is_empty()).then_some(StaffScope {
+    let has = |wanted: Role| roles.iter().any(|r| r.role == wanted);
+    let kind = if has(Role::Admin) {
+        ScopeKind::Admin
+    } else if has(Role::Hr) {
+        ScopeKind::Hr
+    } else if !site_ids.is_empty() {
+        ScopeKind::Manager
+    } else {
+        return None;
+    };
+    Some(StaffScope {
         person_id,
-        is_admin,
+        kind,
         site_ids,
     })
 }
 
-/// Pure part of the person check: admin always, otherwise the person must work at one of the
-/// scope's sites.
+/// Pure part of the person check: admin and HR always, otherwise the person must work at one of
+/// the scope's sites.
 pub fn scope_allows_sites(scope: &StaffScope, person_employee_sites: &[Uuid]) -> bool {
-    scope.is_admin
+    scope.can_view_all_sites()
         || person_employee_sites
             .iter()
             .any(|s| scope.site_ids.contains(s))
@@ -164,9 +216,9 @@ pub fn scope_allows_sites(scope: &StaffScope, person_employee_sites: &[Uuid]) ->
 
 /// Pure part of the identity-action check for managers: the person must work at at least one site
 /// and ALL of their employee sites must be managed by the scope. People who also work at another
-/// site are admin-only. Admins always pass.
+/// site are admin-only. Admins and HR always pass (HR is further limited by `may_manage`).
 pub fn scope_covers_all_sites(scope: &StaffScope, person_employee_sites: &[Uuid]) -> bool {
-    scope.is_admin
+    scope.can_view_all_sites()
         || (!person_employee_sites.is_empty()
             && person_employee_sites
                 .iter()
@@ -220,11 +272,11 @@ mod tests {
         let (s1, s2) = (Uuid::new_v4(), Uuid::new_v4());
         let mgr = StaffScope {
             person_id: Uuid::new_v4(),
-            is_admin: false,
+            kind: ScopeKind::Manager,
             site_ids: vec![s1],
         };
         let admin = StaffScope {
-            is_admin: true,
+            kind: ScopeKind::Admin,
             site_ids: vec![],
             ..mgr.clone()
         };
