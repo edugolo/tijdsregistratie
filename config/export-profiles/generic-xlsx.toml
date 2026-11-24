@@ -1,0 +1,61 @@
+# Generic Excel: same content as generic-csv, with typed cells (dates as dates, hours as numbers).
+profile_version = 1
+name = "Generic Excel"
+description = "All fields, one row per person per day, one sheet with typed cells."
+format = "xlsx"
+sheet_name = "Export"
+header = true
+granularity = "per_day"
+time_basis = "registered"
+rounding = "none"
+
+[codes]
+worked = "WORK"
+
+[[columns]]
+header = "Person key"
+field = "person_key"
+
+[[columns]]
+header = "Name"
+field = "person_name"
+
+[[columns]]
+header = "Site"
+field = "site_code"
+
+[[columns]]
+header = "Date"
+field = "date"
+format = "%d/%m/%Y"
+
+[[columns]]
+header = "Start"
+field = "start"
+
+[[columns]]
+header = "Stop"
+field = "stop"
+
+[[columns]]
+header = "Break (min)"
+field = "break"
+format = "minutes"
+
+[[columns]]
+header = "Worked (h)"
+field = "worked"
+format = "hours_decimal(2)"
+
+[[columns]]
+header = "Contract (h)"
+field = "contract"
+format = "hours_decimal(2)"
+
+[[columns]]
+header = "Code"
+field = "code"
+
+[[columns]]
+header = "Mode"
+field = "source_mode"

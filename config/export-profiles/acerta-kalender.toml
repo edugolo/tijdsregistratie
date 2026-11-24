@@ -1,0 +1,47 @@
+# Acerta Connect calendar import (INFERRED layout, not confirmed by Acerta).
+#
+# Acerta works with configurable import definitions; the exact file layout is not public. This
+# profile follows what public sources suggest: one row per employee per day per looncode, decimal
+# hours, keyed on the Acerta overeenkomstnummer (stored as the person key). See
+# docs/export-acerta.md and docs/export-profiles.md. Once Acerta's import definition is known,
+# adapt these knobs: separator, encoding, header, decimal_separator, the date `format`, the column
+# order/headers, and the looncodes under [codes].
+profile_version = 1
+name = "Acerta calendar (inferred)"
+description = "Per employee per day per looncode, decimal hours. Layout to be confirmed with Acerta."
+format = "csv"
+encoding = "utf-8"
+separator = ";"
+quote = "necessary"
+decimal_separator = ","
+header = true
+granularity = "per_day"
+time_basis = "registered"
+rounding = "none"
+skip_zero = true
+
+[codes]
+# TODO: placeholder looncode. Replace with the presence looncode of this employer (max 6 chars).
+worked = "100"
+
+[codes.absence]
+# TODO: map absence codes to Acerta looncodes once absences are exported, e.g. VAC = "200"
+
+[[columns]]
+header = "overeenkomst"
+field = "person_key"
+
+[[columns]]
+header = "datum"
+field = "date"
+# Alternative if Acerta wants it: "%d/%m/%Y"
+format = "%Y-%m-%d"
+
+[[columns]]
+header = "looncode"
+field = "code"
+
+[[columns]]
+header = "uren"
+field = "amount"
+format = "hours_decimal(2)"

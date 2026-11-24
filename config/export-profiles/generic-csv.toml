@@ -1,0 +1,66 @@
+# Generic CSV: one row per person per day, all neutral fields.
+profile_version = 1
+name = "Generic CSV"
+description = "All fields, one row per person per day. Semicolon separated, decimal comma, UTF-8."
+format = "csv"
+encoding = "utf-8"
+separator = ";"
+quote = "necessary"
+decimal_separator = ","
+header = true
+granularity = "per_day"
+time_basis = "registered"
+rounding = "none"
+
+[codes]
+worked = "WORK"
+
+[[columns]]
+header = "person_key"
+field = "person_key"
+
+[[columns]]
+header = "name"
+field = "person_name"
+
+[[columns]]
+header = "site"
+field = "site_code"
+
+[[columns]]
+header = "date"
+field = "date"
+format = "%Y-%m-%d"
+
+[[columns]]
+header = "start"
+field = "start"
+format = "%H:%M"
+
+[[columns]]
+header = "stop"
+field = "stop"
+format = "%H:%M"
+
+[[columns]]
+header = "break_minutes"
+field = "break"
+format = "minutes"
+
+[[columns]]
+header = "worked_hours"
+field = "worked"
+format = "hours_decimal(2)"
+
+[[columns]]
+header = "contract_hours"
+field = "contract"
+format = "hours_decimal(2)"
+
+[[columns]]
+header = "code"
+field = "code"
+
+[[columns]]
+header = "mode"
+field = "source_mode"
