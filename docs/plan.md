@@ -65,7 +65,7 @@ When the database has no active admin, the app is in **setup mode**: every route
      same transaction that creates the admin, so setup can only complete once.
   6. S6 Klaar: next steps (add managers, add employees, link devices) with links to A2 / M1.
 - Afterwards, admins edit the same organisation fields in **A0 Organisatie** (settings screen).
-- No external geocoding service in v1 (privacy, no API keys); a map picker can be added later.
+- Address search is optional: the server queries a Nominatim-compatible geocoder (`GEOCODER_URL`, default the public OpenStreetMap instance, `off` disables it), admin-only (and during setup after a valid setup code), globally limited to 1 request/s with a 24 h cache. A school address is not personal data; no API keys. See `docs/operations.md`.
 
 ### Next (needed for legal compliance, after version 1)
 
@@ -272,3 +272,29 @@ Security-relevant tasks (T2, T4, T5, T8) get an independent review before merge.
 | 4 | Permission to publish, if the work is done for an employer | first public push |
 | 5 | Project name and branding | first public push |
 | 6 | People without a smartphone: kiosk mode later or out of scope | later |
+
+## 14. Payroll export and integrations (decided 2026-11-24, not built yet)
+
+Depends on Uren (hours overview), corrections and validation.
+
+- **Neutral export model**: per person per day from validated periods: payroll/contract number
+  (encrypted), site code (cost centre), date, start, stop, break, worked minutes, contract minutes,
+  registered-vs-contract mode, later absence codes.
+- **Export profiles** (declarative TOML, no code): format (CSV/XLSX), separator, encoding, decimal sign,
+  columns and headers, date/duration formats, code mapping, per-day vs per-period. Shipped: generic CSV,
+  generic Excel, Acerta (see `docs/export-acerta.md`). Admins can copy and adapt a profile. An
+  `Exporter` trait covers formats a profile cannot express and outbound connectors.
+- **Export batches** are recorded (who, when, period, profile, checksum); only validated periods export.
+- **Public REST API v1** under `/api/v1`, separate from the browser server functions:
+  - API keys managed in Instellingen › Integraties: name, scopes (`people:read`, `people:write`,
+    `hours:read`, `export:read`), optional site restriction, expiry; shown once, stored hashed,
+    last-used, revocable; `Authorization: Bearer`; per-key rate limit; every call audited; optional IP
+    allowlist. Keys grant access to decrypted personal data and are treated accordingly.
+  - Endpoints: `GET /people`, `PUT /people/{external_id}` (HR sync upsert), `GET /hours`,
+    `GET /exports/{profile}`, `GET /periods`. Webhooks later (e.g. period validated).
+  - **OpenAPI** generated from code with `utoipa` (+ `utoipa-axum`), served at `/api/v1/openapi.json`;
+    interactive docs with **RapiDoc** via `utoipa-rapidoc` at `/api/v1/docs`. The RapiDoc script is
+    vendored in `public/` (no CDN) so the strict CSP stays intact; the docs page can be disabled by
+    configuration.
+- **Outbound connectors**: "send directly" next to "download" (e.g. Acerta REST API if access is
+  granted); connector credentials stored encrypted with the data key.
