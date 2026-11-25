@@ -171,6 +171,9 @@ fn TodayRow(row: TodayRowDto, attention: bool) -> Element {
                 if let Some(since) = since {
                     span { class: "st-sub", "{since}" }
                 }
+                if let Some(note) = &row.note {
+                    span { class: "st-sub st-reason", {fl!(LANGUAGE_LOADER, "clock-note-staff", note = note.as_str())} }
+                }
             }
             span { class: "st-chip {class}",
                 Icon { kind: icon, size: 14 }
@@ -204,5 +207,17 @@ mod tests {
         let (class, _, label) = status_chip(&TodayStatusDto::NotStarted);
         assert_eq!(class, "st-chip-neutral");
         assert_eq!(label, "Nog niet gestart");
+    }
+
+    #[test]
+    fn a_clock_note_is_quoted() {
+        assert_eq!(
+            fl!(
+                LANGUAGE_LOADER,
+                "clock-note-staff",
+                note = "uitstap met de klas"
+            ),
+            "Uitleg: “uitstap met de klas”"
+        );
     }
 }

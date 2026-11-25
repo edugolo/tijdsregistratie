@@ -2,6 +2,7 @@
 
 pub mod api_key;
 pub mod audit;
+pub mod clock_note;
 pub mod contract;
 pub mod correction;
 pub mod enrollment;

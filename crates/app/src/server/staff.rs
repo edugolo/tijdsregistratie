@@ -13,7 +13,7 @@ use sqlx::{PgConnection, PgExecutor, PgPool, Postgres, Transaction};
 use store::repo::role::{self, Role, ScopeKind, StaffScope};
 use store::repo::site::{self, Site, SiteInput, ZonePolicy};
 use store::repo::time_event::{self, EventRow};
-use store::repo::{audit, enrollment, passkey, person, settings};
+use store::repo::{audit, clock_note, enrollment, passkey, person, settings};
 use uuid::Uuid;
 
 use super::AppState;
@@ -444,12 +444,13 @@ fn member_dto(p: &person::Person, device_linked: bool, today: TodayStatusDto) ->
     }
 }
 
-/// Today's status per person, in the order of `people`.
+/// Today's status per person, in the order of `people`, with the id of the latest event when it
+/// is a start outside the zone (the one an employee's note explains).
 async fn statuses(
     env: &StaffEnv<'_>,
     people: &[person::Person],
     now: DateTime<Utc>,
-) -> Result<Vec<TodayStatusDto>> {
+) -> Result<Vec<(TodayStatusDto, Option<Uuid>)>> {
     let ids: Vec<Uuid> = people.iter().map(|p| p.id).collect();
     let tz = settings::get_settings(env.pool).await?.timezone;
     let (from, to) = day_bounds(now, tz);
@@ -464,10 +465,15 @@ async fn statuses(
                 .cloned()
                 .collect();
             if mine.is_empty() {
-                missing_stop(previous.iter().find(|e| e.person_id == p.id), tz)
-                    .unwrap_or(TodayStatusDto::NotStarted)
+                let status = missing_stop(previous.iter().find(|e| e.person_id == p.id), tz)
+                    .unwrap_or(TodayStatusDto::NotStarted);
+                (status, None)
             } else {
-                today_status(&mine, tz)
+                let status = today_status(&mine, tz);
+                let flagged = matches!(status, TodayStatusDto::OutOfZone(_))
+                    .then(|| mine.iter().max_by_key(|e| e.server_ts).map(|e| e.id))
+                    .flatten();
+                (status, flagged)
             }
         })
         .collect())
@@ -501,13 +507,17 @@ pub async fn today_overview(
         .filter(|p| p.active)
         .collect();
     let statuses = statuses(env, &people, now).await?;
+    // Every person here is in scope, so their notes may be shown.
+    let flagged: Vec<Uuid> = statuses.iter().filter_map(|(_, id)| *id).collect();
+    let mut notes = clock_note::notes_for_events(env.pool, env.keys, &flagged).await?;
     let mut overview = TodayOverviewDto::default();
     let mut attention = [Vec::new(), Vec::new(), Vec::new()];
-    for (p, today) in people.iter().zip(statuses) {
+    for (p, (today, flagged)) in people.iter().zip(statuses) {
         let row = TodayRowDto {
             id: p.id,
             name: p.display_name.clone(),
             today: today.clone(),
+            note: flagged.and_then(|id| notes.remove(&id)),
         };
         match today {
             TodayStatusDto::Started(_) => {
@@ -1444,6 +1454,48 @@ mod tests {
             (1, 0, 1, 0)
         );
         assert_eq!(o.working_rows[0].id, s.emp_b);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn today_overview_shows_the_note_of_an_out_of_zone_start(pool: PgPool) {
+        let k = keys();
+        let s = seed(&pool, &k).await;
+        let e = env(&pool, &k);
+        let mut ids = Vec::new();
+        for (person, site, zone) in [
+            (s.emp_a, s.site_a, "out_of_zone"),
+            (s.emp_b, s.site_b, "in_zone"),
+        ] {
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO time_event (id, person_id, kind, server_ts, zone_status, site_id) \
+                 VALUES ($1, $2, 'start', now(), $3, $4)",
+            )
+            .bind(id)
+            .bind(person)
+            .bind(zone)
+            .bind(site)
+            .execute(&pool)
+            .await
+            .unwrap();
+            ids.push((person, id));
+        }
+        for (person, id) in &ids {
+            store::repo::clock_note::add(&pool, &k.0, *id, *person, "uitstap met de klas")
+                .await
+                .unwrap();
+        }
+        let o = today_overview(&e, &s.mgr_a, Some(s.site_a), Utc::now())
+            .await
+            .unwrap();
+        assert!(matches!(o.attention[0].today, TodayStatusDto::OutOfZone(_)));
+        assert_eq!(o.attention[0].note.as_deref(), Some("uitstap met de klas"));
+        // Only a flagged start shows its note.
+        let o = today_overview(&e, &s.admin, None, Utc::now())
+            .await
+            .unwrap();
+        let bob = o.working_rows.iter().find(|r| r.id == s.emp_b).unwrap();
+        assert_eq!(bob.note, None);
     }
 
     #[sqlx::test(migrations = "../../migrations")]

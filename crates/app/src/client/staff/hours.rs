@@ -3,16 +3,16 @@
 
 use chrono::{Duration, NaiveDate};
 use dioxus::prelude::*;
-use domain::{EventKind, ZoneStatus};
+use domain::{EventKind, FREE_TEXT_MAX_CHARS, ZoneStatus};
 use uuid::Uuid;
 
 use super::export::ExportTab;
 use super::field::{Field, error_id};
 use super::flow::{ErrorNotice, error_code, report_error};
 use super::hours_fmt::{
-    Coverage, Issues, MAX_RANGE_DAYS, Preset, REASON_MAX_CHARS, Sign, coverage, day_label,
-    format_deviation, format_duration, open_issues, parse_clock, parse_date, preset_range,
-    range_is_valid, reason_ok, sign_of, validation_range,
+    Coverage, Issues, MAX_RANGE_DAYS, Preset, Sign, coverage, day_label, format_deviation,
+    format_duration, open_issues, parse_clock, parse_date, preset_range, range_is_valid, reason_ok,
+    sign_of, validation_range,
 };
 use super::icons::{Icon, IconKind};
 use super::load::{Skeleton, use_loaded};
@@ -892,6 +892,11 @@ fn DayBody(
                                     Icon { kind: icon, size: 14 }
                                     "{label}"
                                 }
+                                if let Some(note) = &event.note {
+                                    span { class: "st-reason st-event-note",
+                                        {fl!(LANGUAGE_LOADER, "clock-note-staff", note = note.as_str())}
+                                    }
+                                }
                             }
                         }
                     }
@@ -1098,7 +1103,7 @@ fn CorrectionForm(
                     id: "correction-reason",
                     class: "st-input st-textarea",
                     rows: "3",
-                    maxlength: "{REASON_MAX_CHARS}",
+                    maxlength: "{FREE_TEXT_MAX_CHARS}",
                     aria_invalid: reason_problem,
                     aria_describedby: reason_problem.then(|| error_id("correction-reason")),
                     value: "{reason}",

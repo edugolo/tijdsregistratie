@@ -375,3 +375,25 @@ and records the run in `organisation_settings` (`last_location_purge_at`, `last_
 in one transaction. Logs hold only the count and the cutoff. A failed run is logged and retried at the
 next interval. Admins see the last run on the organisation settings screen. `admin purge-locations`
 stays for manual use and records the run too.
+
+## v1.1: clock note
+
+After a start or stop that was not in the zone (`out_of_zone`, `uncertain`, `no_location`), the
+employee may add one short explanation (e.g. “uitstap met de klas”). It is optional and never
+blocks or delays clocking: the event is already stored when the warning screen shows the field,
+and "OK" skips it.
+
+- **Data model**: `clock_note` (`id`, `event_id` unique → `time_event`, `person_id` → `person`,
+  `note_enc`, `created_at`). The note is free text, so it is encrypted with associated data
+  `clock_note || note || id`. A composite foreign key `(event_id, person_id)` → `time_event (id,
+  person_id)` ties the note to the person of the event. Insert-only: triggers refuse update,
+  delete and truncate. Like correction reasons and locations, notes are not part of key rotation
+  (append-only); keep older key versions.
+- **Rules (server)**: one note per event, no edits; only the event's own person; only when the
+  event's zone status is not `in_zone`; only on the same local day in the organisation time
+  zone; 3 to 500 characters once trimmed (the same rule as correction reasons,
+  `domain::free_text`). `ClockResult.event_id` names the new event; `add_clock_note(event_id,
+  text)` adds the note. No audit row: it is the employee's own action, not a manager mutation.
+- **Staff**: the note shows under the zone flag in the Uren day detail and under the name of a
+  flagged start on "Vandaag", decrypted only for staff whose scope covers that person (the same
+  checks as the rest of those pages). Not in the payroll export.

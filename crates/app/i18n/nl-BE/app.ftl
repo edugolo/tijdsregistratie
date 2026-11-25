@@ -571,3 +571,11 @@ export-download-no-rows = Er zijn geen gevalideerde uren in deze periode.
 # --- location purge ---
 location-purge-last = Locaties laatst opgeruimd op { $date } om { $time } ({ $count } verwijderd)
 location-purge-never = Locaties nog niet opgeruimd
+
+# --- clock note ---
+clock-note-label = Wil je dit uitleggen? Dat hoeft niet.
+clock-note-placeholder = Bv. uitstap met de klas
+clock-note-save = Uitleg bewaren
+clock-note-saved = Je uitleg is bewaard.
+clock-note-failed = Bewaren lukte niet. Probeer het opnieuw.
+clock-note-staff = Uitleg: “{ $note }”

@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use domain::{FREE_TEXT_MAX_CHARS, free_text};
 
 use crate::client::components::{
     ActionKind, DaySummaryCard, Icon, MainActionButton, NoticeCard, PrimaryButton, Screen,
@@ -97,7 +98,18 @@ pub fn Working(
     }
 }
 
-/// E6: out-of-zone or no-location warning. Never blocks; the registration is kept.
+/// Where the optional note on the warning screen stands.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum NoteState {
+    #[default]
+    Open,
+    Saving,
+    Saved,
+    Failed,
+}
+
+/// E6: out-of-zone or no-location warning. Never blocks; the registration is kept. With
+/// `on_note`, the employee may add one short explanation; "OK" always skips it.
 #[component]
 pub fn OutOfZone(
     org_name: String,
@@ -105,8 +117,11 @@ pub fn OutOfZone(
     saved_time: String,
     #[props(default)] no_location: bool,
     #[props(default)] stopped: bool,
+    #[props(default)] note: NoteState,
+    #[props(default)] on_note: Option<EventHandler<String>>,
     on_ok: EventHandler<()>,
 ) -> Element {
+    let mut text = use_signal(String::new);
     let title = if no_location {
         fl!(LANGUAGE_LOADER, "zone-no-location-title")
     } else {
@@ -121,12 +136,40 @@ pub fn OutOfZone(
     } else {
         fl!(LANGUAGE_LOADER, "zone-saved-at", time = saved_time.as_str())
     };
+    let can_save = note != NoteState::Saving && free_text(&text.read()).is_some();
     rsx! {
         Screen { org_name, person_name: Some(person_name),
             div { class: "icon-tile warn", Icon { name: "alert-triangle", size: 36 } }
             h1 { {title} }
             p { class: "text-sub", {saved} }
             p { class: "text-sub", {fl!(LANGUAGE_LOADER, "zone-manager")} }
+            if let Some(on_note) = on_note {
+                if note == NoteState::Saved {
+                    NoticeCard { icon: "check", {fl!(LANGUAGE_LOADER, "clock-note-saved")} }
+                } else {
+                    div { class: "note-field",
+                        label { r#for: "clock-note", {fl!(LANGUAGE_LOADER, "clock-note-label")} }
+                        textarea {
+                            id: "clock-note",
+                            class: "note-input",
+                            rows: "2",
+                            maxlength: "{FREE_TEXT_MAX_CHARS}",
+                            placeholder: fl!(LANGUAGE_LOADER, "clock-note-placeholder"),
+                            disabled: note == NoteState::Saving,
+                            value: "{text}",
+                            oninput: move |e| text.set(e.value()),
+                        }
+                    }
+                    if note == NoteState::Failed {
+                        NoticeCard { icon: "alert-triangle", {fl!(LANGUAGE_LOADER, "clock-note-failed")} }
+                    }
+                    SecondaryButton {
+                        label: fl!(LANGUAGE_LOADER, "clock-note-save"),
+                        disabled: !can_save,
+                        onclick: move |_| on_note.call(text.read().trim().to_string()),
+                    }
+                }
+            }
             div { class: "spacer" }
             div { class: "actions",
                 PrimaryButton { label: fl!(LANGUAGE_LOADER, "action-ok"), onclick: move |_| on_ok.call(()) }
