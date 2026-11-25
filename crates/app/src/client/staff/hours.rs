@@ -9,6 +9,7 @@ use uuid::Uuid;
 use super::export::ExportTab;
 use super::field::{Field, error_id};
 use super::flow::{ErrorNotice, error_code, report_error};
+use super::free_text::{FreeText, note_label};
 use super::hours_fmt::{
     Coverage, Issues, MAX_RANGE_DAYS, Preset, Sign, coverage, day_label, format_deviation,
     format_duration, open_issues, parse_clock, parse_date, preset_range, range_is_valid,
@@ -893,8 +894,10 @@ fn DayBody(
                                     "{label}"
                                 }
                                 if let Some(note) = &event.note {
-                                    span { class: "st-reason st-event-note",
-                                        {fl!(LANGUAGE_LOADER, "clock-note-staff", note = note.as_str())}
+                                    FreeText {
+                                        class: "st-reason st-event-note",
+                                        label: note_label(),
+                                        text: note.clone(),
                                     }
                                 }
                             }
@@ -921,7 +924,7 @@ fn DayBody(
                                 time = time_label(correction.created_at)
                             )}
                         }
-                        span { class: "st-reason", "{correction.reason}" }
+                        FreeText { class: "st-reason", text: correction.reason.clone() }
                     }
                 }
             }

@@ -584,7 +584,6 @@ clock-note-placeholder = Bv. uitstap met de klas
 clock-note-save = Uitleg bewaren
 clock-note-saved = Je uitleg is bewaard.
 clock-note-failed = Bewaren lukte niet. Probeer het opnieuw.
-clock-note-staff = Uitleg: “{ $note }”
 
 # --- enrollment code ---
 enroll-code-label = Geen camera? Typ deze code:
@@ -602,3 +601,6 @@ enroll-code-rate-limited = Te veel pogingen. Probeer het over enkele minuten opn
 free-text-too-short = Schrijf minstens 3 tekens.
 free-text-too-long = Hou het onder 500 tekens.
 free-text-invalid = Deze tekst bevat tekens die we niet kunnen bewaren. Typ hem gewoon opnieuw.
+
+# --- free text display ---
+free-text-note-label = Uitleg:

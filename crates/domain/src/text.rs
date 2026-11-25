@@ -1,10 +1,11 @@
 //! Free text typed by people: correction reasons and clock notes.
 
+use unicode_normalization::char::canonical_combining_class;
 use unicode_properties::{GeneralCategory, GeneralCategoryGroup, UnicodeGeneralCategory};
 
 pub const FREE_TEXT_MIN_CHARS: usize = 3;
 pub const FREE_TEXT_MAX_CHARS: usize = 500;
-/// The most combining marks (`Mn`/`Me`) allowed in a row after one base character.
+/// The most combining marks (`Mn`/`Me`) allowed on one base character.
 pub const FREE_TEXT_MAX_MARKS: usize = 4;
 
 const ZWNJ: char = '\u{200C}';
@@ -12,8 +13,11 @@ const ZWJ: char = '\u{200D}';
 const VS15: char = '\u{FE0E}';
 const VS16: char = '\u{FE0F}';
 const BLACK_FLAG: char = '\u{1F3F4}';
-const TAG_SPECS: std::ops::RangeInclusive<char> = '\u{E0020}'..='\u{E007E}';
+const TAG_DIGITS: std::ops::RangeInclusive<char> = '\u{E0030}'..='\u{E0039}';
+const TAG_LOWERCASE: std::ops::RangeInclusive<char> = '\u{E0061}'..='\u{E007A}';
 const CANCEL_TAG: char = '\u{E007F}';
+/// Canonical combining class of a virama, which a ZWJ or ZWNJ may follow.
+const VIRAMA_CLASS: u8 = 9;
 
 /// Why a free text was refused, so a client can tell the person what to change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +26,7 @@ pub enum FreeTextError {
     TooShort,
     /// More than [`FREE_TEXT_MAX_CHARS`] characters in total.
     TooLong,
-    /// An invisible, bidi or control character, or a misplaced joiner, selector or tag.
+    /// An invisible, bidi or control character, or a misplaced joiner, selector, mark or tag.
     InvalidCharacters,
 }
 
@@ -33,25 +37,38 @@ pub fn free_text(value: &str) -> Option<&str> {
 
 /// Checks a correction reason or clock note and returns it trimmed.
 ///
-/// Surrounding whitespace (spaces, tabs, CR/LF) is trimmed first. The rest is refused with
-/// [`FreeTextError::InvalidCharacters`] when it holds:
+/// Surrounding whitespace (spaces, tabs, CR/LF, line and paragraph separators) is trimmed
+/// first. More than four bytes per allowed character is [`FreeTextError::TooLong`] before any
+/// character is inspected. The rest is refused with [`FreeTextError::InvalidCharacters`] when
+/// it holds:
 /// - a control character other than `'\n'` (a `'\r'` is fine right before `'\n'`); a tab inside
 ///   the text is refused, not rewritten, so the stored text is exactly what was checked;
+/// - a line or paragraph separator (`U+2028`, `U+2029`): `'\n'` is the only line break;
 /// - a bidi control, zero-width space, word joiner or invisible operator, BOM, soft hyphen,
 ///   Mongolian vowel separator, combining grapheme joiner, Hangul filler or braille blank;
-/// - a ZWJ or ZWNJ that is not between two non-space characters;
+/// - an unassigned (`Cn`) or private-use (`Co`) code point;
+/// - a ZWJ or ZWNJ that is not between two non-space characters, that is followed by a
+///   combining mark, or that follows a combining mark other than a virama or VS15/VS16;
 /// - a variation selector other than VS15/VS16 right after a non-space base character (so
 ///   `U+FE00`–`U+FE0D`, the supplement `U+E0100`–`U+E01EF` and the Mongolian free variation
 ///   selectors are always refused);
-/// - a tag character outside a flag sequence (`U+1F3F4`, tags, `U+E007F`);
+/// - a tag character outside a subdivision flag: `U+1F3F4`, two tag letters `a`–`z`, one to
+///   four more tag letters or digits, then `U+E007F`;
 /// - any other format character (`Cf`);
-/// - a combining mark with no base character, or more than [`FREE_TEXT_MAX_MARKS`] in a row.
+/// - a combining mark at the start or after whitespace, a control character, ZWJ or ZWNJ, or
+///   more than [`FREE_TEXT_MAX_MARKS`] on one base character (joiners and variation selectors
+///   between them do not start a new base).
 ///
 /// Otherwise the text is [`FreeTextError::TooLong`] above [`FREE_TEXT_MAX_CHARS`] characters,
 /// and [`FreeTextError::TooShort`] with fewer than [`FREE_TEXT_MIN_CHARS`] visible characters
 /// (letters, numbers, punctuation and symbols).
 pub fn check_free_text(value: &str) -> Result<&str, FreeTextError> {
     let value = value.trim();
+    // A char is at most four bytes, so this bounds the work below without changing the result
+    // for any text that could be short enough.
+    if value.len() > 4 * FREE_TEXT_MAX_CHARS {
+        return Err(FreeTextError::TooLong);
+    }
     let chars: Vec<char> = value.chars().collect();
     if !chars_allowed(&chars) {
         return Err(FreeTextError::InvalidCharacters);
@@ -66,28 +83,29 @@ pub fn check_free_text(value: &str) -> Result<&str, FreeTextError> {
 }
 
 fn chars_allowed(chars: &[char]) -> bool {
+    // Combining marks on the current base character.
     let mut marks = 0;
-    let mut in_tags = false;
-    for (i, &c) in chars.iter().enumerate() {
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
         let prev = i.checked_sub(1).map(|j| chars[j]);
         let next = chars.get(i + 1).copied();
-        if in_tags {
-            match c {
-                c if TAG_SPECS.contains(&c) => {}
-                CANCEL_TAG => in_tags = false,
-                _ => return false,
-            }
+        if c == BLACK_FLAG && next.is_some_and(is_tag) {
+            let Some(len) = subdivision_tags(&chars[i + 1..]) else {
+                return false;
+            };
+            i += 1 + len;
+            marks = 0;
             continue;
         }
         let allowed = match c {
             '\n' => true,
             '\r' => next == Some('\n'),
-            ZWJ | ZWNJ => prev.is_some_and(is_joinable) && next.is_some_and(is_joinable),
-            VS15 | VS16 => prev.is_some_and(is_base),
-            c if TAG_SPECS.contains(&c) && prev == Some(BLACK_FLAG) => {
-                in_tags = true;
-                true
+            ZWJ | ZWNJ => {
+                prev.is_some_and(|p| is_joinable(p) && (!is_combining(p) || joins_after_mark(p)))
+                    && next.is_some_and(|n| is_joinable(n) && !is_combining(n))
             }
+            VS15 | VS16 => prev.is_some_and(is_base),
             c => !is_refused(c),
         };
         if !allowed {
@@ -95,14 +113,28 @@ fn chars_allowed(chars: &[char]) -> bool {
         }
         if is_combining(c) {
             marks += 1;
-            if i == 0 || marks > FREE_TEXT_MAX_MARKS {
+            if !prev.is_some_and(can_carry_mark) || marks > FREE_TEXT_MAX_MARKS {
                 return false;
             }
-        } else {
+        } else if !matches!(c, ZWJ | ZWNJ | VS15 | VS16) {
             marks = 0;
         }
+        i += 1;
     }
-    !in_tags
+    true
+}
+
+/// The length of the tag run of a subdivision flag (letters, letters or digits, cancel tag) at
+/// the start of `tags`, or `None` when the tags spell anything else.
+fn subdivision_tags(tags: &[char]) -> Option<usize> {
+    let end = tags.iter().position(|&c| c == CANCEL_TAG)?;
+    let spec = &tags[..end];
+    let valid = (3..=6).contains(&spec.len())
+        && spec[..2].iter().all(|c| TAG_LOWERCASE.contains(c))
+        && spec[2..]
+            .iter()
+            .all(|c| TAG_LOWERCASE.contains(c) || TAG_DIGITS.contains(c));
+    valid.then_some(end + 1)
 }
 
 /// Characters that are refused wherever they stand (outside the exceptions in `chars_allowed`).
@@ -110,7 +142,12 @@ fn is_refused(c: char) -> bool {
     is_invisible(c)
         || matches!(
             c.general_category(),
-            GeneralCategory::Control | GeneralCategory::Format
+            GeneralCategory::Control
+                | GeneralCategory::Format
+                | GeneralCategory::Unassigned
+                | GeneralCategory::PrivateUse
+                | GeneralCategory::LineSeparator
+                | GeneralCategory::ParagraphSeparator
         )
 }
 
@@ -147,6 +184,21 @@ fn is_combining(c: char) -> bool {
     )
 }
 
+/// The combining marks (`Mn`) a ZWJ or ZWNJ may follow: a virama, as in Indic conjuncts, and
+/// VS15/VS16, as in emoji ZWJ sequences.
+fn joins_after_mark(c: char) -> bool {
+    matches!(c, VS15 | VS16) || canonical_combining_class(c) == VIRAMA_CLASS
+}
+
+fn is_tag(c: char) -> bool {
+    ('\u{E0000}'..=CANCEL_TAG).contains(&c)
+}
+
+/// A character a combining mark may follow: a base character, another mark or a selector.
+fn can_carry_mark(c: char) -> bool {
+    !c.is_whitespace() && !c.is_control() && c != ZWJ && c != ZWNJ
+}
+
 /// A neighbour a ZWJ or ZWNJ may stand next to.
 fn is_joinable(c: char) -> bool {
     !c.is_whitespace() && c != ZWJ && c != ZWNJ
@@ -171,6 +223,19 @@ fn is_visible(c: char) -> bool {
 mod tests {
     use super::*;
     use FreeTextError::*;
+
+    /// The tag characters (`U+E0000` + ASCII) that spell `ascii`.
+    fn tags(ascii: &str) -> String {
+        ascii
+            .chars()
+            .map(|c| char::from_u32(0xE0000 + c as u32).unwrap())
+            .collect()
+    }
+
+    /// A black flag followed by the tag spelling of `ascii` and a cancel tag.
+    fn flag(ascii: &str) -> String {
+        format!("🏴{}\u{E007F}", tags(ascii))
+    }
 
     #[test]
     fn free_text_is_trimmed_and_bounded() {
@@ -217,6 +282,8 @@ mod tests {
             ("\n abc \n", "abc"),
             ("\t abc\t", "abc"),
             ("\r\nabc\r\n", "abc"),
+            // Line and paragraph separators are only trimmed at the ends.
+            ("\u{2029}abc\u{2028}", "abc"),
             // Non-breaking space is a separator, not a control character.
             ("a\u{00A0}bc", "a\u{00A0}bc"),
             // Four combining marks on one base are still fine.
@@ -227,12 +294,31 @@ mod tests {
         ] {
             assert_eq!(check_free_text(input), Ok(expected), "{input:?}");
         }
+        for subdivision in ["gbsct", "gbwls", "gbeng", "usca", "be1234"] {
+            let input = format!("{} op uitstap", flag(subdivision));
+            assert_eq!(check_free_text(&input), Ok(input.as_str()), "{subdivision}");
+        }
     }
 
     #[test]
     fn refused_texts_say_why() {
         let zalgo = format!("a{}bc", "\u{0300}".repeat(5));
-        for (input, expected) in [
+        let zalgo_joined = format!(
+            "a{}bc",
+            "\u{0300}\u{0300}\u{0300}\u{0300}\u{200D}".repeat(100)
+        );
+        let zalgo_zwnj = format!(
+            "a{}bc",
+            "\u{0300}\u{0300}\u{0300}\u{0300}\u{200C}".repeat(3)
+        );
+        let zalgo_split = "a\u{0300}\u{0300}\u{0300}\u{200D}\u{0300}\u{0300}bc".to_string();
+        let flag_payload = format!("{} abc", flag("hello world"));
+        let flag_upper = format!("{} abc", flag("GBSCT"));
+        let flag_short = format!("{} abc", flag("gb"));
+        let flag_long = format!("{} abc", flag("gbabcde"));
+        let flag_digit_first = format!("{} abc", flag("1bsct"));
+        let flag_open = format!("🏴{} abc", tags("gbsct"));
+        let wrong = [
             ("", TooShort),
             ("ab", TooShort),
             ("  a  ", TooShort),
@@ -280,15 +366,51 @@ mod tests {
             ("abc\u{0085}def", InvalidCharacters),
             ("\u{0301}abc", InvalidCharacters),
             (zalgo.as_str(), InvalidCharacters),
+            // Joiners do not start a new base: five marks on one base, split by a ZWJ or ZWNJ.
+            (zalgo_joined.as_str(), InvalidCharacters),
+            (zalgo_zwnj.as_str(), InvalidCharacters),
+            (zalgo_split.as_str(), InvalidCharacters),
+            ("ab\u{0301}\u{200D}c", InvalidCharacters),
+            ("ab\u{200D}\u{0301}c", InvalidCharacters),
+            ("ab\u{200C}\u{0301}c", InvalidCharacters),
+            // A combining mark needs a base: not after a space, line break or joiner.
+            ("ab \u{0301}c", InvalidCharacters),
+            ("ab\n\u{0301}c", InvalidCharacters),
+            ("ab\u{00A0}\u{0301}c", InvalidCharacters),
+            ("ab\r\n\u{0301}c", InvalidCharacters),
+            // Unassigned and private-use code points.
+            ("abc\u{2065}def", InvalidCharacters),
+            ("abc\u{FFF0}", InvalidCharacters),
+            ("abc\u{FFF8}", InvalidCharacters),
+            ("abc\u{E0000}", InvalidCharacters),
+            ("abc\u{E0002}", InvalidCharacters),
+            ("abc\u{E001F}", InvalidCharacters),
+            ("abc\u{E000}", InvalidCharacters),
+            ("abc\u{F8FF}", InvalidCharacters),
+            ("abc\u{F0000}", InvalidCharacters),
+            ("abc\u{10FFFD}", InvalidCharacters),
+            // Tags only spell a subdivision flag.
+            (flag_payload.as_str(), InvalidCharacters),
+            (flag_upper.as_str(), InvalidCharacters),
+            (flag_short.as_str(), InvalidCharacters),
+            (flag_long.as_str(), InvalidCharacters),
+            (flag_digit_first.as_str(), InvalidCharacters),
+            (flag_open.as_str(), InvalidCharacters),
+            // '\n' is the only line break inside the text.
+            ("abc\u{2029}def", InvalidCharacters),
+            ("abc\u{2028}def", InvalidCharacters),
             // Blank-looking: fewer than three visible characters.
             ("a\u{0301}\u{0301}", TooShort),
             ("a b", TooShort),
             ("a\u{3000}\u{2003}b", TooShort),
             // Visible characters are counted, not graphemes: a lone two-symbol flag is short.
             ("🏳\u{FE0F}\u{200D}🌈", TooShort),
-        ] {
-            assert_eq!(check_free_text(input), Err(expected), "{input:?}");
-        }
+        ]
+        .into_iter()
+        .filter(|&(input, expected)| check_free_text(input) != Err(expected))
+        .map(|(input, expected)| (input, expected, check_free_text(input)))
+        .collect::<Vec<_>>();
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[test]
@@ -301,5 +423,10 @@ mod tests {
         // Spaces count towards the maximum.
         let spaced = format!("abc{}def", " ".repeat(FREE_TEXT_MAX_CHARS));
         assert_eq!(check_free_text(&spaced), Err(TooLong));
+        // Oversized input is refused on its byte length, before any character is inspected.
+        let mut huge = "x".repeat(4 * FREE_TEXT_MAX_CHARS + 1);
+        huge.push('\u{202E}');
+        assert_eq!(check_free_text(&huge), Err(TooLong));
+        assert_eq!(check_free_text(&"\u{0300}".repeat(1_000_000)), Err(TooLong));
     }
 }

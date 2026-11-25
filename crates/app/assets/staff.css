@@ -307,6 +307,7 @@
 .st-event-column > .st-inline { align-self: stretch; gap: 4px 8px; }
 .st-event-main { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; }
 .st-reason { overflow-wrap: anywhere; font-size: 14px; }
+.st-free-text { unicode-bidi: isolate; }
 .st-textarea { padding: 12px 16px; min-height: 88px; resize: vertical; }
 .st-contract-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 8px; align-self: stretch; }
 .st-field-day { flex: none; }
