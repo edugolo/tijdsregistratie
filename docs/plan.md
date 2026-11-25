@@ -389,15 +389,20 @@ same link.
   redeemed: changed fields `["enrollment_token", "link"]` or `["enrollment_token", "code"]`. The raw
   token never reaches the browser that typed the code.
 - **Threat model**: every typed-code attempt is charged up front and refunded only on success, against
-  50 per client address and 1000 for the whole installation per 10 minutes. 60 bits is about
-  1.2 × 10^18 codes: even at the global cap around the clock (about 5 × 10^7 guesses a year) the
-  chance of hitting a live code is about 5 × 10^-11 per year per live code, so the caps exist to stop
-  automated guessing, not to make it hopeless. They are wide on purpose: the global cap stands on
-  its own (all clients without a known address, or behind a proxy without trusted headers, share
-  it), and a tight one let anyone disable typed codes for everybody with a few wrong guesses a
-  minute. A flood that does run the global bucket dry blocks typed codes for a while, never the QR
-  link, and is recorded once per window as an actor-less `audit_log` row
-  `enrollment_code.rate_limited` (no client data). Behind a reverse proxy that overwrites
+  50 per client and 10 000 for the whole installation per 10 minutes. For these buckets a client is
+  an IPv4 address or an IPv6 /48 (the general auth limiter keeps grouping IPv6 by /64): one VPS
+  with a /48 holds thousands of /64s, so with /64 grouping a single host could keep the global
+  bucket dry. 60 bits is 32^12 = 2^60 ≈ 1.15 × 10^18 codes: even at the global cap around the clock
+  (about 5.3 × 10^8 guesses a year) the chance of hitting a live code is about 4.6 × 10^-10 per year
+  per live code, so the caps exist to stop automated guessing, not to make it hopeless. They are
+  wide on purpose: the global cap stands on its own (all clients without a known address, or behind
+  a proxy without trusted headers, share it), and a tight one let anyone disable typed codes for
+  everybody with a few wrong guesses a minute. Residual risk: an attacker who controls about 200
+  distinct /48s or IPv4 addresses can still run the global bucket dry and so switch off typed codes
+  for everyone while the attack lasts. The QR link keeps working, and the first dry bucket of every
+  10-minute window is recorded as an actor-less `audit_log` row `enrollment_code.rate_limited` (no
+  client data, written in the background so it never delays the refusal), which makes the attack
+  visible. Behind a reverse proxy that overwrites
   `X-Forwarded-For`, set `TRUST_PROXY_HEADERS=true`, or every client shares one per-client bucket of
   50. Every failure is one generic `token-invalid`, and the database holds only a keyed hash of the
   short-lived code.
