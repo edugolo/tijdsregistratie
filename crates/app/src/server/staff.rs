@@ -695,6 +695,7 @@ async fn issue_enrollment(
     .await?;
     let token = enrollment::issue_token(
         &mut *tx,
+        env.blind,
         person_id,
         Some(scope.person_id),
         Duration::minutes(ENROLLMENT_TTL_MINUTES),
@@ -1802,7 +1803,7 @@ mod tests {
         assert_eq!(audit_actions(&pool).await, vec!["enrollment.issued"]);
         // The typed code leads to the same token as the link.
         assert_eq!(dto.code.len(), 14);
-        let found = enrollment::peek_code(&pool, &dto.code)
+        let found = enrollment::peek_code(&pool, &k.1, &dto.code)
             .await
             .unwrap()
             .unwrap();
@@ -3223,7 +3224,7 @@ mod tests {
             Some(s.mgr_a_id)
         );
         assert_eq!(
-            enrollment::peek_code(&pool, &dto.code)
+            enrollment::peek_code(&pool, &k.1, &dto.code)
                 .await
                 .unwrap()
                 .map(|m| m.person_id),

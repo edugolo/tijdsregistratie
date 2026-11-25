@@ -56,8 +56,14 @@ pub async fn bootstrap(
     audit::record(pool, None, "person.created", "person", Some(p.id), &[]).await?;
     role::assign(pool, p.id, Role::Admin, None, None).await?;
     audit::record(pool, None, "role.assigned", "person", Some(p.id), &["role"]).await?;
-    let token =
-        enrollment::issue_token(pool, p.id, None, Duration::minutes(TOKEN_TTL_MINUTES)).await?;
+    let token = enrollment::issue_token(
+        pool,
+        blind,
+        p.id,
+        None,
+        Duration::minutes(TOKEN_TTL_MINUTES),
+    )
+    .await?;
     Ok((p.id, enrollment_url(origin, &token.raw)))
 }
 

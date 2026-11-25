@@ -95,6 +95,10 @@ struct RegistrationCeremony {
     person_id: Uuid,
     /// SHA-256 of the enrollment token; the raw token never enters the session.
     token_hash: Vec<u8>,
+    /// Whether the token was found through its typed code rather than the link (audit only).
+    /// Absent in ceremonies started before this field existed: those came through the link.
+    #[serde(default)]
+    via_code: bool,
 }
 
 fn first_name(display_name: &str) -> String {
@@ -191,7 +195,7 @@ pub async fn enrollment_info_by_code(state: &AppState, code: &str) -> Result<Enr
 
 /// The valid token behind a typed code, or the generic token error.
 async fn code_match(state: &AppState, code: &str) -> Result<enrollment::CodeMatch> {
-    enrollment::peek_code(&state.pool, code)
+    enrollment::peek_code(&state.pool, &state.blind, code)
         .await
         .map_err(db)?
         .ok_or(AuthError::Token)
@@ -206,7 +210,14 @@ pub async fn begin_registration(
         .await
         .map_err(db)?
         .ok_or(AuthError::Token)?;
-    start_registration(state, session, person_id, enrollment::token_hash(token)).await
+    start_registration(
+        state,
+        session,
+        person_id,
+        enrollment::token_hash(token),
+        false,
+    )
+    .await
 }
 
 /// Starts the same registration ceremony as [`begin_registration`] for the token a typed code
@@ -218,7 +229,7 @@ pub async fn begin_registration_with_code(
     code: &str,
 ) -> Result<CreationChallengeResponse> {
     let found = code_match(state, code).await?;
-    start_registration(state, session, found.person_id, found.token_hash).await
+    start_registration(state, session, found.person_id, found.token_hash, true).await
 }
 
 /// The ceremony for the token known by `token_hash`; the session keeps only that hash.
@@ -227,6 +238,7 @@ async fn start_registration(
     session: &Session,
     person_id: Uuid,
     token_hash: Vec<u8>,
+    via_code: bool,
 ) -> Result<CreationChallengeResponse> {
     let p = active_person(&state.pool, &state.keys, person_id)
         .await
@@ -255,6 +267,7 @@ async fn start_registration(
             state: reg,
             person_id,
             token_hash,
+            via_code,
         },
     )
     .await
@@ -362,10 +375,17 @@ pub async fn finish_registration(
         &state.pool,
         &ceremony.token_hash,
         p.id,
-        new_key.cred_id().as_ref(),
-        json,
-        label.as_deref(),
+        enrollment::NewPasskey {
+            credential_id: new_key.cred_id().as_ref(),
+            credential_json: json,
+            label: label.as_deref(),
+        },
         devices,
+        if ceremony.via_code {
+            enrollment::Redemption::Code
+        } else {
+            enrollment::Redemption::Link
+        },
     )
     .await
     .map_err(db)?
@@ -604,9 +624,10 @@ mod tests {
         let p = person::create_person(&state.pool, &state.keys, &state.blind, name, None)
             .await
             .unwrap();
-        let t = enrollment::issue_token(&state.pool, p.id, None, Duration::minutes(15))
-            .await
-            .unwrap();
+        let t =
+            enrollment::issue_token(&state.pool, &state.blind, p.id, None, Duration::minutes(15))
+                .await
+                .unwrap();
         (p, t.raw)
     }
 
@@ -1110,9 +1131,15 @@ mod tests {
         person_id: Uuid,
         ua: Option<&str>,
     ) -> (Session, Vec<u8>, SoftPasskey) {
-        let t = enrollment::issue_token(&state.pool, person_id, None, Duration::minutes(15))
-            .await
-            .unwrap();
+        let t = enrollment::issue_token(
+            &state.pool,
+            &state.blind,
+            person_id,
+            None,
+            Duration::minutes(15),
+        )
+        .await
+        .unwrap();
         let mut auth = SoftPasskey::new(true);
         let session = new_session();
         let challenge = begin_registration(state, &session, &t.raw).await.unwrap();
@@ -1398,9 +1425,10 @@ mod tests {
         let p = person::create_person(&state.pool, &state.keys, &state.blind, name, None)
             .await
             .unwrap();
-        let t = enrollment::issue_token(&state.pool, p.id, None, Duration::minutes(15))
-            .await
-            .unwrap();
+        let t =
+            enrollment::issue_token(&state.pool, &state.blind, p.id, None, Duration::minutes(15))
+                .await
+                .unwrap();
         (p, t)
     }
 
@@ -1439,7 +1467,7 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        // Audited exactly like a QR redemption.
+        // Audited with the same action as a QR redemption.
         assert_eq!(audit_actions(&state.pool).await, vec!["passkey.registered"]);
         // The code and the QR link are both used up now.
         assert_eq!(
@@ -1452,6 +1480,47 @@ mod tests {
                 .await
                 .unwrap_err(),
             AuthError::Token
+        );
+    }
+
+    /// The changed fields of the `passkey.registered` audit rows, oldest first.
+    async fn registered_via(pool: &PgPool) -> Vec<Vec<String>> {
+        sqlx::query_scalar(
+            "SELECT changed_fields FROM audit_log WHERE action = 'passkey.registered' \
+             ORDER BY at, id",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn audit_says_whether_the_link_or_the_typed_code_was_used(pool: PgPool) {
+        let state = state(pool);
+        let (_, link) = person_with_code(&state, "Jan Peeters").await;
+        let (me, _) = register(
+            &state,
+            &new_session(),
+            &mut SoftPasskey::new(true),
+            &link.raw,
+        )
+        .await;
+        me.unwrap();
+        let (_, typed) = person_with_code(&state, "Els Janssens").await;
+        register_with_code(
+            &state,
+            &new_session(),
+            &mut SoftPasskey::new(true),
+            &typed.code,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            registered_via(&state.pool).await,
+            vec![
+                vec!["enrollment_token".to_string(), "link".to_string()],
+                vec!["enrollment_token".to_string(), "code".to_string()],
+            ]
         );
     }
 
@@ -1502,15 +1571,17 @@ mod tests {
         let (p, _) = person_with_code(&state, "Els Janssens").await;
         enrollment::issue_token(
             &state.pool,
+            &state.blind,
             superseded.person_id,
             None,
             Duration::minutes(15),
         )
         .await
         .unwrap();
-        let expired = enrollment::issue_token(&state.pool, p.id, None, Duration::seconds(-5))
-            .await
-            .unwrap();
+        let expired =
+            enrollment::issue_token(&state.pool, &state.blind, p.id, None, Duration::seconds(-5))
+                .await
+                .unwrap();
         let (inactive, inactive_t) = person_with_code(&state, "Jos Weg").await;
         person::set_active(&state.pool, inactive.id, false)
             .await

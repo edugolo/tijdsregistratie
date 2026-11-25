@@ -1,12 +1,13 @@
 //! One-time enrollment tokens. Raw tokens are never stored; only their SHA-256 hash is.
 //!
 //! Each token comes with a short code that can be typed instead of scanning the QR code. The
-//! code lives on the token's row (only as a hash), so it shares the token's person, expiry and
+//! code lives on the token's row (only as an HMAC), so it shares the token's person, expiry and
 //! single use: redeeming either consumes both, and a newer token invalidates both.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration, Utc};
+use crypto::BlindIndexKey;
 use rand::TryRng;
 use rand::rngs::SysRng;
 use sha2::{Digest, Sha256};
@@ -56,16 +57,23 @@ pub fn parse_code(input: &str) -> Option<String> {
     .then_some(normalized)
 }
 
-/// SHA-256 of a normalised code: the only form in which codes are stored.
-fn code_hash(normalized: &str) -> Vec<u8> {
-    Sha256::digest(normalized.as_bytes()).to_vec()
+/// Domain prefix that keeps code hashes apart from other blind indexes under the same key.
+const CODE_HASH_DOMAIN: &str = "enrollment-code:";
+
+/// HMAC-SHA256 of a normalised code, keyed with the blind-index key: the only form in which codes
+/// are stored. Keyed, so a database reader without the key cannot test guesses offline.
+fn code_hash(blind: &BlindIndexKey, normalized: &str) -> Vec<u8> {
+    blind
+        .index(&format!("{CODE_HASH_DOMAIN}{normalized}"))
+        .to_vec()
 }
 
 /// Issues a single-use token for `person_id`, valid for `ttl`, with its typed code. Earlier
 /// unused tokens (and so their codes) of the same person are invalidated. Takes a pool or a
-/// transaction.
+/// transaction. `blind` keys the code's hash; [`peek_code`] must get the same key.
 pub async fn issue_token<'e>(
     db: impl sqlx::PgExecutor<'e>,
+    blind: &BlindIndexKey,
     person_id: Uuid,
     issued_by: Option<Uuid>,
     ttl: Duration,
@@ -94,7 +102,7 @@ pub async fn issue_token<'e>(
     .bind(issued_by)
     .bind(expires_at)
     .bind(issued_at)
-    .bind(code_hash(&code))
+    .bind(code_hash(blind, &code))
     .execute(db)
     .await?;
     Ok(IssuedToken {
@@ -140,7 +148,11 @@ impl std::fmt::Debug for CodeMatch {
 
 /// Looks up the valid token of a typed code (any case, spaces and dashes ignored). Malformed
 /// input is rejected without a query. Never consumes: the ceremony consumes the token by hash.
-pub async fn peek_code(pool: &PgPool, input: &str) -> Result<Option<CodeMatch>> {
+pub async fn peek_code(
+    pool: &PgPool,
+    blind: &BlindIndexKey,
+    input: &str,
+) -> Result<Option<CodeMatch>> {
     let Some(normalized) = parse_code(input) else {
         return Ok(None);
     };
@@ -148,7 +160,7 @@ pub async fn peek_code(pool: &PgPool, input: &str) -> Result<Option<CodeMatch>> 
         "SELECT person_id, token_hash FROM enrollment_token \
          WHERE code_hash = $1 AND used_at IS NULL AND expires_at > now()",
     )
-    .bind(code_hash(&normalized))
+    .bind(code_hash(blind, &normalized))
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|(person_id, token_hash)| CodeMatch {
@@ -185,34 +197,65 @@ pub enum Devices {
     AddToExisting,
 }
 
+/// How an enrollment token was redeemed; recorded on the `passkey.registered` audit row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Redemption {
+    /// The QR code or the copied link (the raw token).
+    Link,
+    /// The typed code on the token's row.
+    Code,
+}
+
+impl Redemption {
+    /// The audit row's changed fields: field names only, never values.
+    fn audit_fields(self) -> &'static [&'static str] {
+        match self {
+            Self::Link => &["enrollment_token", "link"],
+            Self::Code => &["enrollment_token", "code"],
+        }
+    }
+}
+
+/// The passkey an enrollment stores.
+pub struct NewPasskey<'a> {
+    pub credential_id: &'a [u8],
+    pub credential_json: serde_json::Value,
+    /// Non-personal device label, such as "Android – Chrome".
+    pub label: Option<&'a str>,
+}
+
 /// Finishes an enrollment in one transaction: consume the token (it must belong to `person_id`),
-/// store the passkey (with its non-personal device `label`), revoke earlier passkeys when
-/// `devices` says so and write the audit rows. Returns the new passkey id, or `None` (and
+/// store the passkey, revoke earlier passkeys when `devices` says so and write the audit rows
+/// (saying how the token was redeemed, `via`). Returns the new passkey id, or `None` (and
 /// changes nothing) if the token is unknown, used, expired or belongs to someone else. Any error
 /// rolls back, leaving the token unused.
 pub async fn complete(
     pool: &PgPool,
     hash: &[u8],
     person_id: Uuid,
-    credential_id: &[u8],
-    credential_json: serde_json::Value,
-    label: Option<&str>,
+    passkey: NewPasskey<'_>,
     devices: Devices,
+    via: Redemption,
 ) -> Result<Option<Uuid>> {
     let mut tx = pool.begin().await?;
     if consume_by_hash(&mut *tx, hash).await? != Some(person_id) {
         return Ok(None);
     }
-    let passkey_id =
-        super::passkey::insert_labeled(&mut *tx, person_id, credential_id, credential_json, label)
-            .await?;
+    let passkey_id = super::passkey::insert_labeled(
+        &mut *tx,
+        person_id,
+        passkey.credential_id,
+        passkey.credential_json,
+        passkey.label,
+    )
+    .await?;
     super::audit::record(
         &mut *tx,
         Some(person_id),
         "passkey.registered",
         "passkey",
         Some(passkey_id),
-        &[],
+        via.audit_fields(),
     )
     .await?;
     if devices == Devices::ReplaceExisting {
@@ -239,6 +282,10 @@ mod tests {
     use super::*;
     use crypto::{BlindIndexKey, DataKeys, generate_key_line};
 
+    /// One blind-index key for the whole test binary: issuing and looking up must share it.
+    static BLIND: std::sync::LazyLock<BlindIndexKey> =
+        std::sync::LazyLock::new(|| BlindIndexKey::parse(&generate_key_line(1)).unwrap());
+
     async fn person(pool: &PgPool) -> Uuid {
         let keys = DataKeys::parse(&generate_key_line(1)).unwrap();
         let blind = BlindIndexKey::parse(&generate_key_line(1)).unwrap();
@@ -251,7 +298,7 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn issue_peek_consume_once(pool: PgPool) {
         let p = person(&pool).await;
-        let t = issue_token(&pool, p, None, Duration::minutes(15))
+        let t = issue_token(&pool, &BLIND, p, None, Duration::minutes(15))
             .await
             .unwrap();
         assert_eq!(t.person_id, p);
@@ -270,7 +317,7 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn raw_token_is_not_stored(pool: PgPool) {
         let p = person(&pool).await;
-        let t = issue_token(&pool, p, None, Duration::minutes(15))
+        let t = issue_token(&pool, &BLIND, p, None, Duration::minutes(15))
             .await
             .unwrap();
         let hash: Vec<u8> = sqlx::query_scalar("SELECT token_hash FROM enrollment_token")
@@ -284,7 +331,7 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn expired_and_unknown_tokens_are_rejected(pool: PgPool) {
         let p = person(&pool).await;
-        let t = issue_token(&pool, p, None, Duration::seconds(-5))
+        let t = issue_token(&pool, &BLIND, p, None, Duration::seconds(-5))
             .await
             .unwrap();
         assert_eq!(peek_valid(&pool, &t.raw).await.unwrap(), None);
@@ -296,13 +343,13 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn issuing_invalidates_earlier_tokens_of_the_same_person_only(pool: PgPool) {
         let (a, b) = (person(&pool).await, person(&pool).await);
-        let old = issue_token(&pool, a, None, Duration::minutes(15))
+        let old = issue_token(&pool, &BLIND, a, None, Duration::minutes(15))
             .await
             .unwrap();
-        let other = issue_token(&pool, b, None, Duration::minutes(15))
+        let other = issue_token(&pool, &BLIND, b, None, Duration::minutes(15))
             .await
             .unwrap();
-        let new = issue_token(&pool, a, Some(b), Duration::minutes(15))
+        let new = issue_token(&pool, &BLIND, a, Some(b), Duration::minutes(15))
             .await
             .unwrap();
         assert_eq!(peek_valid(&pool, &old.raw).await.unwrap(), None);
@@ -314,7 +361,7 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn consume_by_hash_matches_raw_token(pool: PgPool) {
         let p = person(&pool).await;
-        let t = issue_token(&pool, p, None, Duration::minutes(15))
+        let t = issue_token(&pool, &BLIND, p, None, Duration::minutes(15))
             .await
             .unwrap();
         let h = token_hash(&t.raw);
@@ -326,7 +373,7 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn complete_consumes_token_and_stores_passkey_atomically(pool: PgPool) {
         let p = person(&pool).await;
-        let t = issue_token(&pool, p, None, Duration::minutes(15))
+        let t = issue_token(&pool, &BLIND, p, None, Duration::minutes(15))
             .await
             .unwrap();
         let h = token_hash(&t.raw);
@@ -334,10 +381,13 @@ mod tests {
             &pool,
             &h,
             p,
-            b"cred-1",
-            serde_json::json!({}),
-            None,
+            NewPasskey {
+                credential_id: b"cred-1",
+                credential_json: serde_json::json!({}),
+                label: None,
+            },
             Devices::AddToExisting,
+            Redemption::Link,
         )
         .await
         .unwrap()
@@ -362,10 +412,13 @@ mod tests {
                 &pool,
                 &h,
                 p,
-                b"cred-2",
-                serde_json::json!({}),
-                None,
-                Devices::AddToExisting
+                NewPasskey {
+                    credential_id: b"cred-2",
+                    credential_json: serde_json::json!({}),
+                    label: None
+                },
+                Devices::AddToExisting,
+                Redemption::Link,
             )
             .await
             .unwrap()
@@ -379,7 +432,7 @@ mod tests {
         super::super::passkey::insert(&pool, b, b"dup", serde_json::json!({}))
             .await
             .unwrap();
-        let t = issue_token(&pool, a, None, Duration::minutes(15))
+        let t = issue_token(&pool, &BLIND, a, None, Duration::minutes(15))
             .await
             .unwrap();
         let h = token_hash(&t.raw);
@@ -389,10 +442,13 @@ mod tests {
                 &pool,
                 &h,
                 a,
-                b"dup",
-                serde_json::json!({}),
-                None,
-                Devices::AddToExisting
+                NewPasskey {
+                    credential_id: b"dup",
+                    credential_json: serde_json::json!({}),
+                    label: None
+                },
+                Devices::AddToExisting,
+                Redemption::Link,
             )
             .await
             .is_err()
@@ -404,10 +460,13 @@ mod tests {
                 &pool,
                 &h,
                 b,
-                b"fresh",
-                serde_json::json!({}),
-                None,
-                Devices::AddToExisting
+                NewPasskey {
+                    credential_id: b"fresh",
+                    credential_json: serde_json::json!({}),
+                    label: None
+                },
+                Devices::AddToExisting,
+                Redemption::Link,
             )
             .await
             .unwrap()
@@ -424,7 +483,7 @@ mod tests {
     #[sqlx::test(migrations = "../../migrations")]
     async fn concurrent_consume_has_one_winner(pool: PgPool) {
         let p = person(&pool).await;
-        let t = issue_token(&pool, p, None, Duration::minutes(15))
+        let t = issue_token(&pool, &BLIND, p, None, Duration::minutes(15))
             .await
             .unwrap();
         let tasks: Vec<_> = (0..8)
@@ -443,17 +502,20 @@ mod tests {
     }
 
     async fn enroll(pool: &PgPool, p: Uuid, cred: &[u8], devices: Devices) -> Uuid {
-        let t = issue_token(pool, p, None, Duration::minutes(15))
+        let t = issue_token(pool, &BLIND, p, None, Duration::minutes(15))
             .await
             .unwrap();
         complete(
             pool,
             &token_hash(&t.raw),
             p,
-            cred,
-            serde_json::json!({}),
-            Some("Android – Chrome"),
+            NewPasskey {
+                credential_id: cred,
+                credential_json: serde_json::json!({}),
+                label: Some("Android – Chrome"),
+            },
             devices,
+            Redemption::Link,
         )
         .await
         .unwrap()
@@ -519,7 +581,7 @@ mod tests {
     // --- typed code ---
 
     async fn issued(pool: &PgPool, p: Uuid, ttl: Duration) -> IssuedToken {
-        issue_token(pool, p, None, ttl).await.unwrap()
+        issue_token(pool, &BLIND, p, None, ttl).await.unwrap()
     }
 
     #[test]
@@ -563,8 +625,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored.len(), 32);
-        assert_eq!(stored, code_hash(&parse_code(&t.code).unwrap()));
+        assert_eq!(stored, code_hash(&BLIND, &parse_code(&t.code).unwrap()));
+        // Keyed: a database reader cannot test guesses offline with a plain hash.
+        assert_ne!(
+            stored,
+            Sha256::digest(parse_code(&t.code).unwrap().as_bytes()).to_vec()
+        );
         assert!(!format!("{t:?}").contains(&t.code), "Debug hides the code");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn code_is_only_found_with_the_key_it_was_issued_with(pool: PgPool) {
+        let p = person(&pool).await;
+        let t = issued(&pool, p, Duration::minutes(15)).await;
+        let other = BlindIndexKey::parse(&generate_key_line(1)).unwrap();
+        assert_eq!(peek_code(&pool, &other, &t.code).await.unwrap(), None);
+        assert_eq!(
+            peek_code(&pool, &BLIND, &t.code)
+                .await
+                .unwrap()
+                .map(|m| m.person_id),
+            Some(p)
+        );
     }
 
     #[sqlx::test(migrations = "../../migrations")]
@@ -582,7 +664,7 @@ mod tests {
             t.code.replace('-', ""),
         ] {
             assert_eq!(
-                peek_code(&pool, &input).await.unwrap(),
+                peek_code(&pool, &BLIND, &input).await.unwrap(),
                 Some(expected.clone())
             );
         }
@@ -594,10 +676,13 @@ mod tests {
     async fn wrong_and_expired_codes_find_nothing(pool: PgPool) {
         let p = person(&pool).await;
         issued(&pool, p, Duration::minutes(15)).await;
-        assert_eq!(peek_code(&pool, "AAAA-AAAA-AAAA").await.unwrap(), None);
-        assert_eq!(peek_code(&pool, "nonsense").await.unwrap(), None);
+        assert_eq!(
+            peek_code(&pool, &BLIND, "AAAA-AAAA-AAAA").await.unwrap(),
+            None
+        );
+        assert_eq!(peek_code(&pool, &BLIND, "nonsense").await.unwrap(), None);
         let expired = issued(&pool, p, Duration::seconds(-5)).await;
-        assert_eq!(peek_code(&pool, &expired.code).await.unwrap(), None);
+        assert_eq!(peek_code(&pool, &BLIND, &expired.code).await.unwrap(), None);
     }
 
     #[sqlx::test(migrations = "../../migrations")]
@@ -605,12 +690,12 @@ mod tests {
         let p = person(&pool).await;
         // Redeemed through the code (the ceremony consumes the token it points to).
         let a = issued(&pool, p, Duration::minutes(15)).await;
-        let m = peek_code(&pool, &a.code).await.unwrap().unwrap();
+        let m = peek_code(&pool, &BLIND, &a.code).await.unwrap().unwrap();
         assert_eq!(
             consume_by_hash(&pool, &m.token_hash).await.unwrap(),
             Some(p)
         );
-        assert_eq!(peek_code(&pool, &a.code).await.unwrap(), None);
+        assert_eq!(peek_code(&pool, &BLIND, &a.code).await.unwrap(), None);
         assert_eq!(
             peek_valid(&pool, &a.raw).await.unwrap(),
             None,
@@ -619,7 +704,7 @@ mod tests {
         // Redeemed through the QR link: the code is used too.
         let b = issued(&pool, p, Duration::minutes(15)).await;
         assert_eq!(consume(&pool, &b.raw).await.unwrap(), Some(p));
-        assert_eq!(peek_code(&pool, &b.code).await.unwrap(), None);
+        assert_eq!(peek_code(&pool, &BLIND, &b.code).await.unwrap(), None);
     }
 
     #[sqlx::test(migrations = "../../migrations")]
@@ -629,16 +714,16 @@ mod tests {
         let other = issued(&pool, b, Duration::minutes(15)).await;
         let new = issued(&pool, a, Duration::minutes(15)).await;
         assert_ne!(old.code, new.code);
-        assert_eq!(peek_code(&pool, &old.code).await.unwrap(), None);
+        assert_eq!(peek_code(&pool, &BLIND, &old.code).await.unwrap(), None);
         assert_eq!(
-            peek_code(&pool, &new.code)
+            peek_code(&pool, &BLIND, &new.code)
                 .await
                 .unwrap()
                 .map(|m| m.person_id),
             Some(a)
         );
         assert_eq!(
-            peek_code(&pool, &other.code)
+            peek_code(&pool, &BLIND, &other.code)
                 .await
                 .unwrap()
                 .map(|m| m.person_id),
@@ -650,7 +735,7 @@ mod tests {
     async fn completing_with_the_codes_token_hash_registers_once(pool: PgPool) {
         let p = person(&pool).await;
         let t = issued(&pool, p, Duration::minutes(15)).await;
-        let m = peek_code(&pool, &t.code).await.unwrap().unwrap();
+        let m = peek_code(&pool, &BLIND, &t.code).await.unwrap().unwrap();
         let args = |cred: &'static [u8]| (cred, serde_json::json!({}));
         let (cred, json) = args(b"code-1");
         assert!(
@@ -658,10 +743,13 @@ mod tests {
                 &pool,
                 &m.token_hash,
                 p,
-                cred,
-                json,
-                None,
-                Devices::AddToExisting
+                NewPasskey {
+                    credential_id: cred,
+                    credential_json: json,
+                    label: None
+                },
+                Devices::AddToExisting,
+                Redemption::Code,
             )
             .await
             .unwrap()
@@ -673,10 +761,13 @@ mod tests {
                 &pool,
                 &m.token_hash,
                 p,
-                cred,
-                json,
-                None,
-                Devices::AddToExisting
+                NewPasskey {
+                    credential_id: cred,
+                    credential_json: json,
+                    label: None
+                },
+                Devices::AddToExisting,
+                Redemption::Code,
             )
             .await
             .unwrap()
