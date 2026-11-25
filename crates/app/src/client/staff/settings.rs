@@ -10,7 +10,9 @@ use super::load::{Skeleton, use_loaded};
 use super::map::{site_form_to_dto, site_from_dto};
 use super::profiles::ProfilesSection;
 use super::sites::{SaveRequest, SitesPage};
+use super::timing::{date_label, time_label};
 use crate::api::hours::set_site_cost_centre;
+use crate::api::setup::{LocationPurgeStatus, location_purge_status};
 use crate::api::staff::{StaffContext, list_sites, save_site, set_site_active};
 use crate::client::components::AppearancePicker;
 use crate::client::i18n::LANGUAGE_LOADER;
@@ -90,7 +92,10 @@ pub fn StaffSettingsPage() -> Element {
                 }
                 div { class: "st-settings-body",
                     match current {
-                        Section::Organisation => rsx! { OrgSettingsPage {} },
+                        Section::Organisation => rsx! {
+                            OrgSettingsPage {}
+                            LocationPurgeLine {}
+                        },
                         Section::Sites => rsx! { SitesSection {} },
                         Section::Export => rsx! { ProfilesSection {} },
                         Section::Integrations => rsx! { IntegrationsSection {} },
@@ -105,6 +110,29 @@ pub fn StaffSettingsPage() -> Element {
                 }
             }
         }
+    }
+}
+
+/// One line under the organisation form: when coordinates were last removed.
+#[component]
+fn LocationPurgeLine() -> Element {
+    let status = use_loaded(location_purge_status);
+    let Some(status) = status.get() else {
+        return rsx! {};
+    };
+    rsx! { p { class: "st-sub", role: "status", {purge_line(&status)} } }
+}
+
+fn purge_line(status: &LocationPurgeStatus) -> String {
+    match &status.last {
+        Some(last) => fl!(
+            LANGUAGE_LOADER,
+            "location-purge-last",
+            date = date_label(last.at_ms),
+            time = time_label(last.at_ms),
+            count = last.purged
+        ),
+        None => fl!(LANGUAGE_LOADER, "location-purge-never"),
     }
 }
 

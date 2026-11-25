@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 use crypto::{BlindIndexKey, DataKeys};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
-use store::repo::{person, settings, setup, time_event};
+use store::repo::{location_purge, person, settings, setup, time_event};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -163,6 +163,7 @@ async fn run(command: Command) -> Result<()> {
                 }
             };
             let n = time_event::purge_locations(&pool, cutoff).await?;
+            location_purge::record_run(&pool, Utc::now(), n).await?;
             println!("Purged {n} locations older than {}", cutoff.to_rfc3339());
         }
         Command::RotateKey => {

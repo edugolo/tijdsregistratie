@@ -561,3 +561,7 @@ profiles-copy-name = { $name } (kopie)
 reauth-prompt = Bevestig even dat jij het bent.
 reauth-confirm = Bevestigen
 reauth-failed = Bevestigen is niet gelukt.
+
+# --- location purge ---
+location-purge-last = Locaties laatst opgeruimd op { $date } om { $time } ({ $count } verwijderd)
+location-purge-never = Locaties nog niet opgeruimd

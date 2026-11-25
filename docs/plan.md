@@ -364,3 +364,14 @@ minutes, payroll number, site cost centre; schema in §9); the screens and the e
   (admin: copy shipped profile, TOML editor with server-side validation, deactivate) and
   Instellingen › Integraties (admin: API keys shown once, revoke, links to `/api/v1/docs`). Staff
   pages show all times in the organisation time zone (`StaffContext.timezone`), not the browser's.
+
+## v1.1: automatic coordinate purge
+
+The server removes coordinates itself, so retention no longer depends on an operator's cron job. A
+background task starts about a minute after boot and then runs every 24 hours:
+`store::repo::location_purge::run_location_purge` takes a Postgres advisory lock (a second instance
+skips the run), reads `location_retention_days`, nulls `time_event.location_enc` before the cutoff
+and records the run in `organisation_settings` (`last_location_purge_at`, `last_location_purge_count`)
+in one transaction. Logs hold only the count and the cutoff. A failed run is logged and retried at the
+next interval. Admins see the last run on the organisation settings screen. `admin purge-locations`
+stays for manual use and records the run too.

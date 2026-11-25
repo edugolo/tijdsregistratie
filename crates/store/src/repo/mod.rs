@@ -7,6 +7,7 @@ pub mod correction;
 pub mod enrollment;
 pub mod export_batch;
 pub mod export_profile;
+pub mod location_purge;
 pub mod passkey;
 pub mod person;
 pub mod role;
