@@ -561,3 +561,15 @@ profiles-copy-name = { $name } (kopie)
 reauth-prompt = Bevestig even dat jij het bent.
 reauth-confirm = Bevestigen
 reauth-failed = Bevestigen is niet gelukt.
+
+# --- enrollment code ---
+enroll-code-label = Geen camera? Typ deze code:
+enroll-code-hint = Ga op het toestel dat je wil koppelen naar { $address } en typ daar de code.
+enroll-copy-link = Link kopiëren
+enroll-link-copied = Link gekopieerd
+enroll-code-title = Heb je een code?
+enroll-code-body = Typ de code die naast de QR-code staat. Hoofdletters, spaties en streepjes maken niet uit.
+enroll-code-field = Code
+enroll-code-submit = Verder
+enroll-code-invalid = Deze code klopt niet of werkt niet meer. Kijk hem na of vraag een nieuwe.
+enroll-code-rate-limited = Te veel pogingen. Probeer het over enkele minuten opnieuw.

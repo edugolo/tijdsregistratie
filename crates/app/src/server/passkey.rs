@@ -175,6 +175,28 @@ pub async fn enrollment_info(state: &AppState, token: &str) -> EnrollmentInfo {
     }
 }
 
+/// Like [`enrollment_info`], for a typed code. An unknown, malformed, used or expired code, or
+/// one of an inactive person, is one generic [`AuthError::Token`]: a failure here is what the
+/// HTTP guard counts against the guessing limits.
+pub async fn enrollment_info_by_code(state: &AppState, code: &str) -> Result<EnrollmentInfo> {
+    let found = code_match(state, code).await?;
+    let p = active_person(&state.pool, &state.keys, found.person_id)
+        .await
+        .map_err(|_| AuthError::Token)?;
+    Ok(EnrollmentInfo {
+        valid: true,
+        first_name: Some(first_name(&p.display_name)),
+    })
+}
+
+/// The valid token behind a typed code, or the generic token error.
+async fn code_match(state: &AppState, code: &str) -> Result<enrollment::CodeMatch> {
+    enrollment::peek_code(&state.pool, code)
+        .await
+        .map_err(db)?
+        .ok_or(AuthError::Token)
+}
+
 pub async fn begin_registration(
     state: &AppState,
     session: &Session,
@@ -184,6 +206,28 @@ pub async fn begin_registration(
         .await
         .map_err(db)?
         .ok_or(AuthError::Token)?;
+    start_registration(state, session, person_id, enrollment::token_hash(token)).await
+}
+
+/// Starts the same registration ceremony as [`begin_registration`] for the token a typed code
+/// belongs to. The ceremony carries that token's hash, so [`finish_registration`] consumes the
+/// token (and with it the code); the raw token is never looked at or sent anywhere.
+pub async fn begin_registration_with_code(
+    state: &AppState,
+    session: &Session,
+    code: &str,
+) -> Result<CreationChallengeResponse> {
+    let found = code_match(state, code).await?;
+    start_registration(state, session, found.person_id, found.token_hash).await
+}
+
+/// The ceremony for the token known by `token_hash`; the session keeps only that hash.
+async fn start_registration(
+    state: &AppState,
+    session: &Session,
+    person_id: Uuid,
+    token_hash: Vec<u8>,
+) -> Result<CreationChallengeResponse> {
     let p = active_person(&state.pool, &state.keys, person_id)
         .await
         .map_err(|_| AuthError::Token)?;
@@ -210,7 +254,7 @@ pub async fn begin_registration(
         &RegistrationCeremony {
             state: reg,
             person_id,
-            token_hash: enrollment::token_hash(token),
+            token_hash,
         },
     )
     .await
@@ -1346,5 +1390,184 @@ mod tests {
         let now = Utc::now();
         reauth(&state, &session, &mut first, now).await.unwrap();
         assert!(is_fresh(&session, p.id, now).await);
+    }
+
+    // --- typed enrollment code ---
+
+    async fn person_with_code(state: &AppState, name: &str) -> (Person, enrollment::IssuedToken) {
+        let p = person::create_person(&state.pool, &state.keys, &state.blind, name, None)
+            .await
+            .unwrap();
+        let t = enrollment::issue_token(&state.pool, p.id, None, Duration::minutes(15))
+            .await
+            .unwrap();
+        (p, t)
+    }
+
+    async fn register_with_code(
+        state: &AppState,
+        session: &Session,
+        auth: &mut SoftPasskey,
+        code: &str,
+    ) -> Result<Me> {
+        let challenge = begin_registration_with_code(state, session, code).await?;
+        let cred = auth.do_registration(origin(), challenge).unwrap();
+        finish_registration(state, session, &cred, None).await
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn typed_code_runs_the_same_ceremony_and_signs_in(pool: PgPool) {
+        let state = state(pool);
+        let (p, t) = person_with_code(&state, "Jan Peeters").await;
+        let typed = t.code.to_lowercase().replace('-', " ");
+        assert_eq!(
+            enrollment_info_by_code(&state, &typed).await,
+            Ok(EnrollmentInfo {
+                valid: true,
+                first_name: Some("Jan".to_string())
+            })
+        );
+        let session = new_session();
+        let me = register_with_code(&state, &session, &mut SoftPasskey::new(true), &typed)
+            .await
+            .unwrap();
+        assert_eq!(me.person_id, p.id);
+        assert_eq!(passkey::count_active(&state.pool, p.id).await.unwrap(), 1);
+        assert!(
+            session::current(&state.pool, &session)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Audited exactly like a QR redemption.
+        assert_eq!(audit_actions(&state.pool).await, vec!["passkey.registered"]);
+        // The code and the QR link are both used up now.
+        assert_eq!(
+            enrollment_info_by_code(&state, &t.code).await,
+            Err(AuthError::Token)
+        );
+        assert!(!enrollment_info(&state, &t.raw).await.valid);
+        assert_eq!(
+            begin_registration_with_code(&state, &new_session(), &t.code)
+                .await
+                .unwrap_err(),
+            AuthError::Token
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn code_is_used_up_by_a_qr_redemption(pool: PgPool) {
+        let state = state(pool);
+        let (_, t) = person_with_code(&state, "Jan Peeters").await;
+        let (me, _) = register(&state, &new_session(), &mut SoftPasskey::new(true), &t.raw).await;
+        me.unwrap();
+        assert_eq!(
+            enrollment_info_by_code(&state, &t.code).await,
+            Err(AuthError::Token)
+        );
+        assert_eq!(
+            begin_registration_with_code(&state, &new_session(), &t.code)
+                .await
+                .unwrap_err(),
+            AuthError::Token
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn qr_redemption_after_a_code_ceremony_started_wins_once(pool: PgPool) {
+        let state = state(pool);
+        let (p, t) = person_with_code(&state, "Jan Peeters").await;
+        let code_session = new_session();
+        let challenge = begin_registration_with_code(&state, &code_session, &t.code)
+            .await
+            .unwrap();
+        let cred = SoftPasskey::new(true)
+            .do_registration(origin(), challenge)
+            .unwrap();
+        let (me, _) = register(&state, &new_session(), &mut SoftPasskey::new(true), &t.raw).await;
+        me.unwrap();
+        assert_eq!(
+            finish_registration(&state, &code_session, &cred, None)
+                .await
+                .unwrap_err(),
+            AuthError::Token
+        );
+        assert_eq!(passkey::count_active(&state.pool, p.id).await.unwrap(), 1);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn failed_codes_all_get_the_same_generic_error(pool: PgPool) {
+        let state = state(pool);
+        let (_, superseded) = person_with_code(&state, "Jan Peeters").await;
+        let (p, _) = person_with_code(&state, "Els Janssens").await;
+        enrollment::issue_token(
+            &state.pool,
+            superseded.person_id,
+            None,
+            Duration::minutes(15),
+        )
+        .await
+        .unwrap();
+        let expired = enrollment::issue_token(&state.pool, p.id, None, Duration::seconds(-5))
+            .await
+            .unwrap();
+        let (inactive, inactive_t) = person_with_code(&state, "Jos Weg").await;
+        person::set_active(&state.pool, inactive.id, false)
+            .await
+            .unwrap();
+        for code in [
+            "AAAA-AAAA-AAAA",
+            "kort",
+            "",
+            superseded.code.as_str(),
+            expired.code.as_str(),
+            inactive_t.code.as_str(),
+        ] {
+            assert_eq!(
+                enrollment_info_by_code(&state, code).await,
+                Err(AuthError::Token),
+                "{code}"
+            );
+            let session = new_session();
+            assert_eq!(
+                begin_registration_with_code(&state, &session, code)
+                    .await
+                    .unwrap_err(),
+                AuthError::Token,
+                "{code}"
+            );
+            assert!(
+                session::take_ceremony::<RegistrationCeremony>(&session, REGISTRATION_KEY)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn typed_code_never_exposes_the_raw_token(pool: PgPool) {
+        let state = state(pool);
+        let (_, t) = person_with_code(&state, "Jan Peeters").await;
+        let info = enrollment_info_by_code(&state, &t.code).await.unwrap();
+        let session = new_session();
+        let challenge = begin_registration_with_code(&state, &session, &t.code)
+            .await
+            .unwrap();
+        let normalized = t.code.replace('-', "");
+        for sent in [
+            serde_json::to_string(&info).unwrap(),
+            serde_json::to_string(&challenge).unwrap(),
+        ] {
+            assert!(!sent.contains(&t.raw), "raw token sent to the browser");
+        }
+        let stored: serde_json::Value = session.get(REGISTRATION_KEY).await.unwrap().unwrap();
+        let stored = stored.to_string();
+        assert!(!stored.contains(&t.raw) && !stored.contains(&normalized));
+        let ceremony: RegistrationCeremony = session::take_ceremony(&session, REGISTRATION_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ceremony.token_hash, enrollment::token_hash(&t.raw));
     }
 }

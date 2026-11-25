@@ -158,6 +158,63 @@ pub fn Login(
     }
 }
 
+/// E1a: `/koppel` without a link, on a device that cannot scan the QR code: the code shown next
+/// to the QR code is typed here and leads into the same welcome and passkey steps.
+#[component]
+pub fn EnterCode(
+    org_name: String,
+    busy: bool,
+    #[props(default)] error: Option<String>,
+    on_submit: EventHandler<String>,
+) -> Element {
+    let mut value = use_signal(String::new);
+    let invalid = error.is_some();
+    let submit = move || {
+        let code = value();
+        if !busy && !code.trim().is_empty() {
+            on_submit.call(code);
+        }
+    };
+    rsx! {
+        Screen { org_name,
+            div { class: "icon-tile", Icon { name: "smartphone", size: 36 } }
+            h1 { {fl!(LANGUAGE_LOADER, "enroll-code-title")} }
+            p { class: "text-sub", {fl!(LANGUAGE_LOADER, "enroll-code-body")} }
+            label { class: "code-field",
+                span { class: "text-sub text-small", {fl!(LANGUAGE_LOADER, "enroll-code-field")} }
+                input {
+                    class: "code-input",
+                    r#type: "text",
+                    value: value(),
+                    autocomplete: "off",
+                    autocapitalize: "characters",
+                    spellcheck: "false",
+                    maxlength: "24",
+                    placeholder: "XXXX-XXXX-XXXX",
+                    "aria-invalid": "{invalid}",
+                    oninput: move |e| value.set(e.value()),
+                    onkeydown: move |e| {
+                        if e.key() == Key::Enter {
+                            submit();
+                        }
+                    },
+                }
+            }
+            if let Some(error) = error {
+                NoticeCard { icon: "alert-triangle", {error} }
+            }
+            div { class: "spacer" }
+            div { class: "actions",
+                PrimaryButton {
+                    label: fl!(LANGUAGE_LOADER, "enroll-code-submit"),
+                    disabled: busy,
+                    onclick: move |_| submit(),
+                }
+            }
+        }
+    }
+}
+
 /// Enrollment code that is expired, used or unknown.
 #[component]
 pub fn InvalidCode(org_name: String) -> Element {

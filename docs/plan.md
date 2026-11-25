@@ -364,3 +364,27 @@ minutes, payroll number, site cost centre; schema in §9); the screens and the e
   (admin: copy shipped profile, TOML editor with server-side validation, deactivate) and
   Instellingen › Integraties (admin: API keys shown once, revoke, links to `/api/v1/docs`). Staff
   pages show all times in the organisation time zone (`StaffContext.timezone`), not the browser's.
+
+## v1.1: typed enrollment code
+
+A device without a usable camera (a laptop) cannot scan the enrollment QR code. Next to the QR code
+the staff screen now shows a short code to type on `/koppel`, and a "Link kopiëren" button for the
+same link.
+
+- **Data model**: `enrollment_token.code_hash` (`bytea`, nullable, unique, 32 bytes): SHA-256 of the
+  normalised code. The code is 12 symbols from the setup-code alphabet
+  (`ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, unbiased, 60 bits), shown as `XXXX-XXXX-XXXX`; input is
+  case-insensitive and ignores spaces and dashes. `issue_token` issues it with the token, on the same
+  row, so it shares the token's person, expiry and single use; a newer token invalidates it.
+  The first-admin token from setup has no code (`NULL`).
+- **Flow**: `/koppel` without a fragment asks "Heb je een code?". `POST /api/auth/code/info` returns
+  the same `EnrollmentInfo` as the link, `POST /api/auth/code/register/begin` starts the same
+  registration ceremony, which keeps only the token's hash in the session; the unchanged
+  `register/finish` consumes the token (audit `passkey.registered`, as for the QR code). The raw token
+  never reaches the browser that typed the code.
+- **Threat model**: 60 bits against at most 30 wrong guesses per 10 minutes for the whole
+  installation (and 10 per client address; charged up front, refunded only on success) makes
+  guessing a live 15-minute code hopeless. The global cap stands on its own, as without
+  `TRUST_PROXY_HEADERS` all clients behind a proxy share one address; the price is that a flood of
+  wrong codes blocks typed codes for a while, never the QR link. Every failure is one generic
+  `token-invalid`, and the database holds only a hash of the short-lived code.

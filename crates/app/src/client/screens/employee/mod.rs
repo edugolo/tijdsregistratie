@@ -4,4 +4,6 @@ mod day;
 mod onboarding;
 
 pub use day::{Home, LoadFailed, Loading, Message, OutOfZone, Stopped, Working};
-pub use onboarding::{CreateKey, InvalidCode, IosInstall, LocationExplain, Login, Welcome};
+pub use onboarding::{
+    CreateKey, EnterCode, InvalidCode, IosInstall, LocationExplain, Login, Welcome,
+};

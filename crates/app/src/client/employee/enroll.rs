@@ -1,23 +1,39 @@
 //! `/koppel#<code>`: welcome, install, passkey and location explanation (E1, E1b, E2, E3).
+//! `/koppel` without a link asks for the typed code instead (E1a) and then follows the same steps.
 
 use dioxus::prelude::*;
 
 use super::env;
 use super::logic::{
-    Destination, EnrollStep, destination_for, first_step, ios_steps_offered, needs_location_step,
-    passkey_message, server_error_message, token_from_hash,
+    Destination, EnrollStep, code_error_message, destination_for, first_step, ios_steps_offered,
+    needs_location_step, passkey_message, server_error_message, token_from_hash,
 };
 use super::{go, use_org_name};
-use crate::api::auth::{Me, begin_registration, enrollment_info, finish_registration};
+use crate::api::auth::{
+    EnrollmentInfo, Me, begin_registration, begin_registration_with_code, enrollment_code_info,
+    enrollment_info, finish_registration,
+};
 use crate::client::screens::employee::{
-    CreateKey, InvalidCode, IosInstall, LoadFailed, Loading, LocationExplain, Welcome,
+    CreateKey, EnterCode, InvalidCode, IosInstall, LoadFailed, Loading, LocationExplain, Welcome,
 };
 
+/// What the enrollment is started with. Both lead to the same ceremony on the server; a typed
+/// code never brings the raw token to the browser.
+#[derive(Clone, PartialEq)]
+enum Credential {
+    /// The token from the link's fragment (QR code).
+    Token(String),
+    /// The code as typed; the server normalises it.
+    Code(String),
+}
+
 /// Registers the passkey; the error is the text to show.
-async fn register(token: String) -> Result<Me, String> {
-    let options = begin_registration(token)
-        .await
-        .map_err(|e| server_error_message(&e))?;
+async fn register(credential: Credential) -> Result<Me, String> {
+    let options = match credential {
+        Credential::Token(token) => begin_registration(token).await,
+        Credential::Code(code) => begin_registration_with_code(code).await,
+    }
+    .map_err(|e| server_error_message(&e))?;
     let credential = env::create_passkey(options)
         .await
         .map_err(passkey_message)?;
@@ -44,6 +60,10 @@ pub fn EnrollPage() -> Element {
     let mut can_install = use_signal(|| false);
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
+    // A typed code the server accepted, with what it may tell about it.
+    let mut typed = use_signal(|| None::<(String, EnrollmentInfo)>);
+    let mut code_busy = use_signal(|| false);
+    let mut code_error = use_signal(|| None::<String>);
 
     // The install prompt event can arrive a moment after the page has loaded.
     use_effect(move || {
@@ -58,21 +78,48 @@ pub fn EnrollPage() -> Element {
         });
     });
 
-    let code = match token() {
-        None => return rsx! { Loading { org_name } },
-        Some(None) => return rsx! { InvalidCode { org_name } },
-        Some(Some(code)) => code,
+    let (credential, loaded) = if let Some((code, info)) = typed() {
+        (Credential::Code(code), info)
+    } else {
+        let token = match token() {
+            None => return rsx! { Loading { org_name } },
+            Some(None) => {
+                return rsx! {
+                    EnterCode {
+                        org_name,
+                        busy: code_busy(),
+                        error: code_error(),
+                        on_submit: move |code: String| {
+                            if code_busy() {
+                                return;
+                            }
+                            code_busy.set(true);
+                            code_error.set(None);
+                            spawn(async move {
+                                match enrollment_code_info(code.clone()).await {
+                                    Ok(info) => typed.set(Some((code, info))),
+                                    Err(e) => code_error.set(Some(code_error_message(&e))),
+                                }
+                                code_busy.set(false);
+                            });
+                        },
+                    }
+                };
+            }
+            Some(Some(token)) => token,
+        };
+        let loaded = info.read().clone();
+        let Some(loaded) = loaded else {
+            return rsx! { Loading { org_name } };
+        };
+        let Some(loaded) = loaded else {
+            return rsx! { LoadFailed { org_name, on_retry: move |_| info.restart() } };
+        };
+        if !loaded.valid {
+            return rsx! { InvalidCode { org_name } };
+        }
+        (Credential::Token(token), loaded)
     };
-    let loaded = info.read().clone();
-    let Some(loaded) = loaded else {
-        return rsx! { Loading { org_name } };
-    };
-    let Some(loaded) = loaded else {
-        return rsx! { LoadFailed { org_name, on_retry: move |_| info.restart() } };
-    };
-    if !loaded.valid {
-        return rsx! { InvalidCode { org_name } };
-    }
 
     match step() {
         EnrollStep::Welcome => rsx! {
@@ -105,9 +152,9 @@ pub fn EnrollPage() -> Element {
                     }
                     busy.set(true);
                     error.set(None);
-                    let code = code.clone();
+                    let credential = credential.clone();
                     spawn(async move {
-                        match register(code).await {
+                        match register(credential).await {
                             Ok(me) => {
                                 let next = destination_for(&me);
                                 let granted = env::location_granted().await;

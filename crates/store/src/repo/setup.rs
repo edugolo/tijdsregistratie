@@ -21,7 +21,7 @@ use crate::crypto_ext::seal_str;
 /// How long a setup code stays valid.
 pub const CODE_TTL_HOURS: i64 = 24;
 /// Unambiguous alphabet (no 0/O, 1/I): 32 symbols, so a random byte maps without bias.
-const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+pub(super) const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const CODE_LEN: usize = 16;
 
 /// Uppercases and drops everything that is not a letter or digit (dashes, spaces).
@@ -82,12 +82,16 @@ pub async fn new_code(pool: &PgPool) -> Result<String> {
     Ok(code)
 }
 
-async fn insert_new_code(tx: &mut Transaction<'_, Postgres>) -> Result<String> {
-    let bytes: [u8; CODE_LEN] = random_bytes()?;
-    let normalized: String = bytes
+/// `N` random symbols of [`ALPHABET`]; `b & 31` maps a random byte without bias.
+pub(super) fn random_symbols<const N: usize>() -> Result<String> {
+    Ok(random_bytes::<N>()?
         .iter()
         .map(|b| char::from(ALPHABET[usize::from(b & 31)]))
-        .collect();
+        .collect())
+}
+
+async fn insert_new_code(tx: &mut Transaction<'_, Postgres>) -> Result<String> {
+    let normalized = random_symbols::<CODE_LEN>()?;
     sqlx::query("UPDATE setup_code SET used_at = now() WHERE used_at IS NULL")
         .execute(&mut **tx)
         .await?;

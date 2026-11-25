@@ -706,6 +706,7 @@ async fn issue_enrollment(
     Ok(EnrollmentDto {
         qr_svg,
         url,
+        code: token.code,
         issued_at: token.issued_at.timestamp_millis(),
         expires_at: token.expires_at.timestamp_millis(),
     })
@@ -1799,6 +1800,15 @@ mod tests {
         assert!(dto.qr_svg.contains("<svg"));
         assert_eq!(dto.expires_at - dto.issued_at, 15 * 60 * 1000);
         assert_eq!(audit_actions(&pool).await, vec!["enrollment.issued"]);
+        // The typed code leads to the same token as the link.
+        assert_eq!(dto.code.len(), 14);
+        let found = enrollment::peek_code(&pool, &dto.code)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.person_id, s.emp_a);
+        let raw = dto.url.rsplit('#').next().unwrap();
+        assert_eq!(found.token_hash, enrollment::token_hash(raw));
         // Only an admin may enroll a manager.
         assert!(
             start_enrollment(&e, &s.admin, s.mgr_a_id, fresh())
@@ -3210,6 +3220,13 @@ mod tests {
         let raw = dto.url.rsplit('#').next().unwrap();
         assert_eq!(
             enrollment::peek_valid(&pool, raw).await.unwrap(),
+            Some(s.mgr_a_id)
+        );
+        assert_eq!(
+            enrollment::peek_code(&pool, &dto.code)
+                .await
+                .unwrap()
+                .map(|m| m.person_id),
             Some(s.mgr_a_id)
         );
         assert_eq!(audit_actions(&pool).await, vec!["enrollment.issued"]);
