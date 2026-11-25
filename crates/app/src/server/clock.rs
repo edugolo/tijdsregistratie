@@ -6,13 +6,14 @@ use chrono_tz::Tz;
 use crypto::DataKeys;
 use dioxus::prelude::ServerFnError;
 use domain::{
-    BreakRule, Event, EventKind, Fix, GeoPoint, ZoneStatus, classify, next_action, summarize_day,
+    BreakRule, Event, EventKind, Fix, GeoPoint, ZoneStatus, classify, free_text, next_action,
+    summarize_day,
 };
 use sqlx::{PgExecutor, PgPool};
 use store::repo::RepoError;
 use store::repo::site::{self, Site, ZonePolicy};
 use store::repo::time_event::{self, EventRow, NewEvent};
-use store::repo::{role, settings, validation};
+use store::repo::{clock_note, role, settings, validation};
 use uuid::Uuid;
 
 use crate::api::clock::{ClockResult, FixDto, TodayDto};
@@ -33,6 +34,15 @@ pub enum ClockError {
     /// The person is not an employee of any site.
     #[error("not an employee")]
     NoSites,
+    /// No own event of today with this id.
+    #[error("not found")]
+    NotFound,
+    /// The note is too short or too long, or the event was in the zone.
+    #[error("invalid note")]
+    NoteInvalid,
+    /// The event already has a note.
+    #[error("note exists")]
+    NoteExists,
     #[error(transparent)]
     Repo(#[from] RepoError),
 }
@@ -40,6 +50,9 @@ pub enum ClockError {
 pub fn to_server_error(e: ClockError) -> ServerFnError {
     let (code, message) = match &e {
         ClockError::NoSites => (403, "forbidden"),
+        ClockError::NotFound => (404, "not found"),
+        ClockError::NoteInvalid => (400, "invalid input"),
+        ClockError::NoteExists => (409, "conflict"),
         ClockError::Repo(err) => {
             tracing::error!(error = %err, "clock failed");
             (500, "internal error")
@@ -165,6 +178,7 @@ pub async fn clock_for(
             zone_status: last.map_or(ZoneStatus::NoLocation, |e| e.zone_status),
             site_name: name_of(&ctx.sites, last.and_then(|e| e.site_id)),
             accepted: false,
+            event_id: None,
             code: Some(CODE_DAY_CLOSED.to_string()),
         });
     }
@@ -177,6 +191,7 @@ pub async fn clock_for(
             zone_status: last.map_or(ZoneStatus::NoLocation, |e| e.zone_status),
             site_name: name_of(&ctx.sites, last.and_then(|e| e.site_id)),
             accepted: false,
+            event_id: None,
             code: Some(
                 match kind {
                     EventKind::Start => CODE_ALREADY_STARTED,
@@ -216,6 +231,7 @@ pub async fn clock_for(
             zone_status: result.status,
             site_name: nearest.map(|s| s.name.clone()),
             accepted: false,
+            event_id: None,
             code: Some(message.to_string()),
         });
     }
@@ -243,8 +259,37 @@ pub async fn clock_for(
         zone_status: row.zone_status,
         site_name: nearest.map(|s| s.name.clone()),
         accepted: true,
+        event_id: Some(row.id),
         code: None,
     })
+}
+
+/// Adds the optional note of `person_id` to their own start or stop `event_id` of today (in the
+/// organisation time zone) that was not in the zone. One note per event, never edited. Another
+/// person's event and an event of another day look the same as an unknown one.
+pub async fn add_note_for(
+    pool: &PgPool,
+    keys: &DataKeys,
+    person_id: Uuid,
+    event_id: Uuid,
+    text: &str,
+    now: DateTime<Utc>,
+) -> Result<(), ClockError> {
+    let tz = settings::get_settings(pool).await?.timezone;
+    let event = events_today(pool, person_id, tz, now)
+        .await?
+        .into_iter()
+        .find(|e| e.id == event_id)
+        .ok_or(ClockError::NotFound)?;
+    if event.zone_status == ZoneStatus::InZone {
+        return Err(ClockError::NoteInvalid);
+    }
+    let note = free_text(text).ok_or(ClockError::NoteInvalid)?;
+    if clock_note::add(pool, keys, event.id, person_id, note).await? {
+        Ok(())
+    } else {
+        Err(ClockError::NoteExists)
+    }
 }
 
 /// The day overview of `person_id` at `now`, using the break rule of their first employee site.
@@ -827,6 +872,141 @@ mod tests {
         let r = tap(&pool, &k, p, EventKind::Start, None, T0()).await;
         assert!(r.accepted);
         assert_eq!(r.zone_status, ZoneStatus::NoLocation);
+    }
+
+    const NOTE: &str = "uitstap met de klas";
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn clock_result_carries_the_event_id_only_when_accepted(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Flag).await;
+        let r = tap(&pool, &k, p, EventKind::Start, far(), T0()).await;
+        let id: Uuid = sqlx::query_scalar("SELECT id FROM time_event")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(r.event_id, Some(id));
+        let refused = tap(&pool, &k, p, EventKind::Start, far(), T0()).await;
+        assert!(!refused.accepted);
+        assert_eq!(refused.event_id, None);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_note_is_added_once_to_an_own_flagged_event_of_today(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Flag).await;
+        let start = tap(&pool, &k, p, EventKind::Start, None, T0()).await;
+        let e = start.event_id.unwrap();
+        let later = T0() + Duration::minutes(5);
+        add_note_for(&pool, &k, p, e, &format!("  {NOTE} "), later)
+            .await
+            .unwrap();
+        let notes = store::repo::clock_note::notes_for_events(&pool, &k, &[e])
+            .await
+            .unwrap();
+        assert_eq!(notes[&e], NOTE);
+        // One note per event; the first one stays.
+        assert!(matches!(
+            add_note_for(&pool, &k, p, e, "iets anders", later).await,
+            Err(ClockError::NoteExists)
+        ));
+        // A note is no audit row: it is the employee's own action.
+        let audit: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(audit, 0);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_note_is_refused_in_zone_for_others_on_other_days_and_when_too_short(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Flag).await;
+        let b = BlindIndexKey::parse(&generate_key_line(1)).unwrap();
+        let other = person::create_person(&pool, &k, &b, "Mia Maes", None)
+            .await
+            .unwrap()
+            .id;
+        let in_zone = tap(&pool, &k, p, EventKind::Start, here(), T0())
+            .await
+            .event_id
+            .unwrap();
+        let out = tap(
+            &pool,
+            &k,
+            p,
+            EventKind::Stop,
+            far(),
+            T0() + Duration::hours(1),
+        )
+        .await
+        .event_id
+        .unwrap();
+        let soon = T0() + Duration::hours(2);
+        assert!(matches!(
+            add_note_for(&pool, &k, p, in_zone, NOTE, soon).await,
+            Err(ClockError::NoteInvalid)
+        ));
+        for text in ["ab", "   ", &"x".repeat(501)] {
+            assert!(matches!(
+                add_note_for(&pool, &k, p, out, text, soon).await,
+                Err(ClockError::NoteInvalid)
+            ));
+        }
+        assert!(matches!(
+            add_note_for(&pool, &k, other, out, NOTE, soon).await,
+            Err(ClockError::NotFound)
+        ));
+        assert!(matches!(
+            add_note_for(&pool, &k, p, Uuid::new_v4(), NOTE, soon).await,
+            Err(ClockError::NotFound)
+        ));
+        // The next local day is too late (Brussels midnight is 23:00 UTC in March).
+        assert!(matches!(
+            add_note_for(&pool, &k, p, out, NOTE, utc(2026, 3, 10, 23, 0)).await,
+            Err(ClockError::NotFound)
+        ));
+        // Same day, late evening, still fine.
+        add_note_for(&pool, &k, p, out, NOTE, utc(2026, 3, 10, 22, 59))
+            .await
+            .unwrap();
+    }
+
+    /// Every column of every table in the public schema as text, concatenated.
+    async fn dump_all_tables(pool: &PgPool) -> String {
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT table_name::text FROM information_schema.tables \
+             WHERE table_schema = 'public' AND table_type = 'BASE TABLE'",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        let mut dump = String::new();
+        for table in tables {
+            let rows: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT string_agg(t::text, ' ') FROM \"{table}\" t"
+            )))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            dump.push_str(&rows.unwrap_or_default());
+        }
+        dump
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn no_table_holds_the_note_or_the_name_in_plaintext(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Flag).await;
+        let r = tap(&pool, &k, p, EventKind::Start, far(), T0()).await;
+        add_note_for(&pool, &k, p, r.event_id.unwrap(), NOTE, T0())
+            .await
+            .unwrap();
+        let dump = dump_all_tables(&pool).await.to_lowercase();
+        assert!(dump.contains("out_of_zone"), "the dump covers time_event");
+        for needle in ["uitstap", "klas", "peeters"] {
+            assert!(!dump.contains(needle), "plaintext {needle} in the database");
+        }
     }
 
     #[sqlx::test(migrations = "../../migrations")]

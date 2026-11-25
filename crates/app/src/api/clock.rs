@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use domain::{EventKind, ZoneStatus};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// A location reading from the browser.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -20,6 +21,8 @@ pub struct FixDto {
 /// false nothing was stored: `kind` is the kind of the last event today (`Stop` if there is none)
 /// and `at` its time (now if there is none), so the client can show the current state, and
 /// `code` names why (a stable code such as `clock-blocked`; the client translates it).
+/// `event_id` is the id of the recorded event, so the employee can add a note to it; `None` when
+/// nothing was stored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClockResult {
     pub kind: EventKind,
@@ -27,6 +30,7 @@ pub struct ClockResult {
     pub zone_status: ZoneStatus,
     pub site_name: Option<String>,
     pub accepted: bool,
+    pub event_id: Option<Uuid>,
     pub code: Option<String>,
 }
 
@@ -85,4 +89,24 @@ pub async fn my_today() -> Result<TodayDto> {
         .await
         .map_err(logic::to_server_error)?;
     Ok(today)
+}
+
+/// Adds the signed-in person's optional note to their own start or stop of today that was not in
+/// the zone. One note per event, 3 to 500 characters; it never changes the registration.
+#[post("/api/clock/note")]
+pub async fn add_clock_note(event_id: Uuid, text: String) -> Result<()> {
+    use crate::server::{app_state, auth::current_user, clock as logic};
+    let user = current_user().await?;
+    let state = app_state().await?;
+    logic::add_note_for(
+        &state.pool,
+        &state.keys,
+        user.person_id,
+        event_id,
+        &text,
+        Utc::now(),
+    )
+    .await
+    .map_err(logic::to_server_error)?;
+    Ok(())
 }

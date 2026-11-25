@@ -71,6 +71,8 @@ pub struct RawEventDto {
     pub at: i64,
     pub site_id: Option<Uuid>,
     pub zone_status: ZoneStatus,
+    /// The employee's own explanation of a start or stop outside the zone.
+    pub note: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]

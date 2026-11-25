@@ -7,8 +7,6 @@ use crate::api::hours::PersonHoursDto;
 
 /// Longest range the overview shows, in days (the server refuses more).
 pub const MAX_RANGE_DAYS: i64 = 62;
-pub const REASON_MIN_CHARS: usize = 3;
-pub const REASON_MAX_CHARS: usize = 500;
 const MAX_CONTRACT_MINUTES: u32 = 1440;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -168,7 +166,7 @@ pub fn day_label(date: NaiveDate) -> String {
 
 /// A correction reason is 3 to 500 characters once trimmed.
 pub fn reason_ok(reason: &str) -> bool {
-    (REASON_MIN_CHARS..=REASON_MAX_CHARS).contains(&reason.trim().chars().count())
+    domain::free_text(reason).is_some()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -56,6 +56,8 @@ pub struct TodayRowDto {
     pub id: Uuid,
     pub name: String,
     pub today: TodayStatusDto,
+    /// The employee's own explanation of a start outside the zone.
+    pub note: Option<String>,
 }
 
 /// Counters and lists of the "Vandaag" page.

@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use domain::EventKind;
+use uuid::Uuid;
 
 use super::env;
 use super::logic::{
@@ -11,10 +12,12 @@ use super::logic::{
 };
 use super::{go, use_org_name};
 use crate::api::auth::{Me, me};
-use crate::api::clock::{ClockResult, TodayDto, clock, my_today};
+use crate::api::clock::{ClockResult, TodayDto, add_clock_note, clock, my_today};
 use crate::client::Route;
 use crate::client::components::StaffLinkVisible;
-use crate::client::screens::employee::{Home, LoadFailed, Loading, OutOfZone, Stopped, Working};
+use crate::client::screens::employee::{
+    Home, LoadFailed, Loading, NoteState, OutOfZone, Stopped, Working,
+};
 
 const TICK_MS: u32 = 30_000;
 const FIX_TIMEOUT_MS: u32 = 10_000;
@@ -60,6 +63,9 @@ enum Phase {
         notice: ZoneNotice,
         kind: EventKind,
         at: DateTime<Utc>,
+        /// The recorded event, to attach the optional note to.
+        event_id: Option<Uuid>,
+        note: NoteState,
     },
     Summary {
         stopped: DateTime<Utc>,
@@ -79,10 +85,16 @@ impl Phase {
         Self::ready(false, None, false)
     }
 
-    fn from_aftermath(aftermath: Aftermath) -> Self {
+    fn from_aftermath(aftermath: Aftermath, event_id: Option<Uuid>) -> Self {
         match aftermath {
             Aftermath::Ready => Self::idle(),
-            Aftermath::Zone { notice, kind, at } => Self::Zone { notice, kind, at },
+            Aftermath::Zone { notice, kind, at } => Self::Zone {
+                notice,
+                kind,
+                at,
+                event_id,
+                note: NoteState::Open,
+            },
             Aftermath::Summary { stopped } => Self::Summary { stopped },
         }
     }
@@ -111,7 +123,10 @@ async fn settle(
     let loaded = load(today).await;
     if result.accepted {
         env::vibrate(VIBRATE_MS);
-        return Phase::from_aftermath(after_accepted(kind, result.zone_status, result.at));
+        return Phase::from_aftermath(
+            after_accepted(kind, result.zone_status, result.at),
+            result.event_id,
+        );
     }
     let next_now = today.peek().as_ref().map(|t| t.next);
     let notice = next_now
@@ -119,6 +134,14 @@ async fn settle(
         .then_some(result.code.as_deref().map(server_message))
         .flatten();
     Phase::ready(false, notice, !loaded)
+}
+
+/// Sets the note state while the warning screen is still showing; a late answer after "OK"
+/// changes nothing.
+fn set_note(mut phase: Signal<Phase>, state: NoteState) {
+    if let Phase::Zone { note, .. } = &mut *phase.write() {
+        *note = state;
+    }
 }
 
 #[component]
@@ -161,6 +184,17 @@ fn Clocking(me: Me) -> Element {
         });
     };
 
+    let save_note = move |event_id: Uuid, text: String| {
+        set_note(phase, NoteState::Saving);
+        spawn(async move {
+            let state = match add_clock_note(event_id, text).await {
+                Ok(()) => NoteState::Saved,
+                Err(_) => NoteState::Failed,
+            };
+            set_note(phase, state);
+        });
+    };
+
     let person_name = me.first_name;
     let Some(day) = today.read().clone() else {
         return match phase() {
@@ -171,14 +205,22 @@ fn Clocking(me: Me) -> Element {
 
     match phase() {
         Phase::Loading | Phase::LoadFailed => rsx! { Loading { org_name } },
-        Phase::Zone { notice, kind, at } => rsx! {
+        Phase::Zone {
+            notice,
+            kind,
+            at,
+            event_id,
+            note,
+        } => rsx! {
             OutOfZone {
                 org_name,
                 person_name,
                 saved_time: local_text(at),
                 no_location: notice == ZoneNotice::NoLocation,
                 stopped: kind == EventKind::Stop,
-                on_ok: move |_| phase.set(Phase::from_aftermath(after_zone_ok(kind, at))),
+                note,
+                on_note: event_id.map(|id| EventHandler::new(move |text: String| save_note(id, text))),
+                on_ok: move |_| phase.set(Phase::from_aftermath(after_zone_ok(kind, at), None)),
             }
         },
         Phase::Summary { stopped } => rsx! {

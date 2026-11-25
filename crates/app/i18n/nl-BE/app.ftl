@@ -561,3 +561,11 @@ profiles-copy-name = { $name } (kopie)
 reauth-prompt = Bevestig even dat jij het bent.
 reauth-confirm = Bevestigen
 reauth-failed = Bevestigen is niet gelukt.
+
+# --- clock note ---
+clock-note-label = Wil je dit uitleggen? Dat hoeft niet.
+clock-note-placeholder = Bv. uitstap met de klas
+clock-note-save = Uitleg bewaren
+clock-note-saved = Je uitleg is bewaard.
+clock-note-failed = Bewaren lukte niet. Probeer het opnieuw.
+clock-note-staff = Uitleg: “{ $note }”

@@ -11,9 +11,10 @@ use chrono_tz::Tz;
 use dioxus::prelude::ServerFnError;
 use domain::{
     Anomaly, BreakRule, DaySummary, EffectiveEvent, Event, ZoneStatus, apply_corrections,
-    contract_minutes_on, deviation_minutes, summarize_day,
+    contract_minutes_on, deviation_minutes, free_text, summarize_day,
 };
 use sqlx::{PgConnection, PgPool};
+use store::repo::clock_note;
 use store::repo::contract::{self, Schedule};
 use store::repo::correction::{self, CorrectionRow, NewCorrection, Target};
 use store::repo::role::{self, Role, StaffScope};
@@ -33,8 +34,6 @@ use crate::api::hours::{
 pub const MAX_RANGE_DAYS: i64 = 62;
 /// Longest period that can be validated or reopened in one call, in days.
 pub const MAX_PERIOD_DAYS: i64 = 366;
-pub const REASON_MIN_CHARS: usize = 3;
-pub const REASON_MAX_CHARS: usize = 500;
 pub const PAYROLL_NUMBER_MAX_CHARS: usize = 20;
 pub const COST_CENTRE_MAX_CHARS: usize = 50;
 const MAX_CONTRACT_MINUTES: u32 = 1440;
@@ -170,12 +169,9 @@ async fn check_person(
 
 /// A reason of 3 to 500 characters, trimmed.
 pub fn validate_reason(reason: &str) -> Result<String> {
-    let reason = reason.trim();
-    let n = reason.chars().count();
-    if !(REASON_MIN_CHARS..=REASON_MAX_CHARS).contains(&n) {
-        return Err(HoursError::Invalid("reason"));
-    }
-    Ok(reason.to_string())
+    free_text(reason)
+        .map(str::to_string)
+        .ok_or(HoursError::Invalid("reason"))
 }
 
 pub(super) fn validate_code(value: &str, max: usize, what: &'static str) -> Result<String> {
@@ -646,6 +642,8 @@ async fn detail(
             created_at: ms(c.created_at),
         });
     }
+    let event_ids: Vec<Uuid> = data.raw.iter().map(|e| e.id).collect();
+    let mut notes = clock_note::notes_for_events(&mut *conn, env.keys, &event_ids).await?;
     Ok(DayDetailDto {
         person_id,
         name,
@@ -661,6 +659,7 @@ async fn detail(
                 at: ms(e.server_ts),
                 site_id: e.site_id,
                 zone_status: e.zone_status,
+                note: notes.remove(&e.id),
             })
             .collect(),
         corrections,
@@ -1459,7 +1458,10 @@ mod tests {
         let k = keys();
         let s = seed(&pool, &k).await;
         let e = env(&pool, &k);
-        let (start, _) = eva_monday(&pool, &k, &s).await;
+        let (start, stop) = eva_monday(&pool, &k, &s).await;
+        store::repo::clock_note::add(&pool, &k.0, stop, s.emp_a, "uitstap met de klas")
+            .await
+            .unwrap();
         correct(
             &e,
             &s.mgr_a,
@@ -1479,6 +1481,8 @@ mod tests {
             assert_eq!(det.name, "Eva Employee");
             assert_eq!(det.events.len(), 2);
             assert_eq!(det.events[1].zone_status, ZoneStatus::OutOfZone);
+            assert_eq!(det.events[1].note.as_deref(), Some("uitstap met de klas"));
+            assert_eq!(det.events[0].note, None);
             assert_eq!(det.corrections.len(), 1);
             let c = &det.corrections[0];
             assert_eq!(c.reason, REASON);
