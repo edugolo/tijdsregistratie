@@ -200,6 +200,8 @@ pub mod http {
     /// IPv6 prefix length by which clients are grouped: /64 in general, /48 for typed codes.
     const CLIENT_V6_PREFIX: u8 = 64;
     const CODE_CLIENT_V6_PREFIX: u8 = 48;
+    // `client_key` shifts by `128 - prefix`; a prefix of 0 would overflow the shift.
+    const _: () = assert!(CLIENT_V6_PREFIX > 0 && CODE_CLIENT_V6_PREFIX > 0);
     /// Hard cap on tracked keys per limiter; the map is also pruned periodically.
     const MAX_TRACKED: usize = 10_000;
     /// Safety cap for all auth requests together, used when no client address is known.

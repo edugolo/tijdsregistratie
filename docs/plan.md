@@ -443,7 +443,9 @@ same link.
   a proxy without trusted headers, share it), and a tight one let anyone disable typed codes for
   everybody with a few wrong guesses a minute. Residual risk: an attacker who controls about 200
   distinct /48s or IPv4 addresses can still run the global bucket dry and so switch off typed codes
-  for everyone while the attack lasts. The QR link keeps working, and the first dry bucket of every
+  for everyone while the attack lasts. A whole /48 (a school or company network) also shares one
+  per-client bucket of 50, so one bad actor on such a network can block typed codes for everyone on
+  it for up to 10 minutes. The QR link keeps working, and the first dry bucket of every
   10-minute window is recorded as an actor-less `audit_log` row `enrollment_code.rate_limited` (no
   client data, written in the background so it never delays the refusal), which makes the attack
   visible. Behind a reverse proxy that overwrites
