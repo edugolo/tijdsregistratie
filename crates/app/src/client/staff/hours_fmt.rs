@@ -164,9 +164,9 @@ pub fn day_label(date: NaiveDate) -> String {
     format!("{weekday} {} {month}", date.day())
 }
 
-/// A correction reason is 3 to 500 characters once trimmed.
-pub fn reason_ok(reason: &str) -> bool {
-    domain::free_text(reason).is_some()
+/// Why a correction reason would be refused, by the same rule as the server.
+pub fn reason_error(reason: &str) -> Option<domain::FreeTextError> {
+    domain::check_free_text(reason).err()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -405,10 +405,13 @@ mod tests {
 
     #[test]
     fn a_reason_needs_three_to_five_hundred_characters() {
-        assert!(!reason_ok("  ab "));
-        assert!(reason_ok(" abc "));
-        assert!(reason_ok(&"é".repeat(500)));
-        assert!(!reason_ok(&"é".repeat(501)));
+        use domain::FreeTextError::*;
+        assert_eq!(reason_error("  ab "), Some(TooShort));
+        assert_eq!(reason_error(" abc "), None);
+        assert_eq!(reason_error(&"é".repeat(500)), None);
+        assert_eq!(reason_error(&"é".repeat(501)), Some(TooLong));
+        assert_eq!(reason_error("abc\u{202E}def"), Some(InvalidCharacters));
+        assert_eq!(reason_error("trein 🤷\u{200D}♀\u{FE0F}"), None);
     }
 
     #[test]

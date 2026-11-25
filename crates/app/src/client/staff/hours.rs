@@ -3,7 +3,7 @@
 
 use chrono::{Duration, NaiveDate};
 use dioxus::prelude::*;
-use domain::{EventKind, FREE_TEXT_MAX_CHARS, ZoneStatus};
+use domain::{EventKind, FREE_TEXT_MAX_CHARS, FreeTextError, ZoneStatus};
 use uuid::Uuid;
 
 use super::export::ExportTab;
@@ -11,8 +11,8 @@ use super::field::{Field, error_id};
 use super::flow::{ErrorNotice, error_code, report_error};
 use super::hours_fmt::{
     Coverage, Issues, MAX_RANGE_DAYS, Preset, Sign, coverage, day_label, format_deviation,
-    format_duration, open_issues, parse_clock, parse_date, preset_range, range_is_valid, reason_ok,
-    sign_of, validation_range,
+    format_duration, open_issues, parse_clock, parse_date, preset_range, range_is_valid,
+    reason_error, sign_of, validation_range,
 };
 use super::icons::{Icon, IconKind};
 use super::load::{Skeleton, use_loaded};
@@ -1001,7 +1001,12 @@ fn CorrectionForm(
         _ => fl!(LANGUAGE_LOADER, "hours-save"),
     };
     let time_problem = problem() == Some("time");
-    let reason_problem = problem() == Some("reason");
+    let reason_problem = matches!(problem(), Some("reason" | "reason-chars"));
+    let reason_message = if problem() == Some("reason-chars") {
+        fl!(LANGUAGE_LOADER, "free-text-invalid")
+    } else {
+        fl!(LANGUAGE_LOADER, "hours-err-reason")
+    };
     rsx! {
         form {
             class: "st-card st-form",
@@ -1030,8 +1035,11 @@ fn CorrectionForm(
                     problem.set(Some("time"));
                     return;
                 };
-                if !reason_ok(&reason.read()) {
-                    problem.set(Some("reason"));
+                if let Some(error) = reason_error(&reason.read()) {
+                    problem.set(Some(match error {
+                        FreeTextError::InvalidCharacters => "reason-chars",
+                        FreeTextError::TooShort | FreeTextError::TooLong => "reason",
+                    }));
                     return;
                 }
                 problem.set(None);
@@ -1098,7 +1106,7 @@ fn CorrectionForm(
             Field {
                 control_id: "correction-reason",
                 label: fl!(LANGUAGE_LOADER, "hours-form-reason"),
-                error: reason_problem.then(|| fl!(LANGUAGE_LOADER, "hours-err-reason")),
+                error: reason_problem.then_some(reason_message),
                 textarea {
                     id: "correction-reason",
                     class: "st-input st-textarea",
