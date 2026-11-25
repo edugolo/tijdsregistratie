@@ -58,7 +58,7 @@ pub fn parse_code(input: &str) -> Option<String> {
 }
 
 /// Domain prefix that keeps code hashes apart from other blind indexes under the same key.
-const CODE_HASH_DOMAIN: &str = "enrollment-code:";
+const CODE_HASH_DOMAIN: &str = "enrollment-code\u{1f}";
 
 /// HMAC-SHA256 of a normalised code, keyed with the blind-index key: the only form in which codes
 /// are stored. Keyed, so a database reader without the key cannot test guesses offline.
@@ -293,6 +293,14 @@ mod tests {
             .await
             .unwrap()
             .id
+    }
+
+    #[test]
+    fn code_hash_uses_the_unit_separator_domain_like_the_other_blind_indexes() {
+        assert_eq!(
+            code_hash(&BLIND, "ABCDEFGHJKLM"),
+            BLIND.index("enrollment-code\u{1f}ABCDEFGHJKLM").to_vec()
+        );
     }
 
     #[sqlx::test(migrations = "../../migrations")]
