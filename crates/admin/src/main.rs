@@ -1,4 +1,5 @@
-//! Operator CLI: bootstrap the first admin, seed sites, purge coordinates, rotate the data key.
+//! Operator CLI: bootstrap the first admin, seed sites, purge coordinates and clock notes, rotate
+//! the data key.
 //!
 //! Errors never include key material or personal data.
 
@@ -10,12 +11,12 @@ mod sites;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use crypto::{BlindIndexKey, DataKeys};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
-use store::repo::{location_purge, person, settings, setup, time_event};
+use store::repo::{location_purge, person, setup};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -52,9 +53,9 @@ enum Command {
         #[arg(long)]
         file: PathBuf,
     },
-    /// Purge stored coordinates older than the retention period
+    /// Purge stored coordinates and clock notes older than the retention period
     PurgeLocations {
-        /// Cutoff (RFC 3339); default: now minus the configured retention days
+        /// Cutoff on the event time (RFC 3339); default: now minus the configured retention days
         #[arg(long)]
         before: Option<DateTime<Utc>>,
     },
@@ -155,16 +156,16 @@ async fn run(command: Command) -> Result<()> {
         }
         Command::PurgeLocations { before } => {
             let pool = connect().await?;
-            let cutoff = match before {
-                Some(t) => t,
-                None => {
-                    let days = settings::get_settings(&pool).await?.retention_days;
-                    Utc::now() - Duration::days(i64::from(days))
-                }
+            let Some(run) = location_purge::run_location_purge(&pool, Utc::now(), before).await?
+            else {
+                bail!("another instance is running the purge; try again later");
             };
-            let n = time_event::purge_locations(&pool, cutoff).await?;
-            location_purge::record_run(&pool, Utc::now(), n).await?;
-            println!("Purged {n} locations older than {}", cutoff.to_rfc3339());
+            println!(
+                "Purged {} locations and {} clock notes older than {}",
+                run.locations,
+                run.notes,
+                run.cutoff.to_rfc3339()
+            );
         }
         Command::RotateKey => {
             let keys = data_keys()?;
@@ -175,8 +176,10 @@ async fn run(command: Command) -> Result<()> {
             println!("  person e-mail addresses: {}", r.person_email);
             println!("  site addresses: {}", r.site_address);
             println!(
-                "Not rotated: time_event locations (append-only). Keep older key versions in \
-                 the key file until all locations written with them have been purged."
+                "Not rotated (append-only): time_event locations, clock notes and correction \
+                 reasons. Keep older key versions in the key file until every location and \
+                 clock note written with them has been purged and the correction reasons \
+                 written with them are no longer needed."
             );
         }
         Command::SetupCode => {

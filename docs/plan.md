@@ -367,14 +367,15 @@ minutes, payroll number, site cost centre; schema in §9); the screens and the e
 
 ## v1.1: automatic coordinate purge
 
-The server removes coordinates itself, so retention no longer depends on an operator's cron job. A
-background task starts about a minute after boot and then runs every 24 hours:
-`store::repo::location_purge::run_location_purge` takes a Postgres advisory lock (a second instance
-skips the run), reads `location_retention_days`, nulls `time_event.location_enc` before the cutoff
-and records the run in `organisation_settings` (`last_location_purge_at`, `last_location_purge_count`)
-in one transaction. Logs hold only the count and the cutoff. A failed run is logged and retried at the
-next interval. Admins see the last run on the organisation settings screen. `admin purge-locations`
-stays for manual use and records the run too.
+The server removes coordinates (and clock notes, see below) itself, so retention no longer depends on
+an operator's cron job. A background task starts about a minute after boot and then runs every 24
+hours: `store::repo::location_purge::run_location_purge` takes a Postgres advisory lock (a second
+instance skips the run), reads `location_retention_days`, nulls `time_event.location_enc` and
+`clock_note.note_enc` of events before the cutoff and records the run in `organisation_settings`
+(`last_location_purge_at`, `last_location_purge_count`, `last_note_purge_count`) in one transaction.
+Logs hold only the counts and the cutoff. A failed run is logged and retried at the next interval.
+Admins see the last run on the organisation settings screen. `admin purge-locations` stays for manual
+use and runs the same function (with an optional `--before` cutoff).
 
 ## v1.1: clock note
 
@@ -387,13 +388,23 @@ and "OK" skips it.
   `note_enc`, `created_at`). The note is free text, so it is encrypted with associated data
   `clock_note || note || id`. A composite foreign key `(event_id, person_id)` → `time_event (id,
   person_id)` ties the note to the person of the event. Insert-only: triggers refuse update,
-  delete and truncate. Like correction reasons and locations, notes are not part of key rotation
-  (append-only); keep older key versions.
+  delete and truncate, except setting `note_enc` to NULL with every other column unchanged.
+  Like correction reasons and locations, notes are not part of key rotation (append-only); keep
+  older key versions until the notes written with them are purged.
+- **Retention**: notes are personal free text, so they follow the coordinates: the daily retention
+  purge nulls `note_enc` of notes whose event's `server_ts` is older than
+  `location_retention_days`, in the same transaction as the coordinates. The event time (not the
+  note's `created_at`) is the clock: a note explains that event's location and can only be added on
+  the event's own day, so both disappear together and one cutoff covers both. The emptied row stays,
+  so the event cannot get a new note. Readers treat a NULL note as no note; a note that cannot be
+  decrypted (retired key) is skipped with a warning that holds only the note id.
 - **Rules (server)**: one note per event, no edits; only the event's own person; only when the
   event's zone status is not `in_zone`; only on the same local day in the organisation time
-  zone; 3 to 500 characters once trimmed (the same rule as correction reasons,
-  `domain::free_text`). `ClockResult.event_id` names the new event; `add_clock_note(event_id,
-  text)` adds the note. No audit row: it is the employee's own action, not a manager mutation.
+  zone; not on a day a manager validated (any of the person's sites or the event's site; refused
+  as a conflict); 3 to 500 characters once trimmed, without control characters other than a
+  newline and without format characters (Unicode `Cc`/`Cf`: zero-width and bidi controls), the same
+  rule as correction reasons (`domain::free_text`, which the client uses too).
+  `ClockResult.event_id` names the new event; `add_clock_note(event_id, text)` adds the note. No audit row: it is the employee's own action, not a manager mutation.
 - **Staff**: the note shows under the zone flag in the Uren day detail and under the name of a
   flagged start on "Vandaag", decrypted only for staff whose scope covers that person (the same
   checks as the rest of those pages). Not in the payroll export.
