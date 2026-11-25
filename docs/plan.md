@@ -365,7 +365,7 @@ minutes, payroll number, site cost centre; schema in §9); the screens and the e
   Instellingen › Integraties (admin: API keys shown once, revoke, links to `/api/v1/docs`). Staff
   pages show all times in the organisation time zone (`StaffContext.timezone`), not the browser's.
 
-## v1.1: automatic coordinate purge
+## v0.0.1: automatic coordinate purge
 
 The server removes coordinates (and clock notes, see below) itself, so retention no longer depends on
 an operator's cron job. A background task starts about a minute after boot and then runs every 24
@@ -377,7 +377,7 @@ Logs hold only the counts and the cutoff. A failed run is logged and retried at 
 Admins see the last run on the organisation settings screen. `admin purge-locations` stays for manual
 use and runs the same function (with an optional `--before` cutoff).
 
-## v1.1: clock note
+## v0.0.1: clock note
 
 After a start or stop that was not in the zone (`out_of_zone`, `uncertain`, `no_location`), the
 employee may add one short explanation (e.g. “uitstap met de klas”). It is optional and never
@@ -409,7 +409,7 @@ and "OK" skips it.
   flagged start on "Vandaag", decrypted only for staff whose scope covers that person (the same
   checks as the rest of those pages). Not in the payroll export.
 
-## v1.1: typed enrollment code
+## v0.0.1: typed enrollment code
 
 A device without a usable camera (a laptop) cannot scan the enrollment QR code. Next to the QR code
 the staff screen now shows a short code to type on `/koppel`, and a "Link kopiëren" button for the
