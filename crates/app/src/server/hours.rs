@@ -1077,6 +1077,9 @@ mod tests {
         assert!(validate_reason(&"x".repeat(500)).is_ok());
         assert!(validate_reason(&"x".repeat(501)).is_err());
         assert!(validate_reason(&"é".repeat(500)).is_ok());
+        assert!(validate_reason("uitstap met de klas 👩\u{200D}🏫").is_ok());
+        assert!(validate_reason("abc\u{202E}def").is_err());
+        assert!(validate_reason("\u{3164}\u{3164}\u{3164}").is_err());
     }
 
     #[test]

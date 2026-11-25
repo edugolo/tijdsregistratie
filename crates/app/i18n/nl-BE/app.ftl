@@ -597,3 +597,8 @@ enroll-code-field = Code
 enroll-code-submit = Verder
 enroll-code-invalid = Deze code klopt niet of werkt niet meer. Kijk hem na of vraag een nieuwe.
 enroll-code-rate-limited = Te veel pogingen. Probeer het over enkele minuten opnieuw.
+
+# --- free text ---
+free-text-too-short = Schrijf minstens 3 tekens.
+free-text-too-long = Hou het onder 500 tekens.
+free-text-invalid = Deze tekst bevat tekens die we niet kunnen bewaren. Typ hem gewoon opnieuw.

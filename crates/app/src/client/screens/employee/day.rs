@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use domain::{FREE_TEXT_MAX_CHARS, free_text};
+use domain::{FREE_TEXT_MAX_CHARS, FreeTextError, check_free_text};
 
 use crate::client::components::{
     ActionKind, DaySummaryCard, Icon, MainActionButton, NoticeCard, PrimaryButton, Screen,
@@ -136,7 +136,14 @@ pub fn OutOfZone(
     } else {
         fl!(LANGUAGE_LOADER, "zone-saved-at", time = saved_time.as_str())
     };
-    let can_save = note != NoteState::Saving && free_text(&text.read()).is_some();
+    let checked = check_free_text(&text.read()).map(|_| ());
+    let can_save = note != NoteState::Saving && checked.is_ok();
+    // Nothing typed yet is not a mistake: the note is optional.
+    let hint = checked
+        .err()
+        .filter(|_| !text.read().trim().is_empty())
+        .map(free_text_hint);
+    let invalid = hint.is_some();
     rsx! {
         Screen { org_name, person_name: Some(person_name),
             div { class: "icon-tile warn", Icon { name: "alert-triangle", size: 36 } }
@@ -157,7 +164,12 @@ pub fn OutOfZone(
                             placeholder: fl!(LANGUAGE_LOADER, "clock-note-placeholder"),
                             disabled: note == NoteState::Saving,
                             value: "{text}",
+                            aria_invalid: invalid,
+                            aria_describedby: invalid.then_some("clock-note-hint"),
                             oninput: move |e| text.set(e.value()),
+                        }
+                        if let Some(hint) = hint {
+                            p { id: "clock-note-hint", class: "text-sub text-small", role: "status", {hint} }
                         }
                     }
                     if note == NoteState::Failed {
@@ -175,6 +187,15 @@ pub fn OutOfZone(
                 PrimaryButton { label: fl!(LANGUAGE_LOADER, "action-ok"), onclick: move |_| on_ok.call(()) }
             }
         }
+    }
+}
+
+/// What to change about a note the server would refuse.
+fn free_text_hint(error: FreeTextError) -> String {
+    match error {
+        FreeTextError::TooShort => fl!(LANGUAGE_LOADER, "free-text-too-short"),
+        FreeTextError::TooLong => fl!(LANGUAGE_LOADER, "free-text-too-long"),
+        FreeTextError::InvalidCharacters => fl!(LANGUAGE_LOADER, "free-text-invalid"),
     }
 }
 

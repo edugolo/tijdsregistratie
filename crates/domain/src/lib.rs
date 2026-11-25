@@ -13,7 +13,9 @@ pub use correction::{
 };
 pub use day::{Anomaly, BreakRule, DaySummary, Event, EventKind, next_action, summarize_day};
 pub use geo::{GeoPoint, haversine_m};
-pub use text::{FREE_TEXT_MAX_CHARS, FREE_TEXT_MIN_CHARS, free_text};
+pub use text::{
+    FREE_TEXT_MAX_CHARS, FREE_TEXT_MIN_CHARS, FreeTextError, check_free_text, free_text,
+};
 pub use zone::{Fix, SiteZone, ZoneConfig, ZoneResult, ZoneStatus, classify};
 
 /// Error returned when a stored string does not map to a domain enum.
