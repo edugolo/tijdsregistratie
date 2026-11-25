@@ -9,6 +9,7 @@ mod export;
 mod export_fmt;
 mod field;
 mod flow;
+mod free_text;
 mod hours;
 mod hours_fmt;
 mod icons;

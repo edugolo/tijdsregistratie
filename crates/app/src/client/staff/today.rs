@@ -3,6 +3,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
+use super::free_text::{FreeText, note_label};
 use super::icons::{Icon, IconKind};
 use super::load::{Skeleton, use_loaded};
 use super::map::started_at;
@@ -172,7 +173,7 @@ fn TodayRow(row: TodayRowDto, attention: bool) -> Element {
                     span { class: "st-sub", "{since}" }
                 }
                 if let Some(note) = &row.note {
-                    span { class: "st-sub st-reason", {fl!(LANGUAGE_LOADER, "clock-note-staff", note = note.as_str())} }
+                    FreeText { class: "st-sub st-reason", label: note_label(), text: note.clone() }
                 }
             }
             span { class: "st-chip {class}",
@@ -207,17 +208,5 @@ mod tests {
         let (class, _, label) = status_chip(&TodayStatusDto::NotStarted);
         assert_eq!(class, "st-chip-neutral");
         assert_eq!(label, "Nog niet gestart");
-    }
-
-    #[test]
-    fn a_clock_note_is_quoted() {
-        assert_eq!(
-            fl!(
-                LANGUAGE_LOADER,
-                "clock-note-staff",
-                note = "uitstap met de klas"
-            ),
-            "Uitleg: “uitstap met de klas”"
-        );
     }
 }
