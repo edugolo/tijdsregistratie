@@ -55,13 +55,23 @@ Every command except `generate-key` applies pending database migrations first.
 ## Purging coordinates
 
 Coordinates of clock events are kept for `location_retention_days` (default 31) and are then removed;
-`site_id` and `zone_status` stay. Run the purge daily, for example from cron:
+`site_id` and `zone_status` stay.
 
-```cron
-15 3 * * * . /etc/tijd/env && /usr/local/bin/admin purge-locations >> /var/log/tijd-purge.log 2>&1
+The server purges by itself: about a minute after startup and then every 24 hours it removes
+coordinates older than the retention period. No cron entry is needed. A lock in the database makes
+sure only one instance runs it at a time, a failed run is logged as a warning and retried at the next
+interval, and the info log only holds the number of purged locations and the cutoff. Admins see the
+last run under Instellingen > Organisatie; it is stored in `organisation_settings`
+(`last_location_purge_at`, `last_location_purge_count`).
+
+To purge by hand, for example right after lowering the retention period:
+
+```sh
+admin purge-locations
 ```
 
-`--before <RFC3339>` overrides the cutoff. The command prints the number of purged locations.
+`--before <RFC3339>` overrides the cutoff. The command prints the number of purged locations and
+records the run like the automatic purge does.
 
 ## Key rotation
 
@@ -146,8 +156,8 @@ GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO tijd_app;
 ```
 
 Point `DATABASE_URL` of the app at `tijd_app`; run `admin` commands that migrate (every command except
-`generate-key`) with `tijd_migrate`. `admin purge-locations` needs only the `UPDATE (location_enc)`
-grant, so it can run as `tijd_app`. The session and audit tables the app writes keep their
+`generate-key`) with `tijd_migrate`. `admin purge-locations` needs the `UPDATE (location_enc)` grant and
+update access to `organisation_settings` (to record the run), so it can run as `tijd_app`. The session and audit tables the app writes keep their
 insert/update grants. Re-run the `GRANT`/`REVOKE` block after each migration that adds tables.
 
 ## Stale open days
@@ -283,10 +293,7 @@ The container user must be able to read the key files (see `APP_UID` / `APP_GID`
 `config/example/.env.example`; rootless Docker needs `0`/`0`). To seed sites, mount the file:
 `run --rm -v "$PWD/sites.toml:/tmp/sites.toml:ro" app admin seed-sites --file /tmp/sites.toml`.
 
-### Scheduled purge of coordinates
+### Purge of coordinates
 
-Run `admin purge-locations` daily from the host cron (see "Purging coordinates" above):
-
-```cron
-15 3 * * * cd /srv/tijdsregistratie && docker compose -f deploy/compose.yaml --env-file .env run --rm -T app admin purge-locations >> purge.log 2>&1
-```
+The app purges coordinates daily by itself (see "Purging coordinates" above); there is nothing to
+schedule. For a manual run: `docker compose -f deploy/compose.yaml --env-file .env run --rm -T app admin purge-locations`.

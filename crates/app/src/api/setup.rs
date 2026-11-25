@@ -41,6 +41,19 @@ pub struct OrgSettingsInput {
     pub timezone: String,
 }
 
+/// When coordinates were last purged. `None` while the purge never ran.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocationPurgeStatus {
+    pub last: Option<LastLocationPurge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LastLocationPurge {
+    /// Unix milliseconds.
+    pub at_ms: i64,
+    pub purged: i64,
+}
+
 /// Everything the wizard collects. Sent once, at the end of step S4.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetupInput {
@@ -156,6 +169,16 @@ pub async fn org_settings() -> Result<OrgSettingsInput> {
     crate::server::setup::org_settings(&state.pool)
         .await
         .map_err(|e| ServerFnError::from(e).into())
+}
+
+/// A0: the last coordinate purge. Admin only.
+#[get("/api/admin/location-purge")]
+pub async fn location_purge_status() -> Result<LocationPurgeStatus, ServerFnError> {
+    crate::server::auth::require_admin().await?;
+    let state = crate::server::app_state().await?;
+    crate::server::setup::location_purge_status(&state.pool)
+        .await
+        .map_err(ServerFnError::from)
 }
 
 /// A0: saves the organisation fields. Admin only; audited as `settings.updated`.

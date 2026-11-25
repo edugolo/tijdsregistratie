@@ -567,3 +567,7 @@ reauth-failed = Bevestigen is niet gelukt.
 # --- export feedback ---
 export-download-need-preview = Maak eerst een voorbeeld van deze keuzes.
 export-download-no-rows = Er zijn geen gevalideerde uren in deze periode.
+
+# --- location purge ---
+location-purge-last = Locaties laatst opgeruimd op { $date } om { $time } ({ $count } verwijderd)
+location-purge-never = Locaties nog niet opgeruimd

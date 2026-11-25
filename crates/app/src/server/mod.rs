@@ -7,6 +7,7 @@ pub mod config;
 pub mod export;
 pub mod geocode;
 pub mod hours;
+pub mod location_purge;
 pub mod passkey;
 pub mod session;
 pub mod setup;
@@ -139,6 +140,7 @@ pub async fn build_router(app: fn() -> dioxus::prelude::Element) -> anyhow::Resu
         .connect(&config.database_url)
         .await?;
     sqlx::migrate!("../../migrations").run(&pool).await?;
+    location_purge::spawn(pool.clone());
     // In setup mode this puts the setup code in the log right after boot (the lazy path in
     // `setup::required` still covers expiry later on). After completion it does nothing.
     setup::required(&pool)

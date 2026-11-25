@@ -39,8 +39,8 @@ The mockups use a placeholder organisation name and logo; branding is configurab
   rows that reference the original. Every manager and admin mutation writes an audit row.
 - **Authoritative server time.** The device clock is informational only; role and site scope are
   checked on the server for every call.
-- **Coordinates are temporary.** They are removed after the retention period (default 31 days); the
-  site and zone status stay.
+- **Coordinates are temporary.** They are removed automatically after the retention period (default
+  31 days); the site and zone status stay.
 
 What the encryption does **not** protect against:
 

@@ -212,13 +212,16 @@ pub async fn events_between<'e>(
 }
 
 /// Sets `location_enc` to NULL for events older than `before`. Returns the number of rows purged.
-pub async fn purge_locations(pool: &PgPool, before: DateTime<Utc>) -> Result<u64> {
+pub async fn purge_locations<'e>(
+    executor: impl PgExecutor<'e>,
+    before: DateTime<Utc>,
+) -> Result<u64> {
     let done = sqlx::query(
         "UPDATE time_event SET location_enc = NULL \
          WHERE server_ts < $1 AND location_enc IS NOT NULL",
     )
     .bind(before)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(done.rows_affected())
 }

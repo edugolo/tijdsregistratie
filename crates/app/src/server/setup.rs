@@ -14,10 +14,12 @@ use sqlx::PgPool;
 use store::repo::settings::{self, OrgProfile};
 use store::repo::setup::{self, SetupData, SetupError};
 use store::repo::site::{SiteInput, ZonePolicy};
-use store::repo::{RepoError, audit};
+use store::repo::{RepoError, audit, location_purge};
 use uuid::Uuid;
 
-use crate::api::setup::{Branding, OrgSettingsInput, SetupInput, check_name};
+use crate::api::setup::{
+    Branding, LastLocationPurge, LocationPurgeStatus, OrgSettingsInput, SetupInput, check_name,
+};
 
 const DEFAULT_BRAND_COLOR: &str = "#1e3a8a";
 const DEFAULT_NAME: &str = "Tijdsregistratie";
@@ -228,6 +230,17 @@ pub async fn org_settings(pool: &PgPool) -> Result<OrgSettingsInput> {
     })
 }
 
+/// When coordinates were last purged.
+pub async fn location_purge_status(pool: &PgPool) -> Result<LocationPurgeStatus> {
+    let last = location_purge::last_purge(pool).await?;
+    Ok(LocationPurgeStatus {
+        last: last.map(|l| LastLocationPurge {
+            at_ms: l.at.timestamp_millis(),
+            purged: l.purged,
+        }),
+    })
+}
+
 /// Saves the organisation fields and audits which ones changed (names only, no values).
 pub async fn save_org_settings(pool: &PgPool, actor: Uuid, input: OrgSettingsInput) -> Result<()> {
     let profile = validate_org(&input)?;
@@ -340,6 +353,18 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn purge_status_is_empty_until_a_run_is_recorded(pool: PgPool) {
+        assert_eq!(location_purge_status(&pool).await.unwrap().last, None);
+        let now = chrono::Utc::now();
+        location_purge::run_location_purge(&pool, now)
+            .await
+            .unwrap();
+        let last = location_purge_status(&pool).await.unwrap().last.unwrap();
+        assert_eq!(last.purged, 0);
+        assert!((last.at_ms - now.timestamp_millis()).abs() < 1000);
     }
 
     #[sqlx::test(migrations = "../../migrations")]
