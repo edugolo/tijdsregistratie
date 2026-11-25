@@ -27,6 +27,8 @@ uuid = { version = "1.29.3", features = ["v4", "serde", "js"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 chrono-tz = "0.10.4"
 toml = "1.2.1"
+# Unicode general category, to refuse invisible and bidi control characters in free text
+unicode-properties = { version = "0.1.5", default-features = false, features = ["general-category"] }
 
 # Server
 tokio = { version = "1.54.1", features = ["full"] }

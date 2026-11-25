@@ -1,8 +1,10 @@
 //! Clock notes: one short, optional explanation by the employee on a start or stop outside the
-//! zone. Insert-only; the note is encrypted and only decrypted by [`notes_for_events`].
+//! zone. Insert-only except for the retention purge ([`purge_notes`]); the note is encrypted and
+//! only decrypted by [`notes_for_events`].
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use crypto::DataKeys;
 use sqlx::PgExecutor;
 use uuid::Uuid;
@@ -38,7 +40,9 @@ pub async fn add<'e>(
     Ok(inserted == 1)
 }
 
-/// The decrypted notes of the given events, by event id. Never log the result.
+/// The decrypted notes of the given events, by event id. Never log the result. A purged note
+/// (NULL) is no note. A note that cannot be decrypted (for example after its key version was
+/// retired) is logged by id only and left out, so one bad blob cannot break a whole page.
 pub async fn notes_for_events<'e>(
     executor: impl PgExecutor<'e>,
     keys: &DataKeys,
@@ -47,19 +51,42 @@ pub async fn notes_for_events<'e>(
     if event_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows: Vec<(Uuid, Uuid, Vec<u8>)> =
-        sqlx::query_as("SELECT id, event_id, note_enc FROM clock_note WHERE event_id = ANY($1)")
-            .bind(event_ids)
-            .fetch_all(executor)
-            .await?;
-    rows.into_iter()
-        .map(|(id, event_id, blob)| Ok((event_id, open_str(keys, TABLE, NOTE_COLUMN, id, &blob)?)))
-        .collect()
+    let rows: Vec<(Uuid, Uuid, Vec<u8>)> = sqlx::query_as(
+        "SELECT id, event_id, note_enc FROM clock_note \
+         WHERE event_id = ANY($1) AND note_enc IS NOT NULL",
+    )
+    .bind(event_ids)
+    .fetch_all(executor)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(
+            |(id, event_id, blob)| match open_str(keys, TABLE, NOTE_COLUMN, id, &blob) {
+                Ok(note) => Some((event_id, note)),
+                Err(e) => {
+                    tracing::warn!(note_id = %id, error = %e, "clock note cannot be decrypted; skipped");
+                    None
+                }
+            },
+        )
+        .collect())
+}
+
+/// Sets `note_enc` to NULL for notes on events older than `before` (by the event's server time,
+/// the same clock as the coordinate purge). Returns the number of notes purged.
+pub async fn purge_notes<'e>(executor: impl PgExecutor<'e>, before: DateTime<Utc>) -> Result<u64> {
+    let done = sqlx::query(
+        "UPDATE clock_note n SET note_enc = NULL FROM time_event e \
+         WHERE e.id = n.event_id AND e.server_ts < $1 AND n.note_enc IS NOT NULL",
+    )
+    .bind(before)
+    .execute(executor)
+    .await?;
+    Ok(done.rows_affected())
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
     use crypto::{BlindIndexKey, generate_key_line};
     use domain::{EventKind, ZoneStatus};
     use sqlx::PgPool;
@@ -137,5 +164,44 @@ mod tests {
         // The note belongs to the person of the event.
         let (_, e2) = mk_event(&pool, &k).await;
         assert!(add(&pool, &k, e2, p, NOTE).await.is_err());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn only_nulling_the_note_is_allowed_and_a_purged_note_is_no_note(pool: PgPool) {
+        let k = keys();
+        let (p, e) = mk_event(&pool, &k).await;
+        assert!(add(&pool, &k, e, p, NOTE).await.unwrap());
+        for sql in [
+            "UPDATE clock_note SET note_enc = NULL, created_at = now() - interval '1 day'",
+            "UPDATE clock_note SET note_enc = '\\x00'::bytea",
+        ] {
+            assert!(sqlx::query(sql).execute(&pool).await.is_err(), "{sql}");
+        }
+        sqlx::query("UPDATE clock_note SET note_enc = NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(notes_for_events(&pool, &k, &[e]).await.unwrap().is_empty());
+        // The event keeps its (purged) note row, so no new note can take its place.
+        assert!(!add(&pool, &k, e, p, NOTE).await.unwrap());
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn an_undecryptable_note_is_skipped_not_an_error(pool: PgPool) {
+        let k = keys();
+        let retired = keys();
+        let (p, readable) = mk_event(&pool, &k).await;
+        let (q, lost) = mk_event(&pool, &k).await;
+        assert!(add(&pool, &k, readable, p, NOTE).await.unwrap());
+        assert!(
+            add(&pool, &retired, lost, q, "andere sleutel")
+                .await
+                .unwrap()
+        );
+        let notes = notes_for_events(&pool, &k, &[readable, lost])
+            .await
+            .unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[&readable], NOTE);
     }
 }

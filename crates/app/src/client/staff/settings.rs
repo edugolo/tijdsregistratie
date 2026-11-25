@@ -113,7 +113,7 @@ pub fn StaffSettingsPage() -> Element {
     }
 }
 
-/// One line under the organisation form: when coordinates were last removed.
+/// One line under the organisation form: when coordinates and clock notes were last removed.
 #[component]
 fn LocationPurgeLine() -> Element {
     let status = use_loaded(location_purge_status);
@@ -130,7 +130,8 @@ fn purge_line(status: &LocationPurgeStatus) -> String {
             "location-purge-last",
             date = date_label(last.at_ms),
             time = time_label(last.at_ms),
-            count = last.purged
+            count = last.locations,
+            notes = last.notes
         ),
         None => fl!(LANGUAGE_LOADER, "location-purge-never"),
     }

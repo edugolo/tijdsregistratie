@@ -1,5 +1,5 @@
-//! Automatic coordinate purge: shortly after startup and then daily, coordinates older than the
-//! retention period are removed. The work lives in `store::repo::location_purge`.
+//! Automatic retention purge: shortly after startup and then daily, coordinates and clock notes
+//! older than the retention period are removed. The work lives in `store::repo::location_purge`.
 
 use std::time::Duration;
 
@@ -27,15 +27,16 @@ async fn purge_periodically(pool: PgPool) {
 
 /// One run. A failure is logged without data and retried at the next interval.
 async fn purge_once(pool: &PgPool) {
-    match run_location_purge(pool, Utc::now()).await {
+    match run_location_purge(pool, Utc::now(), None).await {
         Ok(Some(run)) => tracing::info!(
-            purged = run.purged,
+            locations = run.locations,
+            notes = run.notes,
             cutoff = %run.cutoff.to_rfc3339(),
-            "coordinate purge done"
+            "retention purge done"
         ),
-        Ok(None) => tracing::debug!("coordinate purge skipped: another instance is running it"),
+        Ok(None) => tracing::debug!("retention purge skipped: another instance is running it"),
         Err(e) => {
-            tracing::warn!(error = %e, "coordinate purge failed; retrying at the next interval")
+            tracing::warn!(error = %e, "retention purge failed; retrying at the next interval")
         }
     }
 }

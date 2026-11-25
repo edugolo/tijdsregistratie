@@ -52,17 +52,19 @@ Every command except `generate-key` applies pending database migrations first.
    Sites are matched by exact name: existing ones are updated, new ones are created. Running it again
    with the same file changes nothing. Addresses are stored encrypted.
 
-## Purging coordinates
+## Purging coordinates and clock notes
 
-Coordinates of clock events are kept for `location_retention_days` (default 31) and are then removed;
-`site_id` and `zone_status` stay.
+Coordinates of clock events and the employees' clock notes on them are kept for
+`location_retention_days` (default 31) and are then removed; `site_id`, `zone_status` and the
+(emptied) note row stay. A note follows the server time of its event, so an event's coordinates and
+its note disappear in the same run.
 
 The server purges by itself: about a minute after startup and then every 24 hours it removes
-coordinates older than the retention period. No cron entry is needed. A lock in the database makes
-sure only one instance runs it at a time, a failed run is logged as a warning and retried at the next
-interval, and the info log only holds the number of purged locations and the cutoff. Admins see the
-last run under Instellingen > Organisatie; it is stored in `organisation_settings`
-(`last_location_purge_at`, `last_location_purge_count`).
+coordinates and notes older than the retention period, in one transaction. No cron entry is needed.
+A lock in the database makes sure only one instance runs it at a time, a failed run is logged as a
+warning and retried at the next interval, and the info log only holds the counts and the cutoff.
+Admins see the last run under Instellingen > Organisatie; it is stored in `organisation_settings`
+(`last_location_purge_at`, `last_location_purge_count`, `last_note_purge_count`).
 
 To purge by hand, for example right after lowering the retention period:
 
@@ -70,8 +72,9 @@ To purge by hand, for example right after lowering the retention period:
 admin purge-locations
 ```
 
-`--before <RFC3339>` overrides the cutoff. The command prints the number of purged locations and
-records the run like the automatic purge does.
+It runs the same code as the automatic purge (lock, both tables, one transaction, recorded run).
+`--before <RFC3339>` overrides the cutoff on the event time. The command prints the number of purged
+locations and notes; it fails without changes while another instance holds the lock.
 
 ## Key rotation
 
@@ -87,11 +90,15 @@ records the run like the automatic purge does.
    that are not on the newest key version, in batches inside transactions, and prints the counts.
    It can be repeated safely.
 
-**`time_event.location_enc` is not rotated.** The `time_event` table is append-only (a database
-trigger only allows purging the location), and locations are removed after the retention period
-anyway. Therefore **keep old key versions in the key file until every location written with them has
-been purged**: at least `location_retention_days` after step 3, then run `purge-locations` and only
-then remove the old lines. Removing a version earlier makes the locations written with it unreadable.
+**`time_event.location_enc`, `clock_note.note_enc` and `correction.reason_enc` are not rotated.**
+These tables are append-only (database triggers only allow purging a location or a note), and
+locations and notes are removed after the retention period anyway. Therefore **keep old key versions
+in the key file until every location and clock note written with them has been purged and the
+correction reasons written with them are no longer needed**: at least `location_retention_days`
+after step 3, then run `purge-locations`. Correction reasons are never purged, so in practice keep
+an old version as long as its correction reasons must stay readable (the hours history). Removing a
+version earlier makes that data unreadable: locations and reasons fail to load, and an undecryptable
+clock note is skipped (logged as a warning with the note id only).
 
 The blind-index key is not rotated by this command.
 
@@ -128,7 +135,12 @@ The migrations make the data hard to alter by accident or by a compromised app:
 
 - `time_event` rejects `UPDATE` (except nulling `location_enc` for the coordinate purge), `DELETE`
   and `TRUNCATE`.
-- `audit_log` is append-only: `UPDATE`, `DELETE` and `TRUNCATE` are rejected.
+- `clock_note` rejects `UPDATE` (except nulling `note_enc` for the retention purge), `DELETE` and
+  `TRUNCATE`.
+- `period_validation` rejects `UPDATE` (except filling in `reopened_by`/`reopened_at` once),
+  `DELETE` and `TRUNCATE`.
+- `audit_log`, `correction` and `export_batch` are append-only: `UPDATE`, `DELETE` and `TRUNCATE`
+  are rejected.
 
 These are triggers and a **safety net, not a security boundary**: unless the app connects with a
 role that does not own the tables, anyone with the app's database credentials can disable them.
@@ -148,16 +160,21 @@ ALTER DATABASE tijd OWNER TO tijd_migrate;
 -- After every migration run, as tijd_migrate:
 GRANT USAGE ON SCHEMA public TO tijd_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO tijd_app;
-REVOKE UPDATE, DELETE, TRUNCATE ON time_event, audit_log FROM tijd_app;
+REVOKE UPDATE, DELETE, TRUNCATE
+    ON time_event, clock_note, correction, period_validation, export_batch, audit_log
+    FROM tijd_app;
 GRANT UPDATE (location_enc) ON time_event TO tijd_app;   -- coordinate purge only
+GRANT UPDATE (note_enc) ON clock_note TO tijd_app;       -- clock note purge only
+GRANT UPDATE (reopened_by, reopened_at) ON period_validation TO tijd_app;   -- reopening only
 REVOKE TRUNCATE, TRIGGER, REFERENCES ON ALL TABLES IN SCHEMA public FROM tijd_app;
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO tijd_app;
 -- No CREATE on the schema, no ownership, no DDL for tijd_app.
 ```
 
 Point `DATABASE_URL` of the app at `tijd_app`; run `admin` commands that migrate (every command except
-`generate-key`) with `tijd_migrate`. `admin purge-locations` needs the `UPDATE (location_enc)` grant and
-update access to `organisation_settings` (to record the run), so it can run as `tijd_app`. The session and audit tables the app writes keep their
+`generate-key`) with `tijd_migrate`. `admin purge-locations` needs the `UPDATE (location_enc)` and
+`UPDATE (note_enc)` grants and update access to `organisation_settings` (to record the run), so it can
+run as `tijd_app`. The session and audit tables the app writes keep their
 insert/update grants. Re-run the `GRANT`/`REVOKE` block after each migration that adds tables.
 
 ## Stale open days

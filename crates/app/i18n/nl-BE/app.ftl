@@ -569,8 +569,14 @@ export-download-need-preview = Maak eerst een voorbeeld van deze keuzes.
 export-download-no-rows = Er zijn geen gevalideerde uren in deze periode.
 
 # --- location purge ---
-location-purge-last = Locaties laatst opgeruimd op { $date } om { $time } ({ $count } verwijderd)
-location-purge-never = Locaties nog niet opgeruimd
+location-purge-last = Laatst opgeruimd op { $date } om { $time }: { $count ->
+    [one] 1 locatie
+    *[other] { $count } locaties
+} en { $notes ->
+    [one] 1 toelichting
+    *[other] { $notes } toelichtingen
+}.
+location-purge-never = Locaties en toelichtingen zijn nog niet opgeruimd.
 
 # --- clock note ---
 clock-note-label = Wil je dit uitleggen? Dat hoeft niet.

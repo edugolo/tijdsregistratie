@@ -43,6 +43,9 @@ pub enum ClockError {
     /// The event already has a note.
     #[error("note exists")]
     NoteExists,
+    /// A manager validated the day of the event; it takes no new note.
+    #[error("day closed")]
+    DayClosed,
     #[error(transparent)]
     Repo(#[from] RepoError),
 }
@@ -52,7 +55,7 @@ pub fn to_server_error(e: ClockError) -> ServerFnError {
         ClockError::NoSites => (403, "forbidden"),
         ClockError::NotFound => (404, "not found"),
         ClockError::NoteInvalid => (400, "invalid input"),
-        ClockError::NoteExists => (409, "conflict"),
+        ClockError::NoteExists | ClockError::DayClosed => (409, "conflict"),
         ClockError::Repo(err) => {
             tracing::error!(error = %err, "clock failed");
             (500, "internal error")
@@ -266,7 +269,8 @@ pub async fn clock_for(
 
 /// Adds the optional note of `person_id` to their own start or stop `event_id` of today (in the
 /// organisation time zone) that was not in the zone. One note per event, never edited. Another
-/// person's event and an event of another day look the same as an unknown one.
+/// person's event and an event of another day look the same as an unknown one. A validated day
+/// takes no note.
 pub async fn add_note_for(
     pool: &PgPool,
     keys: &DataKeys,
@@ -285,6 +289,14 @@ pub async fn add_note_for(
         return Err(ClockError::NoteInvalid);
     }
     let note = free_text(text).ok_or(ClockError::NoteInvalid)?;
+    // Like a tap, a note must not change a day a manager already validated: neither at the
+    // event's own site nor at any other site of the person.
+    let mut site_ids = role::employee_sites(pool, person_id).await?;
+    site_ids.extend(event.site_id);
+    let day = event.server_ts.with_timezone(&tz).date_naive();
+    if validation::is_validated(pool, &site_ids, day).await? {
+        return Err(ClockError::DayClosed);
+    }
     if clock_note::add(pool, keys, event.id, person_id, note).await? {
         Ok(())
     } else {
@@ -970,6 +982,38 @@ mod tests {
         add_note_for(&pool, &k, p, out, NOTE, utc(2026, 3, 10, 22, 59))
             .await
             .unwrap();
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_note_is_refused_once_the_day_is_validated(pool: PgPool) {
+        let k = keys();
+        let p = seed(&pool, &k, ZonePolicy::Flag).await;
+        let e = tap(&pool, &k, p, EventKind::Start, far(), T0())
+            .await
+            .event_id
+            .unwrap();
+        let site_id = role::employee_sites(&pool, p).await.unwrap()[0];
+        let mut conn = pool.acquire().await.unwrap();
+        let day = T0().date_naive();
+        validation::validate(&mut conn, site_id, day, day, p)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(conn);
+        let r = add_note_for(&pool, &k, p, e, NOTE, T0() + Duration::minutes(5)).await;
+        assert!(
+            matches!(r, Err(ClockError::DayClosed)),
+            "a validated day takes no note"
+        );
+        assert!(matches!(
+            to_server_error(ClockError::DayClosed),
+            ServerFnError::ServerError { code: 409, .. }
+        ));
+        let notes: i64 = sqlx::query_scalar("SELECT count(*) FROM clock_note")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(notes, 0);
     }
 
     /// Every column of every table in the public schema as text, concatenated.

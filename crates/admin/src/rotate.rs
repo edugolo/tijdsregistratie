@@ -1,7 +1,8 @@
 //! Key rotation: re-encrypts blobs that are not on the current key version, in batches.
 //!
-//! `time_event.location_enc` is deliberately not rotated: the table is append-only (a trigger
-//! only allows nulling the location) and locations are purged after the retention period.
+//! `time_event.location_enc`, `clock_note.note_enc` and `correction.reason_enc` are deliberately
+//! not rotated: those tables are append-only (triggers only allow nulling a location or a note).
+//! Locations and notes are purged after the retention period; correction reasons are kept.
 
 use anyhow::Result;
 use crypto::{Aad, DataKeys};

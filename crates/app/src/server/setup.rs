@@ -236,7 +236,8 @@ pub async fn location_purge_status(pool: &PgPool) -> Result<LocationPurgeStatus>
     Ok(LocationPurgeStatus {
         last: last.map(|l| LastLocationPurge {
             at_ms: l.at.timestamp_millis(),
-            purged: l.purged,
+            locations: l.locations,
+            notes: l.notes,
         }),
     })
 }
@@ -359,11 +360,11 @@ mod tests {
     async fn purge_status_is_empty_until_a_run_is_recorded(pool: PgPool) {
         assert_eq!(location_purge_status(&pool).await.unwrap().last, None);
         let now = chrono::Utc::now();
-        location_purge::run_location_purge(&pool, now)
+        location_purge::run_location_purge(&pool, now, None)
             .await
             .unwrap();
         let last = location_purge_status(&pool).await.unwrap().last.unwrap();
-        assert_eq!(last.purged, 0);
+        assert_eq!((last.locations, last.notes), (0, 0));
         assert!((last.at_ms - now.timestamp_millis()).abs() < 1000);
     }
 
