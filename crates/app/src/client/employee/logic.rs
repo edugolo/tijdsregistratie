@@ -131,6 +131,20 @@ pub fn server_error_message(error: &ServerFnError) -> String {
     }
 }
 
+/// Text for a typed enrollment code that was refused: one message for every unknown, used or
+/// expired code (the server does not tell them apart), another when there were too many tries.
+pub fn code_error_message(error: &ServerFnError) -> String {
+    match error {
+        ServerFnError::ServerError { code: 429, .. } => {
+            fl!(LANGUAGE_LOADER, "enroll-code-rate-limited")
+        }
+        ServerFnError::ServerError { message, .. } if message == "token-invalid" => {
+            fl!(LANGUAGE_LOADER, "enroll-code-invalid")
+        }
+        _ => fl!(LANGUAGE_LOADER, "error-generic"),
+    }
+}
+
 /// What the home screen shows after the server accepted a tap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Aftermath {
@@ -172,6 +186,27 @@ pub fn refusal_needs_message(requested: EventKind, next_now: EventKind) -> bool 
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    fn server_error(code: u16, message: &str) -> ServerFnError {
+        ServerFnError::ServerError {
+            message: message.to_string(),
+            code,
+            details: None,
+        }
+    }
+
+    #[test]
+    fn refused_codes_get_one_message_and_too_many_tries_another() {
+        let invalid = code_error_message(&server_error(400, "token-invalid"));
+        assert_eq!(invalid, fl!(LANGUAGE_LOADER, "enroll-code-invalid"));
+        let limited = code_error_message(&server_error(429, "HTTP 429: Te veel pogingen."));
+        assert_eq!(limited, fl!(LANGUAGE_LOADER, "enroll-code-rate-limited"));
+        assert_ne!(invalid, limited);
+        assert_eq!(
+            code_error_message(&server_error(500, "login-failed")),
+            fl!(LANGUAGE_LOADER, "error-generic")
+        );
+    }
 
     fn at(h: u32, m: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 11, 19, h, m, 0).unwrap()

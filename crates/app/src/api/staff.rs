@@ -77,6 +77,8 @@ pub struct EnrollmentDto {
     /// Rendered SVG markup of the QR code.
     pub qr_svg: String,
     pub url: String,
+    /// The same enrollment as a code to type, `XXXX-XXXX-XXXX`, for a device without camera.
+    pub code: String,
     /// Unix milliseconds.
     pub issued_at: i64,
     /// Unix milliseconds.

@@ -47,6 +47,30 @@ pub async fn begin_registration(token: String) -> Result<CreationChallengeRespon
         .map_err(ServerFnError::from)
 }
 
+/// Whether a typed enrollment code can be used, with the first name of its person. Any failure
+/// (unknown, malformed, used, expired) is one generic `token-invalid` (400); failed attempts
+/// are limited per client and globally by the HTTP guard.
+#[post("/api/auth/code/info")]
+pub async fn enrollment_code_info(code: String) -> Result<EnrollmentInfo, ServerFnError> {
+    let state = crate::server::app_state().await?;
+    crate::server::passkey::enrollment_info_by_code(&state, &code)
+        .await
+        .map_err(ServerFnError::from)
+}
+
+/// Starts the same passkey registration as `begin_registration`, for the token a typed code
+/// belongs to. The raw token never leaves the server; `finish_registration` completes it.
+#[post("/api/auth/code/register/begin")]
+pub async fn begin_registration_with_code(
+    code: String,
+) -> Result<CreationChallengeResponse, ServerFnError> {
+    let state = crate::server::app_state().await?;
+    let session = crate::server::session().await?;
+    crate::server::passkey::begin_registration_with_code(&state, &session, &code)
+        .await
+        .map_err(ServerFnError::from)
+}
+
 /// Verifies the new passkey, consumes the token and signs the person in.
 #[post("/api/auth/register/finish")]
 pub async fn finish_registration(

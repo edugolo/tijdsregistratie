@@ -115,3 +115,14 @@ html, body { margin: 0; background: var(--md-surface); color: var(--md-on-surfac
 .note-field label { color: var(--md-on-surface); font-weight: 600; }
 .note-input { width: 100%; box-sizing: border-box; min-height: 48px; padding: 12px 14px; border: 1px solid var(--md-outline); border-radius: var(--radius); background: var(--md-surface-container-low); color: var(--md-on-surface); font: inherit; resize: vertical; }
 .note-input:focus-visible { outline: 2px solid var(--md-primary); outline-offset: 1px; }
+
+/* Typed enrollment code on /koppel. */
+.code-field { width: 100%; display: flex; flex-direction: column; gap: 6px; text-align: left; }
+.code-input {
+  width: 100%; box-sizing: border-box; padding: 12px 14px;
+  font: 600 1.25rem/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: .08em; text-transform: uppercase;
+  color: var(--md-on-surface); background: var(--md-surface-container-lowest, #fff);
+  border: 1px solid var(--md-outline); border-radius: var(--radius);
+}
+.code-input:focus { outline: 2px solid var(--md-primary); outline-offset: 1px; }

@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+use super::download::copy_text;
 use super::icons::{Icon, IconKind};
 use crate::client::i18n::LANGUAGE_LOADER;
 use i18n_embed_fl::fl;
@@ -18,11 +19,20 @@ pub fn format_countdown(seconds: u32) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
+/// The address to type the code on: the enrollment link without its token fragment.
+pub fn enroll_address(url: &str) -> &str {
+    url.split('#').next().unwrap_or(url)
+}
+
 #[component]
 pub fn EnrollPanel(
     person_name: String,
     /// Already-rendered SVG markup of the QR code.
     qr_svg: String,
+    /// The same enrollment as a code to type, `XXXX-XXXX-XXXX`.
+    code: String,
+    /// The enrollment link the QR code holds.
+    url: String,
     seconds_left: u32,
     state: EnrollState,
     on_cancel: EventHandler<()>,
@@ -31,16 +41,27 @@ pub fn EnrollPanel(
     #[props(default)]
     own: bool,
 ) -> Element {
+    // The link last copied: a new code shows the copy button again.
+    let mut copied = use_signal(|| None::<String>);
+    let is_copied = copied.read().as_deref() == Some(url.as_str());
+    let address = enroll_address(&url).to_string();
     rsx! {
         section { class: "st-page",
             div { class: "st-card st-enroll",
                 match state {
                     EnrollState::Waiting => rsx! {
-                        div {
-                            class: "st-qr",
-                            role: "img",
-                            aria_label: fl!(LANGUAGE_LOADER, "enroll-qr-label"),
-                            dangerous_inner_html: qr_svg,
+                        div { class: "st-enroll-qr",
+                            div {
+                                class: "st-qr",
+                                role: "img",
+                                aria_label: fl!(LANGUAGE_LOADER, "enroll-qr-label"),
+                                dangerous_inner_html: qr_svg,
+                            }
+                            p { class: "st-sub", {fl!(LANGUAGE_LOADER, "enroll-code-label")} }
+                            p { class: "st-enroll-code", translate: "no", "{code}" }
+                            p { class: "st-sub",
+                                {fl!(LANGUAGE_LOADER, "enroll-code-hint", address = address.as_str())}
+                            }
                         }
                         div { class: "st-enroll-body",
                             h1 { "{person_name}" }
@@ -53,6 +74,23 @@ pub fn EnrollPanel(
                             div { class: "st-inline",
                                 span { class: "st-chip st-chip-brand", role: "timer",
                                     {fl!(LANGUAGE_LOADER, "enroll-countdown", time = format_countdown(seconds_left))}
+                                }
+                                button {
+                                    class: "st-btn st-btn-tonal",
+                                    r#type: "button",
+                                    onclick: move |_| {
+                                        let link = url.clone();
+                                        spawn(async move {
+                                            let ok = copy_text(&link).await;
+                                            copied.set(ok.then_some(link));
+                                        });
+                                    },
+                                    if is_copied {
+                                        Icon { kind: IconKind::Check, size: 18 }
+                                        {fl!(LANGUAGE_LOADER, "enroll-link-copied")}
+                                    } else {
+                                        {fl!(LANGUAGE_LOADER, "enroll-copy-link")}
+                                    }
                                 }
                                 button {
                                     class: "st-btn st-btn-ghost",
@@ -126,6 +164,18 @@ mod tests {
         assert_eq!(format_countdown(0), "00:00");
         assert_eq!(format_countdown(65), "01:05");
         assert_eq!(format_countdown(9), "00:09");
+    }
+
+    #[test]
+    fn address_drops_the_token_fragment() {
+        assert_eq!(
+            enroll_address("https://tijd.example.org/koppel#abc"),
+            "https://tijd.example.org/koppel"
+        );
+        assert_eq!(
+            enroll_address("https://tijd.example.org/koppel"),
+            "https://tijd.example.org/koppel"
+        );
     }
 
     #[test]

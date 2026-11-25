@@ -147,7 +147,7 @@ pub async fn build_router(app: fn() -> dioxus::prelude::Element) -> anyhow::Resu
         .await
         .map_err(|e| anyhow::anyhow!("setup check failed: {e:?}"))?;
     let session_layer = session::layer(pool.clone(), &config).await?;
-    let guard = auth::http::HttpGuard::new(&config);
+    let guard = auth::http::HttpGuard::new(&config).with_audit(pool.clone());
     let state = AppState::new(pool, config, keys, blind)?;
     let router = dioxus::server::router(app)
         .route("/theme.css", axum::routing::get(theme::theme_css))

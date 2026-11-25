@@ -397,3 +397,40 @@ and "OK" skips it.
 - **Staff**: the note shows under the zone flag in the Uren day detail and under the name of a
   flagged start on "Vandaag", decrypted only for staff whose scope covers that person (the same
   checks as the rest of those pages). Not in the payroll export.
+
+## v1.1: typed enrollment code
+
+A device without a usable camera (a laptop) cannot scan the enrollment QR code. Next to the QR code
+the staff screen now shows a short code to type on `/koppel`, and a "Link kopiëren" button for the
+same link.
+
+- **Data model**: `enrollment_token.code_hash` (`bytea`, nullable, unique, 32 bytes):
+  HMAC-SHA256 of the normalised code (with a fixed domain prefix), keyed with the blind-index key
+  (`BLIND_INDEX_KEY_FILE`), so a database dump alone does not allow testing guesses offline.
+  `issue_token` and `peek_code` take that key; staff enrollment and the admin CLI pass the key they
+  already load. A plain SHA-256 was stored in the first version of this change; no data migration is
+  needed (live codes expire within 15 minutes, a stale hash then just never matches, and `NULL` rows
+  stay `NULL`), and the 32-byte `CHECK` holds for the HMAC too. The code is 12 symbols from the
+  setup-code alphabet (`ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, unbiased, 60 bits), shown as
+  `XXXX-XXXX-XXXX`; input is case-insensitive and ignores spaces and dashes. `issue_token` issues it
+  with the token, on the same row, so it shares the token's person, expiry and single use; a newer
+  token invalidates it. The first-admin token from setup has no code (`NULL`).
+- **Flow**: `/koppel` without a fragment asks "Heb je een code?". `POST /api/auth/code/info` returns
+  the same `EnrollmentInfo` as the link, `POST /api/auth/code/register/begin` starts the same
+  registration ceremony, which keeps only the token's hash in the session; the unchanged
+  `register/finish` consumes the token. The audit row `passkey.registered` records how the token was
+  redeemed: changed fields `["enrollment_token", "link"]` or `["enrollment_token", "code"]`. The raw
+  token never reaches the browser that typed the code.
+- **Threat model**: every typed-code attempt is charged up front and refunded only on success, against
+  50 per client address and 1000 for the whole installation per 10 minutes. 60 bits is about
+  1.2 × 10^18 codes: even at the global cap around the clock (about 5 × 10^7 guesses a year) the
+  chance of hitting a live code is about 5 × 10^-11 per year per live code, so the caps exist to stop
+  automated guessing, not to make it hopeless. They are wide on purpose: the global cap stands on
+  its own (all clients without a known address, or behind a proxy without trusted headers, share
+  it), and a tight one let anyone disable typed codes for everybody with a few wrong guesses a
+  minute. A flood that does run the global bucket dry blocks typed codes for a while, never the QR
+  link, and is recorded once per window as an actor-less `audit_log` row
+  `enrollment_code.rate_limited` (no client data). Behind a reverse proxy that overwrites
+  `X-Forwarded-For`, set `TRUST_PROXY_HEADERS=true`, or every client shares one per-client bucket of
+  50. Every failure is one generic `token-invalid`, and the database holds only a keyed hash of the
+  short-lived code.

@@ -73,6 +73,8 @@ Run the tests for what you touched; the full suite runs in CI.
 - `time_event` is **append-only**. Corrections are new rows referencing the original, with a reason.
 - Every manager/admin mutation writes an `audit_log` row (ids only, no plaintext personal data).
 - Enrollment tokens: random 256-bit, stored hashed, single use, short-lived, bound to one person.
+  The typed 12-symbol code is a second, rate-limited 60-bit credential on the same row (same
+  person, expiry and single use), stored only as an HMAC keyed with the blind-index key.
 - The server timestamp is authoritative; the client timestamp is informational.
 - No secrets, real names, real addresses or real coordinates in code, tests or fixtures. Use
   obviously fake data (`example.org`, fictional names, fictional sites).

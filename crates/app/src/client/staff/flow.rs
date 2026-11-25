@@ -254,6 +254,8 @@ pub fn EnrollFlow(
         EnrollPanel {
             person_name,
             qr_svg: dto.qr_svg,
+            code: dto.code,
+            url: dto.url,
             seconds_left: seconds_left(dto.expires_at, now()),
             state: state(),
             on_cancel: move |_| on_close.call(()),

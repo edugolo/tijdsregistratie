@@ -146,6 +146,7 @@ pub mod http {
     use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
     use axum::middleware::{self, Next};
     use axum::response::{IntoResponse, Response};
+    use sqlx::PgPool;
     use tower_sessions::Session;
 
     use crate::server::config::AppConfig;
@@ -177,6 +178,20 @@ pub mod http {
     ];
     const FAILURES_PER_WINDOW: u32 = 10;
     const FAILURE_WINDOW: Duration = Duration::from_secs(600);
+    /// Typed enrollment codes are shorter than tokens, so every attempt takes a token up front
+    /// (also under a burst of parallel requests) and only a successful one gets it back.
+    ///
+    /// Guessing math: a code has 60 bits (about 1.2e18 values) and lives 15 minutes. At the
+    /// global cap around the clock (1000 per 10 minutes, about 5.3e7 a year) the chance of ever
+    /// hitting a live code is about 5e-11 per year per live code. The caps only have to stop
+    /// automated guessing, so they are wide: the global one stands on its own (all clients
+    /// without a known address, or behind a proxy without trusted headers, share it) and a
+    /// tight one would let anyone disable typed codes for everybody with a few wrong guesses.
+    const CODE_PATHS: [&str; 2] = ["/api/auth/code/info", "/api/auth/code/register/begin"];
+    const CODE_FAILURES_PER_CLIENT: u32 = 50;
+    const CODE_FAILURES_GLOBAL: u32 = 1000;
+    const CODE_FAILURE_WINDOW: Duration = Duration::from_secs(600);
+    const CODE_GLOBAL_KEY: &str = "enrollment-code";
     /// Clocking in or out per authenticated person (not per address).
     const CLOCK_PATH: &str = "/api/clock";
     const CLOCK_PER_MINUTE: u32 = 20;
@@ -270,6 +285,15 @@ pub mod http {
                 .is_none_or(|(tokens, last)| self.refilled(*tokens, *last, now) >= 1.0)
         }
 
+        /// Gives back one token taken from `key`, never above the capacity.
+        pub fn refund(&self, key: &str, now: Instant) {
+            let mut buckets = self.lock();
+            if let Some((tokens, last)) = buckets.map.get_mut(key) {
+                *tokens = (self.refilled(*tokens, *last, now) + 1.0).min(self.capacity);
+                *last = now;
+            }
+        }
+
         /// Takes one token for `key` at time `now`; false when the bucket is empty.
         pub fn allow(&self, key: &str, now: Instant) -> bool {
             let mut buckets = self.lock();
@@ -349,8 +373,27 @@ pub mod http {
         failures: Arc<RateLimiter>,
         clock: Arc<RateLimiter>,
         global: Arc<RateLimiter>,
+        code_per_client: Arc<RateLimiter>,
+        code_global: Arc<RateLimiter>,
+        /// When the global code bucket last ran dry and that was recorded.
+        code_dry_reported: Arc<Mutex<Option<Instant>>>,
+        /// Where a dry global code bucket is recorded; `None` only logs it.
+        audit: Option<PgPool>,
         warned_no_peer: Arc<AtomicBool>,
     }
+
+    /// Outcome of taking a typed-code attempt.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CodeAttempt {
+        Allowed,
+        /// The client's own budget is used up.
+        ClientLimited,
+        /// The installation-wide budget is used up.
+        GlobalLimited,
+    }
+
+    /// Audit action of a dry global code bucket (actor-less, no client data).
+    const CODE_DRY_ACTION: &str = "enrollment_code.rate_limited";
 
     impl HttpGuard {
         pub fn new(config: &AppConfig) -> Self {
@@ -368,8 +411,24 @@ pub mod http {
                 )),
                 clock: Arc::new(RateLimiter::new(CLOCK_PER_MINUTE)),
                 global: Arc::new(RateLimiter::new(GLOBAL_CAP_PER_MINUTE)),
+                code_per_client: Arc::new(RateLimiter::with_window(
+                    CODE_FAILURES_PER_CLIENT,
+                    CODE_FAILURE_WINDOW,
+                )),
+                code_global: Arc::new(RateLimiter::with_window(
+                    CODE_FAILURES_GLOBAL,
+                    CODE_FAILURE_WINDOW,
+                )),
+                code_dry_reported: Arc::new(Mutex::new(None)),
+                audit: None,
                 warned_no_peer: Arc::new(AtomicBool::new(false)),
             }
+        }
+
+        /// Records a dry global code bucket in `audit_log` through `pool`.
+        pub fn with_audit(mut self, pool: PgPool) -> Self {
+            self.audit = Some(pool);
+            self
         }
 
         /// Rate limit key of the request's client, `None` when no address is known.
@@ -434,6 +493,72 @@ pub mod http {
         }
     }
 
+    impl HttpGuard {
+        /// Takes one typed-code attempt from the client's budget (when the client is known)
+        /// and from the global one; nothing is taken when either is used up.
+        fn take_code_attempt(&self, key: Option<&str>, now: Instant) -> CodeAttempt {
+            if let Some(key) = key
+                && !self.code_per_client.allow(key, now)
+            {
+                return CodeAttempt::ClientLimited;
+            }
+            if self.code_global.allow(CODE_GLOBAL_KEY, now) {
+                return CodeAttempt::Allowed;
+            }
+            if let Some(key) = key {
+                self.code_per_client.refund(key, now);
+            }
+            CodeAttempt::GlobalLimited
+        }
+
+        /// Whether a dry global code bucket at `now` is the first one of its window, and so
+        /// should be recorded; later ones in the same window are not.
+        fn first_dry_in_window(&self, now: Instant) -> bool {
+            let mut last = self
+                .code_dry_reported
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if last.is_some_and(|t| now.saturating_duration_since(t) < CODE_FAILURE_WINDOW) {
+                return false;
+            }
+            *last = Some(now);
+            true
+        }
+
+        /// Records, once per window, that the global code bucket ran dry: a log line and an
+        /// actor-less audit row, both without client data.
+        async fn report_code_bucket_dry(&self, now: Instant) {
+            if !self.first_dry_in_window(now) {
+                return;
+            }
+            tracing::warn!(
+                "enrollment code attempts exhausted for the whole installation; typed codes are \
+                 refused until the budget refills (QR links keep working)"
+            );
+            if let Some(pool) = &self.audit
+                && let Err(e) = store::repo::audit::record(
+                    pool,
+                    None,
+                    CODE_DRY_ACTION,
+                    "enrollment_token",
+                    None,
+                    &[],
+                )
+                .await
+            {
+                tracing::error!(error = %e, "recording the exhausted enrollment code budget failed");
+            }
+        }
+
+        /// A successful attempt does not count against the guessing limits.
+        fn refund_code_attempt(&self, key: Option<&str>, now: Instant) {
+            if let Some(key) = key {
+                self.code_per_client.refund(key, now);
+            }
+            self.code_global.refund(CODE_GLOBAL_KEY, now);
+        }
+    }
+
     /// Wraps the router with the guards. Outermost first: headers, cross-site check, rate limit.
     pub fn protect(router: Router, guard: HttpGuard) -> Router {
         router
@@ -475,7 +600,24 @@ pub mod http {
             tracing::warn!(class = class.name(), "rate limit hit");
             return too_many_requests();
         }
+        let code = CODE_PATHS.contains(&path.as_str());
+        if code {
+            match guard.take_code_attempt(key.as_deref(), now) {
+                CodeAttempt::Allowed => {}
+                CodeAttempt::ClientLimited => {
+                    tracing::warn!("too many failed enrollment code attempts from a client");
+                    return too_many_requests();
+                }
+                CodeAttempt::GlobalLimited => {
+                    guard.report_code_bucket_dry(now).await;
+                    return too_many_requests();
+                }
+            }
+        }
         let res = next.run(req).await;
+        if code && res.status().is_success() {
+            guard.refund_code_attempt(key.as_deref(), Instant::now());
+        }
         if finish
             && matches!(
                 res.status(),
@@ -652,7 +794,9 @@ pub mod http {
                     .route("/api/setup/complete", post(|| async { "ok" }))
                     .route("/api/auth/login/finish", post(finish))
                     .route("/api/auth/register/finish", post(finish))
-                    .route("/api/auth/reauth/finish", post(finish)),
+                    .route("/api/auth/reauth/finish", post(finish))
+                    .route(CODE_PATHS[0], post(finish))
+                    .route(CODE_PATHS[1], post(finish)),
                 guard,
             )
         }
@@ -1004,6 +1148,212 @@ pub mod http {
             let other = [("x-forwarded-for", "203.0.113.8"), ("x-test-status", "200")];
             let r = send(&app, "POST", "/api/auth/login/finish", &other).await;
             assert_eq!(r.status(), StatusCode::OK);
+        }
+
+        /// A typed-code attempt from `peer` that the handler answers with `status`.
+        async fn code_attempt(app: &Router, peer: &str, path: &str, status: &str) -> StatusCode {
+            send_from(app, peer, path, &[("x-test-status", status)]).await
+        }
+
+        #[tokio::test]
+        async fn a_trickle_of_wrong_codes_does_not_lock_out_typed_codes() {
+            let app = app(guard("https://tijd.example.org", false, 1000));
+            // A few wrong guesses a minute for half an hour, spread over addresses.
+            for i in 0..100u32 {
+                let peer = format!("198.51.100.{}", i % 50 + 1);
+                assert_eq!(
+                    code_attempt(&app, &peer, CODE_PATHS[0], "400").await,
+                    StatusCode::BAD_REQUEST
+                );
+            }
+            assert_eq!(
+                code_attempt(&app, "203.0.113.7", CODE_PATHS[1], "200").await,
+                StatusCode::OK
+            );
+            // One shared address (a proxy without trusted headers) also has room for typos.
+            for _ in 0..20 {
+                assert_eq!(
+                    code_attempt(&app, "192.0.2.1", CODE_PATHS[0], "400").await,
+                    StatusCode::BAD_REQUEST
+                );
+            }
+            assert_eq!(
+                code_attempt(&app, "192.0.2.1", CODE_PATHS[1], "200").await,
+                StatusCode::OK
+            );
+        }
+
+        #[tokio::test]
+        async fn failed_code_attempts_are_limited_per_client() {
+            let app = app(guard("https://tijd.example.org", false, 1000));
+            for i in 0..CODE_FAILURES_PER_CLIENT {
+                // Both code endpoints share the budget.
+                let path = CODE_PATHS[i as usize % 2];
+                assert_eq!(
+                    code_attempt(&app, "198.51.100.1", path, "400").await,
+                    StatusCode::BAD_REQUEST
+                );
+            }
+            // Blocked before the code is even looked at, also when it would be right.
+            for path in CODE_PATHS {
+                assert_eq!(
+                    code_attempt(&app, "198.51.100.1", path, "200").await,
+                    StatusCode::TOO_MANY_REQUESTS
+                );
+            }
+            // Another client is not locked out.
+            assert_eq!(
+                code_attempt(&app, "198.51.100.2", CODE_PATHS[0], "200").await,
+                StatusCode::OK
+            );
+        }
+
+        #[tokio::test]
+        async fn failed_code_attempts_are_capped_globally_on_their_own() {
+            let app = app(guard("https://tijd.example.org", false, 1000));
+            // Many addresses, each far below its own limit.
+            for i in 0..CODE_FAILURES_GLOBAL {
+                let peer = format!("198.51.{}.{}", i / 200, i % 200 + 1);
+                assert_eq!(
+                    code_attempt(&app, &peer, CODE_PATHS[0], "400").await,
+                    StatusCode::BAD_REQUEST
+                );
+            }
+            assert_eq!(
+                code_attempt(&app, "203.0.113.99", CODE_PATHS[1], "200").await,
+                StatusCode::TOO_MANY_REQUESTS
+            );
+            // Without a client address only the global cap applies, and it is used up.
+            let r = send(&app, "POST", CODE_PATHS[0], &[("x-test-status", "200")]).await;
+            assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        #[test]
+        fn without_client_address_failed_codes_still_hit_the_global_cap() {
+            let g = guard("https://tijd.example.org", false, 1000);
+            let now = Instant::now();
+            for _ in 0..CODE_FAILURES_GLOBAL {
+                assert_eq!(g.take_code_attempt(None, now), CodeAttempt::Allowed);
+            }
+            assert_eq!(g.take_code_attempt(None, now), CodeAttempt::GlobalLimited);
+            // A known client is refused too, without its own budget being charged.
+            assert_eq!(
+                g.take_code_attempt(Some("198.51.100.1"), now),
+                CodeAttempt::GlobalLimited
+            );
+            assert!(g.code_per_client.has_capacity("198.51.100.1", now));
+        }
+
+        #[tokio::test]
+        async fn successful_code_redemptions_do_not_use_up_the_limits() {
+            let app = app(guard("https://tijd.example.org", false, 1000));
+            for _ in 0..CODE_FAILURES_PER_CLIENT * 2 {
+                for path in CODE_PATHS {
+                    assert_eq!(
+                        code_attempt(&app, "198.51.100.1", path, "200").await,
+                        StatusCode::OK
+                    );
+                }
+            }
+            assert_eq!(
+                code_attempt(&app, "198.51.100.1", CODE_PATHS[0], "400").await,
+                StatusCode::BAD_REQUEST
+            );
+        }
+
+        #[test]
+        fn successful_code_redemptions_give_back_the_global_budget() {
+            let g = guard("https://tijd.example.org", false, 1000);
+            let now = Instant::now();
+            for _ in 0..CODE_FAILURES_GLOBAL * 2 {
+                assert_eq!(g.take_code_attempt(None, now), CodeAttempt::Allowed);
+                g.refund_code_attempt(None, now);
+            }
+        }
+
+        #[test]
+        fn a_dry_global_code_bucket_is_reported_once_per_window() {
+            let g = guard("https://tijd.example.org", false, 1000);
+            let t0 = Instant::now();
+            assert!(g.first_dry_in_window(t0));
+            assert!(!g.first_dry_in_window(t0));
+            assert!(!g.first_dry_in_window(t0 + CODE_FAILURE_WINDOW - Duration::from_secs(1)));
+            assert!(g.first_dry_in_window(t0 + CODE_FAILURE_WINDOW));
+            assert!(!g.first_dry_in_window(t0 + CODE_FAILURE_WINDOW));
+        }
+
+        #[sqlx::test(migrations = "../../migrations")]
+        async fn a_dry_global_code_bucket_writes_one_actorless_audit_row(pool: PgPool) {
+            let app = app(guard("https://tijd.example.org", false, 1000).with_audit(pool.clone()));
+            for i in 0..CODE_FAILURES_GLOBAL {
+                let peer = format!("198.51.{}.{}", i / 200, i % 200 + 1);
+                assert_eq!(
+                    code_attempt(&app, &peer, CODE_PATHS[0], "400").await,
+                    StatusCode::BAD_REQUEST
+                );
+            }
+            /// actor_id, action, entity, entity_id, changed_fields
+            type AuditRow = (
+                Option<uuid::Uuid>,
+                String,
+                String,
+                Option<uuid::Uuid>,
+                Vec<String>,
+            );
+            let rows = || async {
+                let rows: Vec<AuditRow> = sqlx::query_as(
+                    "SELECT actor_id, action, entity, entity_id, changed_fields FROM audit_log",
+                )
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+                rows
+            };
+            assert!(
+                rows().await.is_empty(),
+                "nothing recorded before the bucket is dry"
+            );
+            for peer in ["203.0.113.1", "203.0.113.2", "203.0.113.3"] {
+                assert_eq!(
+                    code_attempt(&app, peer, CODE_PATHS[1], "200").await,
+                    StatusCode::TOO_MANY_REQUESTS
+                );
+            }
+            assert_eq!(
+                rows().await,
+                vec![(
+                    None,
+                    CODE_DRY_ACTION.to_string(),
+                    "enrollment_token".to_string(),
+                    None,
+                    vec![],
+                )]
+            );
+        }
+
+        #[test]
+        fn code_paths_are_the_routes_of_the_code_server_functions() {
+            let api = include_str!("../api/auth.rs");
+            for path in CODE_PATHS {
+                assert!(api.contains(&format!("#[post(\"{path}\")]")), "{path}");
+            }
+        }
+
+        #[test]
+        fn refund_returns_a_taken_token_but_never_exceeds_capacity() {
+            let l = RateLimiter::with_window(2, Duration::from_secs(600));
+            let t0 = Instant::now();
+            l.refund("a", t0);
+            assert!(l.allow("a", t0) && l.allow("a", t0));
+            assert!(!l.allow("a", t0));
+            l.refund("a", t0);
+            assert!(l.allow("a", t0));
+            assert!(!l.allow("a", t0));
+            l.refund("a", t0);
+            l.refund("a", t0);
+            l.refund("a", t0);
+            assert!(l.allow("a", t0) && l.allow("a", t0));
+            assert!(!l.allow("a", t0));
         }
 
         #[test]
