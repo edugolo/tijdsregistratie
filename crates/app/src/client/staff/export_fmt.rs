@@ -132,6 +132,50 @@ pub fn basis_choice(contract: bool) -> TimeBasisDto {
     }
 }
 
+/// How the last preview relates to the current choices.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PreviewState {
+    /// No preview was made yet.
+    Missing,
+    /// A preview exists, but the choices changed since.
+    Stale,
+    /// A preview of exactly the current choices.
+    Fresh { row_count: u32, has_problems: bool },
+}
+
+/// Why Downloaden is disabled, when the person needs to be told.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DownloadHint {
+    /// No preview of these choices yet.
+    NeedPreview,
+    /// The preview holds no validated hours.
+    NoRows,
+}
+
+/// Whether Downloaden can be pressed and, if not, why.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DownloadGate {
+    pub enabled: bool,
+    /// `None` while working and for problems: those show their own text.
+    pub hint: Option<DownloadHint>,
+}
+
+/// Downloaden needs a fresh preview with rows and without problems, and nothing running.
+pub fn download_gate(preview: PreviewState, busy: bool) -> DownloadGate {
+    let (enabled, hint) = match preview {
+        PreviewState::Missing | PreviewState::Stale => (false, Some(DownloadHint::NeedPreview)),
+        PreviewState::Fresh {
+            has_problems: true, ..
+        } => (false, None),
+        PreviewState::Fresh { row_count: 0, .. } => (false, Some(DownloadHint::NoRows)),
+        PreviewState::Fresh { .. } => (true, None),
+    };
+    DownloadGate {
+        enabled: enabled && !busy,
+        hint: if busy { None } else { hint },
+    }
+}
+
 /// Expiry choices of a new API key.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Expiry {
@@ -203,6 +247,50 @@ mod tests {
 
     fn id(n: u128) -> Uuid {
         Uuid::from_u128(n)
+    }
+
+    fn fresh(row_count: u32, has_problems: bool) -> PreviewState {
+        PreviewState::Fresh {
+            row_count,
+            has_problems,
+        }
+    }
+
+    fn gate(enabled: bool, hint: Option<DownloadHint>) -> DownloadGate {
+        DownloadGate { enabled, hint }
+    }
+
+    #[test]
+    fn download_gate_without_preview_asks_for_one() {
+        let want = gate(false, Some(DownloadHint::NeedPreview));
+        assert_eq!(download_gate(PreviewState::Missing, false), want);
+        assert_eq!(download_gate(PreviewState::Stale, false), want);
+    }
+
+    #[test]
+    fn download_gate_with_problems_has_no_extra_hint() {
+        assert_eq!(download_gate(fresh(5, true), false), gate(false, None));
+        assert_eq!(download_gate(fresh(0, true), false), gate(false, None));
+    }
+
+    #[test]
+    fn download_gate_with_zero_rows_says_so() {
+        assert_eq!(
+            download_gate(fresh(0, false), false),
+            gate(false, Some(DownloadHint::NoRows))
+        );
+    }
+
+    #[test]
+    fn download_gate_is_open_for_a_clean_preview_with_rows() {
+        assert_eq!(download_gate(fresh(42, false), false), gate(true, None));
+    }
+
+    #[test]
+    fn download_gate_is_closed_without_hint_while_busy() {
+        assert_eq!(download_gate(fresh(42, false), true), gate(false, None));
+        assert_eq!(download_gate(PreviewState::Stale, true), gate(false, None));
+        assert_eq!(download_gate(fresh(0, false), true), gate(false, None));
     }
 
     #[test]

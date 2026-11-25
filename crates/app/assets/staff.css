@@ -164,6 +164,7 @@
   background: var(--st-primary); color: var(--st-on-primary);
   font: inherit; font-size: 14px; font-weight: 600; text-decoration: none; cursor: pointer;
 }
+.st-btn:disabled { opacity: .5; cursor: default; }
 .st-btn-tonal { background: var(--st-secondary-container); color: var(--st-on-secondary-container); }
 .st-btn-ghost, .st-btn-text { background: transparent; color: var(--st-primary); padding: 0 12px; }
 .st-btn-ghost { border: 1px solid var(--st-outline); padding: 0 24px; }

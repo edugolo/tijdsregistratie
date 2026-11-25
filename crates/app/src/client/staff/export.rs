@@ -9,8 +9,8 @@ use uuid::Uuid;
 
 use super::download::save_file;
 use super::export_fmt::{
-    ProblemView, Refusal, basis_choice, blocked_problems, export_range_valid, problem_views,
-    refusal, safe_filename, short_checksum,
+    DownloadHint, PreviewState, ProblemView, Refusal, basis_choice, blocked_problems,
+    download_gate, export_range_valid, problem_views, refusal, safe_filename, short_checksum,
 };
 use super::field::{Field, error_id};
 use super::flow::{ErrorNotice, report_error};
@@ -64,6 +64,22 @@ fn date_input(date: NaiveDate) -> String {
     date.format("%Y-%m-%d").to_string()
 }
 
+/// The button that is working right now.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Working {
+    Preview,
+    Download,
+}
+
+/// A finished download, tied to the selection it was made for.
+#[derive(Clone)]
+struct Done {
+    selection: Selection,
+    filename: String,
+    row_count: u32,
+    checksum: String,
+}
+
 #[component]
 pub fn ExportTab(
     tabs: Element,
@@ -81,8 +97,8 @@ pub fn ExportTab(
     let mut sites = use_signal(Vec::<Uuid>::new);
     let mut contract = use_signal(|| false);
     let mut preview = use_signal(|| None::<(Selection, ExportPreviewDto)>);
-    let mut busy = use_signal(|| false);
-    let mut done = use_signal(|| None::<String>);
+    let mut busy = use_signal(|| None::<Working>);
+    let mut done = use_signal(|| None::<Done>);
     let message = use_signal(|| None::<String>);
 
     let available: Vec<_> = profiles
@@ -115,14 +131,27 @@ pub fn ExportTab(
         .read()
         .clone()
         .filter(|(chosen_then, _)| Some(chosen_then) == selection.as_ref());
-    let stale = preview.read().is_some() && fresh.is_none();
-    let can_download = fresh.as_ref().is_some_and(|(_, p)| p.problems.is_empty());
+    let preview_state = match (&fresh, preview.read().is_some()) {
+        (Some((_, p)), _) => PreviewState::Fresh {
+            row_count: p.row_count,
+            has_problems: !p.problems.is_empty(),
+        },
+        (None, true) => PreviewState::Stale,
+        (None, false) => PreviewState::Missing,
+    };
+    let gate = download_gate(preview_state, busy().is_some());
+    let row_count = fresh.as_ref().map_or(0, |(_, p)| p.row_count);
+    // The success notice belongs to the exact selection it was made for.
+    let finished = done
+        .read()
+        .clone()
+        .filter(|d| Some(&d.selection) == selection.as_ref());
 
     let make_preview = {
         let selection = selection.clone();
         move |_| {
             let Some(sel) = selection.clone() else { return };
-            busy.set(true);
+            busy.set(Some(Working::Preview));
             done.set(None);
             let mut message = message;
             message.set(None);
@@ -142,7 +171,7 @@ pub fn ExportTab(
                         report_export_error(&e, message);
                     }
                 }
-                busy.set(false);
+                busy.set(None);
             });
         }
     };
@@ -150,7 +179,7 @@ pub fn ExportTab(
         let selection = selection.clone();
         move |_| {
             let Some(sel) = selection.clone() else { return };
-            busy.set(true);
+            busy.set(Some(Working::Download));
             done.set(None);
             let mut message = message;
             message.set(None);
@@ -165,14 +194,16 @@ pub fn ExportTab(
                 .await;
                 match answer {
                     Ok(file) => {
-                        let saved = save_file(
-                            &safe_filename(&file.filename),
-                            &file.content_type,
-                            &file.bytes_base64,
-                        );
+                        let filename = safe_filename(&file.filename);
+                        let saved = save_file(&filename, &file.content_type, &file.bytes_base64);
                         match saved {
                             Ok(()) => {
-                                done.set(Some(short_checksum(&file.sha256)));
+                                done.set(Some(Done {
+                                    selection: sel,
+                                    filename,
+                                    row_count,
+                                    checksum: short_checksum(&file.sha256),
+                                }));
                                 history.reload();
                             }
                             Err(()) => {
@@ -195,7 +226,7 @@ pub fn ExportTab(
                         None => report_export_error(&e, message),
                     },
                 }
-                busy.set(false);
+                busy.set(None);
             });
         }
     };
@@ -330,30 +361,48 @@ pub fn ExportTab(
                         button {
                             class: "st-btn st-btn-tonal",
                             r#type: "button",
-                            disabled: busy() || selection.is_none(),
+                            disabled: busy().is_some() || selection.is_none(),
                             onclick: make_preview,
-                            {fl!(LANGUAGE_LOADER, "export-preview")}
+                            if busy() == Some(Working::Preview) {
+                                {fl!(LANGUAGE_LOADER, "export-busy")}
+                            } else {
+                                {fl!(LANGUAGE_LOADER, "export-preview")}
+                            }
                         }
                         button {
                             class: "st-btn",
                             r#type: "button",
-                            disabled: busy() || !can_download,
+                            disabled: !gate.enabled,
                             onclick: download,
-                            {fl!(LANGUAGE_LOADER, "export-download")}
-                        }
-                        if busy() {
-                            span { class: "st-sub", role: "status", {fl!(LANGUAGE_LOADER, "export-busy")} }
+                            if busy() == Some(Working::Download) {
+                                {fl!(LANGUAGE_LOADER, "export-busy")}
+                            } else {
+                                {fl!(LANGUAGE_LOADER, "export-download")}
+                            }
                         }
                     }
-                    if let Some(checksum) = done() {
+                    if let Some(hint) = gate.hint {
+                        p { class: "st-sub", role: "status",
+                            {match hint {
+                                DownloadHint::NeedPreview => fl!(LANGUAGE_LOADER, "export-download-need-preview"),
+                                DownloadHint::NoRows => fl!(LANGUAGE_LOADER, "export-download-no-rows"),
+                            }}
+                        }
+                    }
+                    if let Some(finished) = finished {
                         div { class: "st-notice st-notice-ok", role: "status",
                             Icon { kind: IconKind::Check, size: 20 }
-                            p { {fl!(LANGUAGE_LOADER, "export-done", checksum = checksum)} }
+                            p {
+                                {fl!(
+                                    LANGUAGE_LOADER,
+                                    "export-done",
+                                    filename = finished.filename,
+                                    count = finished.row_count,
+                                    checksum = finished.checksum
+                                )}
+                            }
                         }
                     }
-                }
-                if stale {
-                    p { class: "st-sub", role: "status", {fl!(LANGUAGE_LOADER, "export-preview-stale")} }
                 }
                 if let Some((_, shown)) = fresh {
                     PreviewView { preview: shown, on_open_hours }

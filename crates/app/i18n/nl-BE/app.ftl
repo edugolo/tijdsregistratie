@@ -443,14 +443,13 @@ export-basis-registered = Geregistreerde tijd
 export-basis-contract = Contracttijd
 export-preview = Voorbeeld
 export-download = Downloaden
-export-busy = Even geduld
+export-busy = Even geduld…
 export-preview-count = { $count ->
     [one] 1 rij
     *[other] { $count } rijen
 }
 export-preview-shown = Hieronder de eerste { $shown } van { $total }.
 export-preview-empty = Er zijn geen rijen in deze periode.
-export-preview-stale = Je keuzes zijn veranderd. Maak opnieuw een voorbeeld.
 export-problems-title = Dit moet eerst nog in orde
 export-problem-unvalidated = { $site }: de uren van { $from } tot { $to } zijn nog niet gevalideerd.
 export-problem-open-hours = Naar de uren
@@ -459,7 +458,10 @@ export-problem-unencodable = Bij deze mensen staat een teken dat het bestandsfor
 export-excluded-today = Dagen vanaf vandaag worden niet meegenomen.
 export-err-busy = Er worden al exports gemaakt. Probeer het zo opnieuw.
 export-err-too-large = Deze export is te groot. Kies een kortere periode of minder scholen.
-export-done = Bestand gemaakt · controlegetal { $checksum }
+export-done = “{ $filename }” gedownload · { $count ->
+    [one] 1 rij
+    *[other] { $count } rijen
+} · controlegetal { $checksum }
 export-err-download = Het bestand kon niet bewaard worden. Probeer het opnieuw.
 export-history-title = Eerdere exports
 export-history-empty = Je hebt nog geen exports gemaakt.
@@ -561,3 +563,7 @@ profiles-copy-name = { $name } (kopie)
 reauth-prompt = Bevestig even dat jij het bent.
 reauth-confirm = Bevestigen
 reauth-failed = Bevestigen is niet gelukt.
+
+# --- export feedback ---
+export-download-need-preview = Maak eerst een voorbeeld van deze keuzes.
+export-download-no-rows = Er zijn geen gevalideerde uren in deze periode.
